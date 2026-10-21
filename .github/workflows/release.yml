@@ -18,6 +18,11 @@ on:
   push:
     tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      macos_smoke_only:
+        description: 'Only smoke-test macOS bundle, signature and DMG packaging'
+        type: boolean
+        default: false
 
 concurrency:
   group: release-${{ github.ref }}-${{ github.event_name == 'workflow_dispatch' && github.sha || 'publish' }}
@@ -35,9 +40,12 @@ jobs:
         run: |
           python3 scripts/prepare-release.py --check-version
           python3 -m unittest discover -s scripts -p 'test_release_packaging.py'
-          bash -n scripts/package-macos.sh scripts/package-linux.sh
+          for script in scripts/package-macos.sh scripts/package-linux.sh scripts/test-macos-packaging.sh; do
+            bash -n "$script"
+          done
 
   linux:
+    if: ${{ !inputs.macos_smoke_only }}
     needs: checks
     strategy:
       fail-fast: false
@@ -120,8 +128,10 @@ jobs:
         with:
           key: release-macos-${{ matrix.arch }}
           cache-on-failure: true
+          cache-workspace-crates: true
+        if: ${{ !inputs.macos_smoke_only }}
       - name: import Developer ID certificate
-        if: env.MACOS_CERT_P12 != ''
+        if: ${{ !inputs.macos_smoke_only && env.MACOS_CERT_P12 != '' }}
         run: |
           keychain="$RUNNER_TEMP/release.keychain-db"
           pass="$(openssl rand -hex 16)"
@@ -141,7 +151,7 @@ jobs:
           [ -n "$identity" ] || { echo "p12 contains no Developer ID Application identity"; exit 1; }
           echo "CODESIGN_IDENTITY=$identity" >>"$GITHUB_ENV"
       - name: notary credentials
-        if: env.AC_API_KEY_P8 != ''
+        if: ${{ !inputs.macos_smoke_only && env.AC_API_KEY_P8 != '' }}
         run: |
           printf '%s' "$AC_API_KEY_P8" >"$RUNNER_TEMP/ac_api_key.p8"
           {
@@ -149,9 +159,13 @@ jobs:
             echo "NOTARY_KEY_ID=$AC_API_KEY_ID"
             echo "NOTARY_ISSUER_ID=$AC_API_ISSUER_ID"
           } >>"$GITHUB_ENV"
+      - name: Smoke-test bundle, signature and mounted DMG
+        run: bash scripts/test-macos-packaging.sh
       - name: package dmg
+        if: ${{ !inputs.macos_smoke_only }}
         run: scripts/package-macos.sh
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: ${{ !inputs.macos_smoke_only }}
         with:
           name: macos-${{ matrix.arch }}
           path: |
@@ -160,6 +174,7 @@ jobs:
           if-no-files-found: error
 
   windows:
+    if: ${{ !inputs.macos_smoke_only }}
     needs: checks
     runs-on: windows-2022
     timeout-minutes: 90

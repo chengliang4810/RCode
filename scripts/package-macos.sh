@@ -31,8 +31,16 @@ DMG="$OUT_DIR/rcode-$VERSION-macos-$ARCH.dmg"
 APP_TARBALL="$OUT_DIR/rcode-$VERSION-macos-$ARCH-app.tar.gz"
 
 cd "$ROOT"
-cargo build --release --locked -p rcode --target "$TARGET"
-BIN="$ROOT/target/$TARGET/release/rcode"
+mkdir -p "$OUT_DIR"
+# codesign's AMFI parser is stricter than a general XML parser. Always give
+# it Apple's canonical XML rather than a source file with CRLF or comments.
+ENTITLEMENTS="$OUT_DIR/RCode.entitlements"
+plutil -convert xml1 -o "$ENTITLEMENTS" "$ROOT/dist/macos/RCode.entitlements"
+plutil -lint "$ENTITLEMENTS"
+BIN="${RCODE_PACKAGE_BIN:-$ROOT/target/$TARGET/release/rcode}"
+if [[ -z "${RCODE_PACKAGE_BIN:-}" ]]; then
+  cargo build --release --locked -p rcode --target "$TARGET"
+fi
 [[ "$(lipo -archs "$BIN")" == "$ARCH" ]] || { echo "Incorrect Mach-O architecture" >&2; exit 1; }
 [[ "$("$BIN" --version)" == "rcode $VERSION" ]] || { echo "Incorrect executable version" >&2; exit 1; }
 
@@ -65,11 +73,11 @@ rm -rf "$ICONSET"
 if [[ -n "${CODESIGN_IDENTITY:-}" ]]; then
   # Hardened runtime + secure timestamp are both notarization requirements.
   # (No --deep: Apple deprecated it; the bundle is a single Mach-O anyway.)
-  codesign --entitlements "$ROOT/dist/macos/RCode.entitlements" --force --options runtime --timestamp --sign "$CODESIGN_IDENTITY" "$APP"
+  codesign --entitlements "$ENTITLEMENTS" --force --options runtime --timestamp --sign "$CODESIGN_IDENTITY" "$APP"
 else
   # Ad-hoc signature so the app launches on Apple silicon (Gatekeeper still
   # requires right-click → Open on first launch without notarization).
-  codesign --deep --force --entitlements "$ROOT/dist/macos/RCode.entitlements" --sign - "$APP"
+  codesign --deep --force --entitlements "$ENTITLEMENTS" --sign - "$APP"
 fi
 
 codesign --verify --deep --strict "$APP"
