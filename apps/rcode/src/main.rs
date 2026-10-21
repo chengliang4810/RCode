@@ -211,7 +211,7 @@ fn main() -> anyhow::Result<()> {
         }
         #[cfg(target_os = "linux")]
         Some(Command::Appshot) => {
-            rcode_ui::appshots::request_running_appshot(&engine_config_from_env().data_dir)
+            rcode_ui::appshots::request_running_appshot(engine_config_from_env().roots.data())
                 .map_err(anyhow::Error::msg)
         }
         Some(Command::Update { check }) => {

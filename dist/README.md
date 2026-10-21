@@ -34,7 +34,7 @@ Builds the release binary, assembles `RCode.app` (Info.plist + icns), ad-hoc
 signs it (set `CODESIGN_IDENTITY` for a real Developer ID), and wraps it in a
 dmg. The auto-update tarball retains an internal `RCode.app` path so older
 installed builds can update into RCode. The release workflow builds Intel
-(`macos-15-intel`, `x86_64`) and Apple silicon (`macos-15`, `arm64`) separately,
+(`macos-15-intel`, `x86_64`) and Apple silicon (`macos-26`, `arm64`) separately,
 checks each binary's architecture and version, verifies its signature and dmg,
 and publishes both dmg files and app tarballs. The manual steps it automates, for reference
 (run on a macOS host — gpui needs Metal; no cross-build from Linux):
