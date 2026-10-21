@@ -480,6 +480,7 @@ fn open_main_window(
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 fn start_appshot_service(activation_dir: std::path::PathBuf, cx: &mut App) {
+    use futures::FutureExt as _;
     let mut shortcuts = appshots::start_global_shortcut(activation_dir);
     cx.spawn(async move |cx| {
         while shortcuts.next().await.is_some() {

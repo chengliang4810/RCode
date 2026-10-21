@@ -23,6 +23,8 @@ mod macos;
 
 mod shortcut;
 pub use shortcut::{set_recording, set_shortcut, validate_shortcut};
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+pub(crate) use shortcut::capture_allowed;
 
 pub const fn is_desktop() -> bool {
     cfg!(any(target_os = "macos", target_os = "linux"))
