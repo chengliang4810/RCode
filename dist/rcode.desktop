@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Name=RCode
+GenericName=Coding Agent Controller
+Comment=Multi-device controller for coding agents
+Exec=rcode %u
+TryExec=rcode
+Icon=rcode
+Terminal=false
+StartupNotify=true
+Categories=Development;Utility;
+Keywords=agent;claude;codex;ai;coding;
+StartupWMClass=rcode
+MimeType=x-scheme-handler/rcode;

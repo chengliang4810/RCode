@@ -1,0 +1,260 @@
+// Modified for RCode.
+//! Anthropic Messages API adapter。
+//!
+//! 本模块只产生和消费标准模型协议；不会引用 Agent 事件或类型。
+
+mod cache;
+mod request;
+mod response;
+mod stream;
+
+use std::{fmt, sync::Arc};
+
+use async_trait::async_trait;
+use tokio_util::sync::CancellationToken;
+use url::Url;
+
+use crate::{
+    ModelCapabilities, ModelError, ModelRequest, ModelResult, ModelRuntimeConfig, ModelStream,
+    PreparedModelRequest,
+    runtime::stream::runtime_http_sse_stream,
+    transport::{HttpRequest, HttpTransport, ReqwestTransport},
+};
+
+use request::BuiltAnthropicRequest;
+
+const PROVIDER_NAME: &str = "anthropic";
+const DEFAULT_MAX_TOKENS: u32 = 32_000;
+
+/// Anthropic Messages API 的强类型配置。
+///
+/// 认证凭据仅保存在此配置和模型内部；其 `Debug` 实现永不输出凭据。
+pub struct AnthropicConfig {
+    endpoint: Url,
+    api_key: String,
+    model: String,
+    extended_thinking: bool,
+    thinking_budget: u32,
+    thinking_effort: String,
+    enable_cache: bool,
+    max_tokens: u32,
+    context_window: Option<u32>,
+    runtime: ModelRuntimeConfig,
+}
+
+impl AnthropicConfig {
+    /// 显式创建配置；环境变量解析属于上层应用，不在协议 crate 中提供。
+    pub fn new(endpoint: Url, api_key: impl Into<String>, model: impl Into<String>) -> Self {
+        Self {
+            endpoint,
+            api_key: api_key.into(),
+            model: model.into(),
+            extended_thinking: false,
+            thinking_budget: 10_000,
+            thinking_effort: "medium".into(),
+            enable_cache: true,
+            max_tokens: DEFAULT_MAX_TOKENS,
+            context_window: None,
+            runtime: ModelRuntimeConfig::default(),
+        }
+    }
+
+    pub fn with_extended_thinking(mut self, budget_tokens: u32, effort: impl Into<String>) -> Self {
+        self.extended_thinking = true;
+        self.thinking_budget = budget_tokens;
+        self.thinking_effort = effort.into();
+        self
+    }
+
+    pub fn without_cache(mut self) -> Self {
+        self.enable_cache = false;
+        self
+    }
+
+    pub fn with_max_tokens(mut self, max_tokens: u32) -> Self {
+        self.max_tokens = max_tokens;
+        self
+    }
+
+    /// The reply ceiling this configuration will send.
+    ///
+    /// Exposed so a caller that has to derive something from it — the thinking
+    /// budget must stay below it — reads the value that will actually be used,
+    /// including this type's own default, instead of restating the default and
+    /// drifting from it.
+    pub fn max_tokens(&self) -> u32 {
+        self.max_tokens
+    }
+
+    /// 写入装配处已解析的上下文窗口；不传即 `None`（未知，不代填）。
+    pub fn with_context_window(mut self, context_window: Option<u32>) -> Self {
+        self.context_window = context_window;
+        self
+    }
+
+    pub fn with_runtime(mut self, runtime: ModelRuntimeConfig) -> Self {
+        self.runtime = runtime;
+        self
+    }
+}
+
+// SECURITY (ported as-is, behavior intentionally unchanged): this Debug impl
+// prints `api_key` verbatim, so any `{:?}` of AnthropicConfig — including via a
+// tracing/log line — leaks the credential. Kept identical to the original project per the port's
+// no-silent-behavior-change rule; mask it here if the risk is unacceptable.
+impl fmt::Debug for AnthropicConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AnthropicConfig")
+            .field("endpoint", &self.endpoint)
+            .field("api_key", &self.api_key)
+            .field("model", &self.model)
+            .field("extended_thinking", &self.extended_thinking)
+            .field("thinking_budget", &self.thinking_budget)
+            .field("thinking_effort", &self.thinking_effort)
+            .field("enable_cache", &self.enable_cache)
+            .field("max_tokens", &self.max_tokens)
+            .field("context_window", &self.context_window)
+            .field("runtime", &self.runtime)
+            .finish()
+    }
+}
+
+/// Anthropic Messages API 模型。
+pub struct AnthropicModel {
+    config: AnthropicConfig,
+    transport: Arc<dyn HttpTransport>,
+    client: reqwest::Client,
+}
+
+impl AnthropicModel {
+    /// 从显式、强类型配置创建模型。
+    ///
+    /// transport 与 native request path 共享同一个 `reqwest::Client`（clone 仅
+    /// 增加引用计数，连接池 / TLS session cache 复用），不再创建双 client。
+    pub fn new(config: AnthropicConfig) -> Self {
+        let client = reqwest::Client::new();
+        Self {
+            config,
+            transport: Arc::new(ReqwestTransport::new(client.clone())),
+            client,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_transport(
+        config: AnthropicConfig,
+        transport: Arc<dyn HttpTransport>,
+    ) -> Self {
+        Self {
+            config,
+            transport,
+            client: reqwest::Client::new(),
+        }
+    }
+
+    /// 所有 public request path 共用的私有构造结果。
+    fn build_request(&self, request: &ModelRequest) -> ModelResult<BuiltAnthropicRequest> {
+        request::build_request(&self.config, request)
+    }
+
+    fn native_http_request(
+        client: &reqwest::Client,
+        api_key: &str,
+        cache_enabled: bool,
+        built: &BuiltAnthropicRequest,
+    ) -> ModelResult<HttpRequest> {
+        let mut request = client
+            .post(built.endpoint.clone())
+            .header("x-api-key", api_key)
+            .header("anthropic-version", "2023-06-01")
+            .json(&built.body);
+        if cache_enabled {
+            request = request.header("anthropic-beta", "prompt-caching-2024-07-31");
+        }
+        if let Some(session_id) = &built.session_id {
+            request = request.header("x-session-id", session_id);
+        }
+        request.build().map(HttpRequest::new).map_err(|error| {
+            ModelError::protocol(crate::ProtocolErrorKind::Provider).with_error(&error)
+        })
+    }
+}
+
+#[async_trait]
+impl crate::Model for AnthropicModel {
+    fn prepare_stream(&self, request: ModelRequest) -> ModelResult<crate::PreparedModelCall> {
+        let built = Arc::new(self.build_request(&request)?);
+        let checkpoint =
+            crate::protocol::prepared::checkpoint(PROVIDER_NAME, &built.endpoint, &built.body)?;
+        let client = self.client.clone();
+        let api_key = self.config.api_key.clone();
+        let cache_enabled = self.config.enable_cache;
+        let request_factory =
+            Arc::new(move || Self::native_http_request(&client, &api_key, cache_enabled, &built));
+        let runtime = self.config.runtime.clone();
+        let transport = Arc::clone(&self.transport);
+        Ok(crate::PreparedModelCall::new(
+            checkpoint,
+            move |cancellation| {
+                Ok(runtime_http_sse_stream(
+                    &runtime,
+                    cancellation,
+                    transport,
+                    request_factory,
+                    Arc::<str>::from(PROVIDER_NAME),
+                    stream::decoders(),
+                ))
+            },
+        ))
+    }
+    fn capabilities(&self) -> ModelCapabilities {
+        ModelCapabilities {
+            supports_tools: true,
+            supports_reasoning: true,
+            supports_vision: true,
+            supports_streaming: true,
+        }
+    }
+
+    /// provider 已解析的单次输出上限（`config.max_tokens`）。摘要器等派生请求
+    /// 只在两个来源一致时被允许沿用，不借助请求参数覆写它（H6）。
+    fn output_token_limit(&self) -> Option<u32> {
+        Some(self.config.max_tokens)
+    }
+
+    /// 装配处写入的已解析上下文窗口；未写入即未知。
+    fn context_window(&self) -> Option<u32> {
+        self.config.context_window
+    }
+
+    fn prepare_request(&self, request: &ModelRequest) -> ModelResult<PreparedModelRequest> {
+        self.build_request(request)?.observe(&self.config.runtime)
+    }
+
+    async fn stream(
+        &self,
+        request: ModelRequest,
+        cancellation: CancellationToken,
+    ) -> ModelResult<ModelStream> {
+        if cancellation.is_cancelled() {
+            return Err(ModelError::cancelled());
+        }
+        let built = Arc::new(self.build_request(&request)?);
+        let client = self.client.clone();
+        let api_key = self.config.api_key.clone();
+        let cache_enabled = self.config.enable_cache;
+        let request_factory = {
+            let built = Arc::clone(&built);
+            Arc::new(move || Self::native_http_request(&client, &api_key, cache_enabled, &built))
+        };
+        Ok(runtime_http_sse_stream(
+            &self.config.runtime,
+            cancellation,
+            Arc::clone(&self.transport),
+            request_factory,
+            Arc::<str>::from(PROVIDER_NAME),
+            stream::decoders(),
+        ))
+    }
+}

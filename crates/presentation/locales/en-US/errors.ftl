@@ -1,0 +1,9 @@
+error-title = Something went wrong
+error-unknown = Something went wrong. The details below may help.
+error-provider-key-missing = { $provider } has no API key configured.
+error-provider-env-unset = { $provider } reads its key from { $variable }, which is not set.
+error-model-unknown = No model is configured with the id { $model }.
+error-engine-unreachable = The local engine is not responding.
+error-run-failed = The run failed.
+error-settings-save = Could not save settings: { $reason }
+error-image-loading-stopped = Image loading stopped.

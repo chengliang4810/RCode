@@ -1,0 +1,27 @@
+[package]
+name = "rcode-model"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# Provider-independent model protocol: request/response DTOs, the streaming-first
+# model interface, and the HTTP/SSE/retry transport underneath it.
+#
+# Ported from the original project's `model` (Apache-2.0); see THIRD_PARTY_NOTICES.md and
+# docs/design/native-agent-rewrite.md.
+[dependencies]
+async-trait.workspace = true
+futures.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+reqwest.workspace = true
+uuid.workspace = true
+tracing.workspace = true
+# Added for the port: `retry` jitters its backoff with `rand`, and the
+# provider adapters parse/validate endpoints with `url`.
+rand = "0.10"
+url = { version = "2", features = ["serde"] }

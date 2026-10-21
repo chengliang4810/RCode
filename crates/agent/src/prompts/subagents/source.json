@@ -1,0 +1,28 @@
+{
+  "referenceRoot": "D:\\projects\\ZCode\\apps\\zcode-cli\\packages\\core\\src\\subagent",
+  "referenceCommit": "3c5b227649371507ddc4eb46ac5133afe6db1cab",
+  "embeddedSearchTools": false,
+  "adaptations": [
+    "Product name ZCode CLI / ZCode Explore replaced with RCode / RCode Explore"
+  ],
+  "roles": [
+    {
+      "name": "general-purpose",
+      "file": "general-purpose.ts",
+      "description": "General-purpose agent for researching complex questions, searching for code, and executing multi-step tasks. When you are searching for a keyword or file and are not confident that you will find the right match in the first few tries use this agent to perform the search for you.",
+      "summary": "General-purpose agent for researching complex questions, searching for code, and executing multi-step tasks.",
+      "sha256": "4fef56f95185bd0166eac29741552981b72cb5c4b188d62fd8230fb598d8a929",
+      "descriptionSha256": "5d73f8e4a5b3920448ae7fa9da33c37ac43be167b08c4d54b7d2a3abab58eb63",
+      "sourceSha256": "d7a59484480d5dcd2c15fdf5fbcfaa4ff3f3a1d43adfadd32ad009b42c0ed0a3"
+    },
+    {
+      "name": "explore",
+      "file": "explore.ts",
+      "description": "Read-only search agent for broad fan-out searches - when answering means sweeping many files, directories, or naming conventions and you only need the conclusion, not the file dumps. It reads excerpts rather than whole files, so it locates code; it doesn't review or audit it. Specify search breadth: \"medium\" for moderate exploration, \"very thorough\" for multiple locations and naming conventions.",
+      "summary": "Read-only search agent for broad fan-out searches.",
+      "sha256": "afdb3204a66d88378b42386c32c00df1b434435b9653108eb66bd82647f01e6a",
+      "descriptionSha256": "289953fbc4d16f9a714e15664eb28979b0363db97bb9d9bc6d22a1a24f550bae",
+      "sourceSha256": "95ac67d784a3bff9ef54d49d824c4ebfa259fc1dd688b8e3159aeb2dd8f668fd"
+    }
+  ]
+}

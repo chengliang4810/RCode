@@ -1,0 +1,40 @@
+[package]
+name = "rcode-mobile"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# The mobile core: one UniFFI library that iOS (Swift) and Android (Kotlin)
+# link. Platform code paints, scrolls and handles gestures; everything that
+# decides *what* to paint and *where* lives here.
+[lib]
+name = "rcode_mobile"
+crate-type = ["lib", "staticlib", "cdylib"]
+
+[[bin]]
+name = "uniffi-bindgen"
+path = "src/bin/uniffi-bindgen.rs"
+required-features = ["bindgen"]
+
+[features]
+bindgen = ["uniffi/cli"]
+
+[dependencies]
+tokio.workspace = true
+tokio-util.workspace = true
+async-trait.workspace = true
+uniffi = "0.32"
+rcode-markdown.workspace = true
+rcode-text.workspace = true
+rcode-visual.workspace = true
+rcode-visual-gpu.workspace = true
+rcode-doc.workspace = true
+rcode-proto.workspace = true
+rcode-client.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+similar.workspace = true
+rcode-syntax.workspace = true
+zatex = { workspace = true, features = ["bundled"] }
+thiserror.workspace = true

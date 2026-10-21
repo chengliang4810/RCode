@@ -1,0 +1,9 @@
+error-title = 出错了
+error-unknown = 出错了。下面的详细信息可能有帮助。
+error-provider-key-missing = { $provider } 还没有配置 API 密钥。
+error-provider-env-unset = { $provider } 的密钥来自 { $variable }，但该变量未设置。
+error-model-unknown = 没有配置 id 为 { $model } 的模型。
+error-engine-unreachable = 本地引擎没有响应。
+error-run-failed = 运行失败。
+error-settings-save = 无法保存设置：{ $reason }
+error-image-loading-stopped = 图片加载已停止。
