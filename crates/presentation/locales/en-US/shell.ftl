@@ -1,0 +1,289 @@
+# The frame around a conversation: sidebar, tabs, the window's own chrome.
+
+shell-new-session = New session
+shell-search-placeholder = Search sessions
+shell-empty-title = No sessions yet
+shell-empty-body = Start one to begin.
+shell-archive = Archive
+shell-unarchive = Restore
+shell-scope-local = Local
+
+# The boot splash's status line, shown before any window has content.
+shell-boot-status = Setting up RCode environment
+
+# The native menu bar. Built once at startup, right after the language is
+# fixed, so the labels are the ones the process will keep.
+shell-menu-about = About RCode
+shell-menu-check-for-updates = Check for Updates…
+shell-menu-settings = Settings
+shell-menu-services = Services
+shell-menu-hide = Hide RCode
+shell-menu-hide-others = Hide Others
+shell-menu-show-all = Show All
+shell-menu-quit = Quit RCode
+shell-menu-edit = Edit
+shell-menu-undo = Undo
+shell-menu-redo = Redo
+shell-menu-cut = Cut
+shell-menu-copy = Copy
+shell-menu-paste = Paste
+shell-menu-select-all = Select All
+shell-menu-view = View
+shell-menu-appearance-system = Appearance: System
+shell-menu-appearance-light = Appearance: Light
+shell-menu-appearance-dark = Appearance: Dark
+shell-menu-window = Window
+shell-menu-minimize = Minimize
+shell-menu-zoom = Zoom
+shell-menu-close-window = Close Window
+
+# The settings nav rail. These name the pages the rail opens; each page's own
+# heading is a `settings-*` key. The rail's element ids come from
+# `SettingsSection::slug`, never from these labels, so re-wording one cannot
+# move a test selector.
+shell-settings-nav-general = General
+shell-settings-nav-appearance = Appearance
+shell-settings-nav-notifications = Notifications
+shell-settings-nav-shortcuts = Shortcuts
+shell-settings-nav-providers = Model settings
+shell-settings-nav-skills = Skills
+shell-settings-nav-subagents = Subagents
+shell-settings-nav-mcp = MCP
+shell-settings-nav-plugins = Plugins
+shell-settings-nav-personalization = Personalization
+shell-settings-nav-devices = Devices
+shell-settings-nav-files = Files
+shell-settings-nav-appshots = Appshots
+shell-settings-nav-archived = Archived sessions
+
+# The composer's pickers: the model, project and ref lists, and the compact
+# chip strip. The names in them — models, projects, branches — are the user's
+# data and are not translated.
+pickers-no-project = Don't work in a project
+pickers-no-project-selected = No project selected
+pickers-new-project = New project
+pickers-no-refs = No refs found.
+pickers-no-agents = No agents available
+pickers-add-model = Add model
+pickers-default = Default
+pickers-fast-mode = Fast mode
+pickers-reasoning-effort = Reasoning effort
+
+# The session card: where this chat runs, its side-chat actions, and its
+# device/project/branch names. Names are the user's data and are not
+# translated.
+shell-session-unknown-device = Unknown device
+shell-session-no-project = No project
+shell-session-new-side-chat = New side chat
+shell-session-fork-chat = Fork chat
+shell-session-actions = Actions
+
+shell-engine-offline = Engine not connected
+
+# Custom sidebar sections.
+shell-sidebar-syncing = Sidebar is still syncing. Try again shortly.
+shell-sidebar-section-placeholder = Section name
+shell-sidebar-section-options = Section options
+shell-sidebar-drop-here = Drop sessions here
+shell-sidebar-edit-section = Edit section
+shell-sidebar-new-section = New section
+shell-sidebar-archive-all = Archive all
+shell-sidebar-group-hint = Group sessions however you like
+shell-sidebar-create-section = Create section
+shell-sidebar-archive-failed = { $count ->
+    [one] Could not archive { $count } session. Try again.
+   *[other] Could not archive { $count } sessions. Try again.
+}
+
+# The drag targets over the composer.
+shell-drop-to-attach = Drop to attach
+shell-drop-to-mention = Drop to mention
+# Closing the last window ends the process on Windows and Linux — and with it
+# every run that was streaming. (On macOS the window is only a viewport: the
+# engine keeps running, so closing it asks nothing.)
+shell-exit-busy-title = Sessions are still running
+shell-exit-busy-body = Closing RCode stops them and anything they are still working on. Close anyway?
+shell-exit-busy-confirm = Close anyway
+
+# Sidebar and workspace actions that had no localized string yet.
+shell-onboarding-add-project = Add a project to get started
+shell-onboarding-add-project-detail = A project is a folder on one of your devices.
+shell-drop-to-unpin = Drop here to unpin
+shell-star-on-github = Star on GitHub
+shell-scroll-to-bottom = Scroll to bottom
+shell-run-failed = Run failed
+shell-sending = Sending…
+shell-files-tab = Files
+shell-diffs-tab = Diffs
+shell-history-tab = History
+shell-back = Back
+shell-sidebar-view-options = Sidebar view options
+# The sidebar view options menu: its three submenus, then one row per choice.
+shell-sidebar-view-group-organize = Organize
+shell-sidebar-view-group-sort = Sort
+shell-sidebar-view-group-show = Show
+shell-sidebar-view-by-project = By project
+shell-sidebar-view-one-list = None
+shell-sidebar-view-last-updated = Last updated
+shell-sidebar-view-created = Created
+shell-sidebar-view-branch = Branch
+shell-sidebar-view-pull-request = Pull request
+shell-sidebar-view-harness = Harness
+shell-sidebar-view-project-icon = Project icon
+shell-sidebar-view-location = Location
+shell-sidebar-view-project-filter = Project filter
+shell-sidebar-view-archived = Archived
+shell-in-home = In Home
+shell-compact = Compact
+shell-create-section = Create Section
+shell-all-projects = All projects
+shell-new-project = New project
+shell-loading-locations = Loading locations…
+shell-show-hidden-folders = Show hidden folders
+shell-rename-menu = Rename…
+shell-remove-menu = Remove…
+
+# Ref trigger and switching labels in the composer's ref picker.
+pickers-select-ref = Select ref
+pickers-from-ref = From { $ref }
+pickers-no-ref = No ref
+pickers-switching = switching…
+
+# Accessible names for icon-only controls.
+shell-aria-settings-sections = Settings sections
+shell-aria-close-tab = Close tab
+shell-aria-new-chat-in-project = New chat in project
+shell-aria-add-project = Add project
+
+# Fallback labels when the registry has not supplied a name yet.
+shell-unknown-device = Unknown device
+shell-new-session-fallback = New session
+
+# Subagent pane: stopping one child without stopping the conversation.
+shell-subagent-stop = Stop subagent
+shell-subagent-stop-aria = Stop subagent { $name }
+shell-subagent-already-finished = That subagent already finished.
+shell-subagent-stop-failed = Could not stop the subagent: { $error }
+
+# Search-box placeholders, one per picker.
+pickers-search-placeholder = Search…
+pickers-search-refs = Search refs…
+pickers-search-projects = Search projects…
+pickers-search-models = Search models…
+pickers-search-locations = Search locations…
+pickers-search-folders = Search folders…
+# The sidebar's grouped list header.
+shell-sessions-header = Sessions
+settings-worktrees-home = Home
+settings-worktrees-use-this-folder = Use this folder
+settings-worktrees-browse = Browse
+surface-chrome-close-tab-aria = Close tab
+files-workspace-files-aria = Workspace files
+files-refresh-workspace-aria = Refresh workspace files now
+settings-appearance-math-aria = Render math
+settings-worktrees-use-default-aria = Use the default worktree location
+settings-worktrees-choose-aria = Choose worktree folder
+settings-worktrees-custom-aria = Custom worktree location
+session-info-uncommitted = Uncommitted changes
+shell-pull-requests = Pull requests
+surface-chrome-new-tab = New tab
+surface-chrome-close-tab = Close tab
+settings-worktrees-reset-to-default = Reset to default
+# Sidebar session status labels (the row's status glyph and its accessible name).
+shell-status-working = Working
+shell-status-input = Waiting for you
+shell-status-failed = Failed
+shell-status-queued = Queued
+shell-status-done = Done
+shell-status-idle = Idle
+# The pin write was refused because the registry snapshot has not arrived yet.
+shell-pins-syncing = Pins are still syncing
+shell-remote-session = Remote session
+shell-files-fallback-title = Files
+shell-unrelated-archive-error = Unrelated archive error
+shell-side-chats = Side chats
+# Session-card lane controls.
+shell-lanes-collapse-finished = { $count ->
+    [one] Collapse { $count } finished subagent
+   *[other] Collapse { $count } finished subagents
+}
+shell-lanes-expand-finished = { $count ->
+    [one] Expand { $count } finished subagent
+   *[other] Expand { $count } finished subagents
+}
+shell-lanes-finished-count = { $count ->
+    [one] { $count } finished
+   *[other] { $count } finished
+}
+# Project location picker and project management dialogs.
+shell-project-home = Home
+shell-project-no-locations = No locations found
+shell-project-no-locations-hint = Try Home or a drive name.
+shell-project-no-folders-here = No folders here
+shell-project-no-folders-here-hint = Add this folder with { $shortcut }, or go back with ←.
+shell-project-searching-home = Searching Home…
+shell-project-searching-home-hint = Looking for matching folders anywhere under Home.
+shell-project-no-home-matches-yet = No folders match yet
+shell-project-home-indexing-hint = Home is still being indexed — keep typing or try again.
+shell-project-no-folder-matches = No folders match
+shell-project-no-folder-matches-hint = Type a path like ~/code or /mnt to jump there.
+shell-project-back-to-commands = Back to commands
+shell-project-open = Open
+shell-project-select = Select
+shell-project-navigate = Navigate
+shell-project-close = Close
+shell-project-adding = Adding…
+shell-project-add = Add project
+shell-project-name-placeholder = Project name
+shell-project-rename-title = Rename project
+shell-project-remove-title = Remove project?
+shell-project-remove-fallback = this project
+shell-project-remove-confirmation-one = Removing “{ $name }” permanently deletes its 1 session. This can’t be undone.
+shell-project-remove-confirmation-many = Removing “{ $name }” permanently deletes its { $count } sessions. This can’t be undone.
+shell-project-remove-confirm = Remove
+shell-tabs-collapse-panel = Collapse panel
+shell-tabs-expand-panel = Expand panel
+shell-tabs-hide-files = Hide files panel
+shell-tabs-show-files = Show files panel
+shell-tabs-hide-session-details = Hide session details
+shell-tabs-show-session-details = Show session details
+shell-tabs-hide-pull-requests = Hide pull requests panel
+shell-tabs-show-pull-requests = Show pull requests panel
+shell-pinned = Pinned
+shell-archived = Archived
+shell-new-chat-in-project = New chat in project
+shell-clear-project-filter-to-rename = Clear the project filter to rename this session
+shell-searching-home-status = Searching…
+shell-indexing-home-status = Indexing…
+shell-home-folder-aria = { $name } in { $parent }
+shell-settings-open-tooltip = Settings · { $shortcut }
+shell-settings-close-tooltip = Close settings · { $shortcut }
+shell-sync-queued = Sync queued — changes are saved
+shell-syncing = Syncing…
+shell-sync-offline = Offline — changes are saved
+shell-sync-storage-error = Changes could not be saved
+shell-sync-offline-saved = Offline — sends are saved
+shell-sync-reconnecting = Reconnecting…
+shell-aria-account-menu = Account menu: { $name }
+shell-aria-settings = Settings
+shell-aria-close-settings = Close settings
+memory-empty = No memories yet
+memory-list-truncated = File list truncated.
+
+pickers-models-empty = No matching models
+
+pickers-context-window = Context window
+pickers-context-standard = Standard
+pickers-change-model = Change model
+pickers-reasoning-keys = Use Left and Right to adjust reasoning; Home and End select the first and last levels.
+pickers-reasoning-minimal = Minimal
+pickers-reasoning-low = Low
+pickers-reasoning-medium = Medium
+pickers-reasoning-high = High
+pickers-reasoning-xhigh = X-High
+pickers-reasoning-max = Max
+pickers-reasoning-ultra = Ultra
+pickers-reasoning-ultracode = Ultracode
+pickers-reasoning-ultrathink = Ultrathink
+
+shell-subagent-background = Run in background

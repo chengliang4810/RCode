@@ -1,0 +1,311 @@
+// Modified for RCode.
+use std::collections::{BTreeMap, BTreeSet};
+
+use serde_json::{Value, json};
+use url::Url;
+
+use crate::{
+    ContentBlock, DocumentSource, ImageSource, ModelMessage, ModelRequest, ModelResult,
+    PreparedModelRequest, ProviderProtocol, ToolCall, ToolDefinition, ToolResult,
+};
+
+use super::{AnthropicConfig, cache};
+
+#[derive(Clone)]
+pub(super) struct BuiltAnthropicRequest {
+    pub(super) endpoint: Url,
+    pub(super) body: Value,
+    pub(super) session_id: Option<String>,
+    model_id: String,
+}
+
+impl BuiltAnthropicRequest {
+    pub(super) fn observe(
+        &self,
+        runtime: &crate::ModelRuntimeConfig,
+    ) -> ModelResult<PreparedModelRequest> {
+        PreparedModelRequest::observe_with_runtime(
+            ProviderProtocol::Anthropic,
+            self.model_id.clone(),
+            self.endpoint.clone(),
+            self.body.clone(),
+            BTreeMap::new(),
+            runtime,
+        )
+    }
+}
+
+pub(super) fn build_request(
+    config: &AnthropicConfig,
+    request: &ModelRequest,
+) -> ModelResult<BuiltAnthropicRequest> {
+    let (mut messages, mut system_prompt) = messages_to_anthropic(&request.messages);
+    // Replay only reasoning blocks the provider actually returned. An empty
+    // thinking block with a fabricated signature is not a valid substitute.
+    if config.enable_cache {
+        if let Some(prompt) = &request.system_prompt {
+            let markers = prompt.blocks().iter().filter(|block| block.cache_scope.is_some()).count();
+            cache::apply_cache_to_messages_with_budget(&mut messages, 4usize.saturating_sub(markers));
+        } else {
+            cache::apply_cache_to_messages(&mut messages);
+        }
+    }
+
+    let mut body = json!({
+        "model": config.model,
+        "max_tokens": request.max_tokens.unwrap_or(config.max_tokens),
+        "messages": messages,
+        "stream": true,
+    });
+    if config.enable_cache && !system_prompt.blocks.is_empty() {
+        body["system"] = Value::Array(cache::system_blocks_to_json(
+            &system_prompt.blocks,
+            system_prompt.allow_fallback_cache,
+        ));
+    } else if !config.enable_cache && !system_prompt.blocks.is_empty() {
+        let system = system_prompt
+            .blocks
+            .drain(..)
+            .map(|block| block.text)
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        if !system.trim().is_empty() {
+            body["system"] = json!(system.trim());
+        }
+    }
+    if let Some(prompt) = &request.system_prompt {
+        let blocks = prompt.blocks();
+        body.as_object_mut().expect("request body is an object").remove("system");
+        if config.enable_cache {
+            if !blocks.is_empty() {
+                body["system"] = Value::Array(blocks.into_iter().map(|block| {
+                    let mut value = json!({"type": "text", "text": block.text});
+                    if let Some(scope) = block.cache_scope {
+                        value["cache_control"] = match scope {
+                            crate::prompt_cache::SystemPromptCacheScope::Global => json!({"type": "ephemeral", "scope": "global"}),
+                            crate::prompt_cache::SystemPromptCacheScope::Organization => json!({"type": "ephemeral"}),
+                        };
+                    }
+                    value
+                }).collect());
+            }
+        } else {
+            let text = prompt.text();
+            if !text.trim().is_empty() {
+                body["system"] = json!(text);
+            }
+        }
+    }
+    if !request.tools.is_empty() {
+        body["tools"] = Value::Array(request.tools.iter().map(tool_to_anthropic).collect());
+    }
+    if let Some(temperature) = request.temperature {
+        body["temperature"] = json!(temperature);
+    }
+    if config.extended_thinking {
+        body["thinking"] = json!({
+            "type": "enabled",
+            "budget_tokens": config.thinking_budget,
+        });
+        body["output_config"] = json!({ "effort": config.thinking_effort });
+    }
+
+    Ok(BuiltAnthropicRequest {
+        endpoint: messages_endpoint(&config.endpoint)?,
+        body,
+        session_id: request.session_id.clone(),
+        model_id: config.model.clone(),
+    })
+}
+
+pub(super) fn messages_endpoint(endpoint: &Url) -> ModelResult<Url> {
+    crate::endpoint::resolve(endpoint, &["messages"])
+}
+
+fn messages_to_anthropic(messages: &[ModelMessage]) -> (Vec<Value>, cache::SplitSystemPrompt) {
+    let mut system = Vec::new();
+    let mut result = Vec::new();
+
+    for message in messages {
+        match message {
+            ModelMessage::System { content } => {
+                let text = content_text(content);
+                if !text.trim().is_empty() {
+                    system.push(text);
+                }
+            }
+            ModelMessage::User { content } => result.push(json!({
+                "role": "user",
+                "content": content_to_anthropic(content),
+            })),
+            ModelMessage::Assistant {
+                content,
+                tool_calls,
+            } => {
+                let mut parts = content_to_anthropic_parts(content);
+                let content_tool_use_ids = content
+                    .iter()
+                    .filter_map(|block| match block {
+                        ContentBlock::ToolUse { tool_call } => Some(tool_call.id()),
+                        _ => None,
+                    })
+                    .collect::<BTreeSet<_>>();
+                parts.extend(
+                    tool_calls
+                        .iter()
+                        .filter(|tool_call| !content_tool_use_ids.contains(tool_call.id()))
+                        .map(tool_call_to_anthropic),
+                );
+                result.push(json!({ "role": "assistant", "content": parts }));
+            }
+            ModelMessage::ToolResult {
+                result: tool_result,
+            } => {
+                let block = tool_result_to_anthropic(tool_result);
+                let appended = result.last_mut().is_some_and(|message: &mut Value| {
+                    if message["role"] != "user" {
+                        return false;
+                    }
+                    message["content"]
+                        .as_array_mut()
+                        .map(|content| content.push(block.clone()))
+                        .is_some()
+                });
+                if !appended {
+                    result.push(json!({ "role": "user", "content": [block] }));
+                }
+            }
+        }
+    }
+
+    (result, cache::split_system_blocks(&system.join("\n\n")))
+}
+
+fn tool_to_anthropic(tool: &ToolDefinition) -> Value {
+    json!({
+        "name": tool.name,
+        "description": tool.description,
+        "input_schema": tool.input_schema.as_map(),
+    })
+}
+
+fn tool_call_to_anthropic(tool_call: &ToolCall) -> Value {
+    json!({
+        "type": "tool_use",
+        "id": tool_call.id(),
+        "name": tool_call.name(),
+        "input": tool_call.arguments().as_map(),
+    })
+}
+
+fn tool_result_to_anthropic(result: &ToolResult) -> Value {
+    json!({
+        "type": "tool_result",
+        "id": result.id.clone().unwrap_or_else(|| result.tool_call_id.clone()),
+        "tool_use_id": result.tool_call_id,
+        "content": content_to_anthropic(&result.content),
+        "is_error": result.is_error,
+    })
+}
+
+fn content_text(content: &[ContentBlock]) -> String {
+    content
+        .iter()
+        .filter_map(ContentBlock::text_content)
+        .collect()
+}
+
+fn content_to_anthropic(content: &[ContentBlock]) -> Value {
+    Value::Array(content_to_anthropic_parts(content))
+}
+
+fn content_to_anthropic_parts(content: &[ContentBlock]) -> Vec<Value> {
+    content.iter().filter_map(block_to_anthropic).collect()
+}
+
+fn block_to_anthropic(block: &ContentBlock) -> Option<Value> {
+    match block {
+        ContentBlock::Text { text } => Some(json!({ "type": "text", "text": text })),
+        ContentBlock::Image { source } => match source {
+            ImageSource::Base64 { media_type, data } => Some(json!({
+                "type": "image",
+                "source": { "type": "base64", "media_type": media_type.as_str(), "data": data },
+            })),
+            ImageSource::Url { url } => Some(json!({
+                "type": "image",
+                "source": { "type": "url", "url": url },
+            })),
+        },
+        ContentBlock::Document { source, title } => {
+            let source = match source {
+                DocumentSource::Base64 { media_type, data } => json!({
+                    "type": "base64", "media_type": media_type.as_str(), "data": data,
+                }),
+                DocumentSource::Url { url } => json!({ "type": "url", "url": url }),
+                DocumentSource::Text { text } => json!({ "type": "text", "text": text }),
+            };
+            Some(json!({ "type": "document", "source": source, "title": title }))
+        }
+        ContentBlock::Reasoning { text, signature } => {
+            let mut value = json!({ "type": "thinking", "thinking": text });
+            if let Some(signature) = signature {
+                value["signature"] = json!(signature);
+            }
+            Some(value)
+        }
+        ContentBlock::ToolUse { tool_call } => Some(tool_call_to_anthropic(tool_call)),
+        ContentBlock::ToolResult { result } => Some(tool_result_to_anthropic(result)),
+        ContentBlock::RedactedReasoning { data } => Some(json!({
+            "type": "redacted_thinking",
+            "data": data,
+        })),
+    }
+}
+
+#[cfg(test)]
+pub(super) fn body_for_test(config: &AnthropicConfig, request: &ModelRequest) -> Value {
+    build_request(config, request)
+        .expect("test config is valid")
+        .body
+}
+
+#[cfg(test)]
+mod prompt_tests {
+    use super::*;
+    use crate::prompt_cache::{SystemPrompt, SystemPromptCacheMode};
+
+    fn markers(value: &Value) -> usize {
+        match value {
+            Value::Object(map) => usize::from(map.contains_key("cache_control")) + map.values().map(markers).sum::<usize>(),
+            Value::Array(values) => values.iter().map(markers).sum(),
+            _ => 0,
+        }
+    }
+
+    #[test]
+    fn structured_prompt_replaces_legacy_system_text_and_respects_the_cache_budget() {
+        let config = AnthropicConfig::new(Url::parse("https://example.test/v1").unwrap(), "fixture", "model");
+        for mode in [SystemPromptCacheMode::Organization, SystemPromptCacheMode::Global, SystemPromptCacheMode::ToolBased] {
+            let mut request = ModelRequest::new(vec![ModelMessage::system_text("LEGACY SYSTEM MUST NOT LEAK")]);
+            for index in 0..6 { request.messages.push(ModelMessage::user_text(format!("turn {index}"))); }
+            request.system_prompt = Some(SystemPrompt { client_header: Some("client".into()), identity: "identity".into(), static_sections: vec!["STATIC".into()], frozen_sections: vec!["FROZEN".into()], dynamic_sections: vec!["DYNAMIC".into()], cache_mode: mode });
+            let body = body_for_test(&config, &request);
+            assert!(!body.to_string().contains("LEGACY SYSTEM"));
+            assert!(markers(&body) <= 4);
+            assert_eq!(body["system"].as_array().unwrap().len(), if mode == SystemPromptCacheMode::Global { 5 } else { 4 });
+            let frozen_index = if mode == SystemPromptCacheMode::Global { 3 } else { 2 };
+            assert_eq!(body["system"][frozen_index]["cache_control"]["type"], "ephemeral");
+            assert!(body["system"][frozen_index]["cache_control"].get("scope").is_none());
+            assert!(body["system"].as_array().unwrap().last().unwrap().get("cache_control").is_none());
+            request.system_prompt.as_mut().unwrap().dynamic_sections = vec!["UPDATED DYNAMIC".into()];
+            let updated = body_for_test(&config, &request);
+            assert_eq!(body["system"][frozen_index], updated["system"][frozen_index]);
+            assert!(updated.to_string().contains("UPDATED DYNAMIC"));
+            request.system_prompt.as_mut().unwrap().dynamic_sections = vec!["DYNAMIC".into()];
+            let uncached_config = AnthropicConfig::new(Url::parse("https://example.test/v1").unwrap(), "fixture", "model").without_cache();
+            let uncached = body_for_test(&uncached_config, &request);
+            assert!(uncached["system"].as_str().unwrap().contains("STATIC\n\nFROZEN\n\nDYNAMIC"));
+            assert_eq!(markers(&uncached), 0);
+        }
+    }
+}

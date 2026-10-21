@@ -1,0 +1,57 @@
+[package]
+name = "rcode-agent"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# The native agent: the ReAct loop, tool dispatch, permission policy and
+# context compaction, built on `rcode-model`.
+#
+# Design: docs/design/native-agent-rewrite.md. The agent loop is host-owned —
+# it needs a session, a tool set and a way to ask the user, all injected by the
+# caller (see `rcode-harness`'s native driver), so this crate stays free of
+# engine, UI and storage dependencies.
+[dependencies]
+rcode-model.workspace = true
+# The shared run protocol (permission, interaction, tool data). This crate
+# re-exports those types rather than defining its own copies of them.
+rcode-proto.workspace = true
+anyhow.workspace = true
+async-trait.workspace = true
+futures.workspace = true
+# `Glob` matches paths, `Grep` matches contents.
+glob = "0.3"
+regex = "1"
+# `WebFetch` and `WebSearch` reach the network.
+reqwest.workspace = true
+# SKILL.md frontmatter is YAML.
+serde_yaml_ng = "0.10"
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+# The tool tests spawn real shell commands.
+tokio = { workspace = true, features = ["test-util", "macros", "rt-multi-thread"] }
+
+# Killing a command must reach what it started, and the two platforms have
+# different primitives for that: a process group on Unix, a Job Object on
+# Windows. Both deps are already in the workspace; naming them per-target keeps
+# a Unix build from pulling the Windows bindings and vice versa.
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+] }

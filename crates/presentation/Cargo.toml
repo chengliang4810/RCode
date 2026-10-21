@@ -1,0 +1,29 @@
+[package]
+name = "rcode-presentation"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# Text and formatting that depends on the display language: the translation
+# resources, the lookup that resolves them, and the pure functions that turn
+# business state into words a person reads.
+#
+# Deliberately depends on nothing here beyond `rcode-proto`: no GPUI, no engine,
+# no agent. That is what lets the strings be tested without a window, and what
+# keeps "what language is this in" out of the layers that execute a run.
+[dependencies]
+rcode-proto.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+chrono.workspace = true
+fluent-bundle = "0.16.0"
+fluent-syntax = "0.12.0"
+unic-langid = "0.9"
+sys-locale = "0.3.2"
+
+[build-dependencies]
+fluent-syntax = "0.12.0"
+unic-langid = "0.9"

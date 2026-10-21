@@ -1,0 +1,13 @@
+// Modified for RCode.
+mod model;
+pub(crate) mod prepared;
+pub use prepared::PreparedModelCall;
+mod types;
+
+pub use crate::runtime::{ModelError, ModelResult};
+pub use model::{Model, ModelStream, ModelStreamEvent};
+pub use types::{
+    ContentBlock, DocumentSource, ImageSource, JsonObject, MediaType, ModelCapabilities,
+    ModelMessage, ModelRequest, ModelResponse, ProviderProtocol, StopReason, TokenUsage, ToolCall,
+    ToolDefinition, ToolResult,
+};

@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Template for RCode.app/Contents/Info.plist — see dist/README.md for the
+     bundling steps. Replace __VERSION__ before packaging. -->
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key>
+    <string>en</string>
+    <key>CFBundleDisplayName</key>
+    <string>RCode</string>
+    <key>CFBundleExecutable</key>
+    <string>rcode</string>
+    <key>CFBundleIconFile</key>
+    <string>rcode.icns</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.rcode</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>CFBundleName</key>
+    <string>RCode</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>__VERSION__</string>
+    <key>CFBundleVersion</key>
+    <string>__VERSION__</string>
+    <key>CFBundleURLTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleURLName</key>
+            <string>com.rcode.conversation</string>
+            <key>CFBundleURLSchemes</key>
+            <array>
+                <string>rcode</string>
+            </array>
+        </dict>
+    </array>
+    <key>LSMinimumSystemVersion</key>
+    <string>12.0</string>
+    <!-- macOS 26 attaches one-time-code AutoFill (a SafariPlatformSupport
+         helper process) to every text input unless the app opts out. -->
+    <key>NSAutoFillRequiresTextContentTypeForOneTimeCodeOnMac</key>
+    <true/>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+    <!-- Browser tabs load user-selected HTTP dev servers. Keep the exception
+         scoped to WebKit; other app connections retain their ATS policy. -->
+    <key>NSAppTransportSecurity</key>
+    <dict>
+        <key>NSAllowsArbitraryLoadsInWebContent</key>
+        <true/>
+    </dict>
+    <key>NSHumanReadableCopyright</key>
+    <string>© 2026</string>
+    <!-- gpui renders via Metal. -->
+    <key>NSSupportsAutomaticGraphicsSwitching</key>
+    <true/>
+</dict>
+</plist>
