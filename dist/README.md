@@ -7,7 +7,7 @@ scripts/package-linux.sh            # release build (thin LTO, stripped)
 PROFILE=debug scripts/package-linux.sh   # fast smoke package
 ```
 
-Produces `target/package/rcode-linux-<arch>.tar.gz` containing:
+Produces `target/package/rcode-<version>-linux-<arch>.tar.gz` containing:
 
 - `rcode` — the binary (headed by default; `rcode headless` runs the engine alone)
 - `rcode.desktop` — XDG desktop entry template (`Exec=rcode` for packagers;
@@ -27,14 +27,16 @@ The release profile in the root `Cargo.toml` sets `lto = "thin"` and
 ## macOS
 
 ```sh
-scripts/package-macos.sh    # → target/package/rcode-macos-<arch>.dmg
+scripts/package-macos.sh    # → target/package/rcode-<version>-macos-<arch>.dmg
 ```
 
 Builds the release binary, assembles `RCode.app` (Info.plist + icns), ad-hoc
 signs it (set `CODESIGN_IDENTITY` for a real Developer ID), and wraps it in a
 dmg. The auto-update tarball retains an internal `RCode.app` path so older
-installed builds can update into RCode. CI runs this on tags
-(`.github/workflows/release.yml`). The manual steps it automates, for reference
+installed builds can update into RCode. The release workflow builds Intel
+(`macos-15-intel`, `x86_64`) and Apple silicon (`macos-15`, `arm64`) separately,
+checks each binary's architecture and version, verifies its signature and dmg,
+and publishes both dmg files and app tarballs. The manual steps it automates, for reference
 (run on a macOS host — gpui needs Metal; no cross-build from Linux):
 
 1. Build the universal (or per-arch) binary:
@@ -49,7 +51,8 @@ installed builds can update into RCode. CI runs this on tags
    ```sh
    mkdir -p RCode.app/Contents/{MacOS,Resources}
    cp rcode RCode.app/Contents/MacOS/rcode
-   sed "s/__VERSION__/$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')/" \
+   version="$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')"
+   sed -e "s/__VERSION__/$version/" -e "s/__NUMERIC_VERSION__/${version%%-*}/" \
      dist/macos/Info.plist > RCode.app/Contents/Info.plist
    ```
 3. Icon: generate `rcode.icns` from `dist/macos/icon-1024.png` (the macOS-shaped
@@ -76,12 +79,25 @@ installed builds can update into RCode. CI runs this on tags
 
 Produces, under `target/package/`:
 
-- `rcode-windows-<arch>-setup.exe` — the per-user installer built
+- `rcode-<version>-windows-<arch>-setup.exe` — the per-user installer built
   from `dist/windows/rcode.iss` with Inno Setup 6
-- `rcode-windows-<arch>.zip` — the portable package
-- `rcode-windows-<arch>.exe` — the bare executable the in-app
+- `rcode-<version>-windows-<arch>.zip` — the portable package
+- `rcode-<version>-windows-<arch>.exe` — the bare executable the in-app
   updater downloads
 
 The installer and the zip both carry `rcode-update.json`, the marker that lets
 the app update itself in place. CI runs `scripts/test-windows-installer.ps1`
 against the setup on every Windows build.
+
+## Release workflow
+
+Use versions such as `0.0.1-beta`, then `0.0.2-beta`, with matching Git tags
+`v0.0.1-beta`, `v0.0.2-beta`. The tag must match the workspace version.
+Apple bundle fields and Windows executable version resources use the numeric
+part (`0.0.1`); artifact names, RCode's version and update metadata retain
+`0.0.1-beta`. The macOS bundle stores that full value in `RCodeVersion`.
+
+Manually running `.github/workflows/release.yml` builds and verifies all
+platform artifacts without publishing a release. Tag runs publish only after
+every platform succeeds and the complete artifact set, architecture, bundle
+versions and checksums have been verified. Beta releases are marked prerelease.

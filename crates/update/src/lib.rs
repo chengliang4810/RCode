@@ -631,15 +631,19 @@ pub fn installed_version(kind: &InstallKind) -> Option<String> {
     parse_version(&version).map(|_| version)
 }
 
-/// `CFBundleShortVersionString` from an XML property list (the packaging
-/// template; codesign leaves the format alone).
+/// Full release version from the packaging template. Apple's bundle version
+/// fields contain numeric versions; older bundles stored the release version
+/// directly in `CFBundleShortVersionString`.
 fn bundle_short_version(plist: &str) -> Option<String> {
-    let after_key = plist
-        .split("<key>CFBundleShortVersionString</key>")
-        .nth(1)?;
-    let value = after_key.trim_start().strip_prefix("<string>")?;
-    let end = value.find("</string>")?;
-    Some(value[..end].trim().to_owned())
+    for key in ["RCodeVersion", "CFBundleShortVersionString"] {
+        let Some((_, after_key)) = plist.split_once(&format!("<key>{key}</key>")) else {
+            continue;
+        };
+        let value = after_key.trim_start().strip_prefix("<string>")?;
+        let end = value.find("</string>")?;
+        return Some(value[..end].trim().to_owned());
+    }
+    None
 }
 
 // ---------------------------------------------------------------------------
@@ -1890,8 +1894,12 @@ mod tests {
     #[test]
     fn bundle_version_reads_the_packaged_plist() {
         let template = include_str!("../../../dist/macos/Info.plist");
-        let plist = template.replace("__VERSION__", "0.3.1");
-        assert_eq!(bundle_short_version(&plist).as_deref(), Some("0.3.1"));
+        let plist = template
+            .replace("__VERSION__", "0.0.1-beta")
+            .replace("__NUMERIC_VERSION__", "0.0.1");
+        assert_eq!(bundle_short_version(&plist).as_deref(), Some("0.0.1-beta"));
+        let legacy = "<plist><key>CFBundleShortVersionString</key><string>0.3.1</string></plist>";
+        assert_eq!(bundle_short_version(legacy).as_deref(), Some("0.3.1"));
         assert_eq!(bundle_short_version("<plist></plist>"), None);
     }
 

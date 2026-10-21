@@ -21,8 +21,10 @@
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>__VERSION__</string>
+    <string>__NUMERIC_VERSION__</string>
     <key>CFBundleVersion</key>
+    <string>__NUMERIC_VERSION__</string>
+    <key>RCodeVersion</key>
     <string>__VERSION__</string>
     <key>CFBundleURLTypes</key>
     <array>

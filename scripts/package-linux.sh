@@ -21,10 +21,10 @@ TARBALL="$STAGE.tar.gz"
 
 cd "$ROOT"
 if [[ "$PROFILE" == "release" ]]; then
-  cargo build --release -p rcode
+  cargo build --release --locked -p rcode
   BIN="$ROOT/target/release/rcode"
 else
-  cargo build -p rcode
+  cargo build --locked -p rcode
   BIN="$ROOT/target/debug/rcode"
 fi
 

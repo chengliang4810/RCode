@@ -3,15 +3,14 @@
 //! and commands performing authentication have been excluded.
 use std::{
     collections::HashMap,
-    net::SocketAddr,
+    net::{Ipv4Addr, Ipv6Addr, SocketAddr},
     path::{Path, PathBuf},
     time::Duration,
 };
-// Used only by the Linux `/proc` parser and the `#[cfg(target_os = "linux")]`
-// test that covers it. A plain import would be dead on every other target,
-// and deleting it breaks the Linux build — which is the trap this gate is for.
+// Only the Linux /proc parser needs IpAddr; loopback probes use both address
+// families on every desktop platform.
 #[cfg(target_os = "linux")]
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::net::IpAddr;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 #[derive(Debug, Clone)]

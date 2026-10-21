@@ -15,19 +15,36 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 command -v cargo >/dev/null 2>&1 || PATH="$HOME/.cargo/bin:$PATH"
 VERSION="$(grep -m1 '^version' "$ROOT/Cargo.toml" | sed 's/.*"\(.*\)".*/\1/')"
-ARCH="$(uname -m)" # arm64 on Apple silicon runners
+ARCH="$(uname -m)"
+case "$ARCH" in
+  arm64) TARGET=aarch64-apple-darwin ;;
+  x86_64) TARGET=x86_64-apple-darwin ;;
+  *) echo "Unsupported macOS architecture: $ARCH" >&2; exit 1 ;;
+esac
+if [[ -n "${RCODE_PACKAGE_ARCH:-}" && "$ARCH" != "$RCODE_PACKAGE_ARCH" ]]; then
+  echo "Expected $RCODE_PACKAGE_ARCH runner, got $ARCH" >&2
+  exit 1
+fi
 OUT_DIR="$ROOT/target/package"
 APP="$OUT_DIR/RCode.app"
 DMG="$OUT_DIR/rcode-$VERSION-macos-$ARCH.dmg"
 APP_TARBALL="$OUT_DIR/rcode-$VERSION-macos-$ARCH-app.tar.gz"
 
 cd "$ROOT"
-cargo build --release -p rcode
+cargo build --release --locked -p rcode --target "$TARGET"
+BIN="$ROOT/target/$TARGET/release/rcode"
+[[ "$(lipo -archs "$BIN")" == "$ARCH" ]] || { echo "Incorrect Mach-O architecture" >&2; exit 1; }
+[[ "$("$BIN" --version)" == "rcode $VERSION" ]] || { echo "Incorrect executable version" >&2; exit 1; }
 
 rm -rf "$APP" "$DMG" "$APP_TARBALL"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-install -m 755 "$ROOT/target/release/rcode" "$APP/Contents/MacOS/rcode"
-sed "s/__VERSION__/$VERSION/" "$ROOT/dist/macos/Info.plist" >"$APP/Contents/Info.plist"
+install -m 755 "$BIN" "$APP/Contents/MacOS/rcode"
+# Apple bundle versions are numeric; RCodeVersion retains the full beta
+# version for the updater, executable and artifact names.
+NUMERIC_VERSION="${VERSION%%-*}"
+sed -e "s/__VERSION__/$VERSION/" -e "s/__NUMERIC_VERSION__/$NUMERIC_VERSION/" \
+  "$ROOT/dist/macos/Info.plist" >"$APP/Contents/Info.plist"
+plutil -lint "$APP/Contents/Info.plist"
 mkdir -p "$APP/Contents/Resources/licenses/fonts"
 cp "$ROOT/crates/ui/assets/fonts/licenses/"* "$APP/Contents/Resources/licenses/fonts/"
 cp "$ROOT/THIRD_PARTY_NOTICES.md" "$ROOT/LICENSE" "$ROOT/LICENSE-APACHE" "$APP/Contents/Resources/licenses/"
@@ -54,6 +71,8 @@ else
   # requires right-click → Open on first launch without notarization).
   codesign --deep --force --entitlements "$ROOT/dist/macos/RCode.entitlements" --sign - "$APP"
 fi
+
+codesign --verify --deep --strict "$APP"
 
 # notarize <path>: submit to Apple and wait for the verdict. A rejection may
 # still exit 0 depending on the notarytool version — the `stapler staple` that
@@ -128,4 +147,5 @@ if $NOTARIZE; then
   notarize "$DMG"
   xcrun stapler staple "$DMG"
 fi
+hdiutil verify "$DMG"
 echo "packaged: $DMG"

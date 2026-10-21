@@ -19,6 +19,7 @@ CLAUDE.md
 /scripts/**/__pycache__/
 
 # Local plans and generated validation artifacts.
+__pycache__/
 /.zcode/
 /.rcode_tmp/
 /output/

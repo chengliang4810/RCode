@@ -16,7 +16,7 @@ if (-not $Setup) {
 }
 if (-not $Setup) { throw 'No rcode-*-setup.exe under target/package' }
 $Setup = (Resolve-Path -LiteralPath $Setup).Path
-$match = [regex]::Match((Split-Path $Setup -Leaf), '\Arcode-(\d+\.\d+\.\d+)-windows-[a-z0-9_]+-setup\.exe\z')
+$match = [regex]::Match((Split-Path $Setup -Leaf), '\Arcode-(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)-windows-[a-z0-9_]+-setup\.exe\z')
 if (-not $match.Success) { throw "Unexpected installer name: $Setup" }
 $version = $match.Groups[1].Value
 $uninstallKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\{AD5DEC34-E254-467B-8F24-8127EBAF4DA6}_is1'
@@ -26,7 +26,7 @@ $root = if ($env:RUNNER_TEMP) { $env:RUNNER_TEMP } else { [IO.Path]::GetTempPath
 $dir = Join-Path $root "rcode installer test $([guid]::NewGuid().ToString('N'))"
 
 function Invoke-Checked([string]$File, [string[]]$Arguments, [string]$What) {
-    $process = Start-Process -FilePath $File -ArgumentList $Arguments -Wait -PassThru
+    $process = Start-Process -FilePath $File -ArgumentList $Arguments -WindowStyle Hidden -Wait -PassThru
     if ($process.ExitCode -ne 0) { throw "$What exited with $($process.ExitCode)" }
 }
 

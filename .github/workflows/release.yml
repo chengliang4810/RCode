@@ -2,7 +2,7 @@ name: release
 
 # Build release artifacts and publish them:
 #   - Linux headless tarballs (x86_64 + aarch64) via scripts/package-linux.sh
-#   - macOS dmg (Apple silicon) via scripts/package-macos.sh
+#   - macOS dmg (Intel + Apple silicon) via scripts/package-macos.sh
 #   - Windows per-user installer, portable zip, and updater exe (x86_64) via
 #     scripts/package-windows.ps1
 # then publish them as a GitHub Release: the artifacts, the updater's
@@ -19,11 +19,26 @@ on:
     tags: ["v*"]
   workflow_dispatch:
 
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 permissions:
   contents: write
 
 jobs:
+  checks:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Validate version and packaging contracts
+        run: |
+          python3 scripts/prepare-release.py --check-version
+          python3 -m unittest discover -s scripts -p 'test_release_packaging.py'
+          bash -n scripts/package-macos.sh scripts/package-linux.sh
+
   linux:
+    needs: checks
     strategy:
       fail-fast: false
       matrix:
@@ -71,8 +86,23 @@ jobs:
   #     key (raw .p8 contents), for notarytool. All three present → the package
   #     script notarizes and staples the app + dmg (no Gatekeeper warning).
   macos:
-    runs-on: macos-latest # Apple silicon
+    needs: checks
+    name: macOS ${{ matrix.arch }} package
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15-intel
+            arch: x86_64
+            target: x86_64-apple-darwin
+          - runner: macos-15
+            arch: arm64
+            target: aarch64-apple-darwin
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
     env:
+      RCODE_PACKAGE_ARCH: ${{ matrix.arch }}
+      MACOSX_DEPLOYMENT_TARGET: '12.0'
       MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
       MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
       AC_API_KEY_P8: ${{ secrets.AC_API_KEY_P8 }}
@@ -81,8 +111,12 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: rust toolchain (rust-toolchain.toml)
-        run: rustup show active-toolchain || rustup toolchain install
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustup target add ${{ matrix.target }}
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: release-macos-${{ matrix.arch }}
       - name: import Developer ID certificate
         if: env.MACOS_CERT_P12 != ''
         run: |
@@ -116,13 +150,14 @@ jobs:
         run: scripts/package-macos.sh
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: macos-${{ runner.arch }}
+          name: macos-${{ matrix.arch }}
           path: |
             target/package/*.dmg
             target/package/*.tar.gz
           if-no-files-found: error
 
   windows:
+    needs: checks
     runs-on: windows-2022
     timeout-minutes: 90
     defaults:
@@ -141,51 +176,58 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - name: package installer and portable app
         run: ./scripts/package-windows.ps1 -ReleasesUrl "https://github.com/$env:GITHUB_REPOSITORY/releases/latest/download"
+      - name: Verify x64 executable
+        run: |
+          $expected = Join-Path $env:GITHUB_WORKSPACE 'target/package'
+          if (-not (Get-ChildItem -LiteralPath $expected -Filter 'rcode-*-windows-x86_64-setup.exe')) {
+            throw 'Windows x64 installer was not produced'
+          }
+      - name: Verify installer install and uninstall
+        run: ./scripts/test-windows-installer.ps1
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: windows-${{ runner.arch }}
+          name: windows-x86_64
           path: |
             target/package/*.zip
             target/package/*.exe
           if-no-files-found: error
 
+  verify:
+    needs: [linux, macos, windows]
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.manifest.outputs.version }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          path: target/release-assets
+          merge-multiple: true
+      - name: Verify all platforms and create release metadata
+        id: manifest
+        run: |
+          python3 scripts/prepare-release.py --artifacts target/release-assets
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-metadata
+          path: |
+            target/release-assets/manifest.json
+            target/release-assets/latest.txt
+          if-no-files-found: error
+
   publish:
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
-    needs: [linux, macos, windows]
+    needs: verify
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           path: dist
           merge-multiple: true
-      - name: version guard (tag == artifact version)
-        run: |
-          case "$GITHUB_REF_NAME" in
-            v*) ver="${GITHUB_REF_NAME#v}" ;;
-            *) exit 1 ;;
-          esac
-          ls dist/
-          for platform in linux-x86_64.tar.gz linux-aarch64.tar.gz \
-              macos-arm64.dmg macos-arm64-app.tar.gz \
-              windows-x86_64.zip windows-x86_64.exe windows-x86_64-setup.exe; do
-            test -f "dist/rcode-$ver-$platform" \
-              || { echo "missing artifact for tag v$ver: $platform — check builds and Cargo.toml version"; exit 1; }
-          done
-          echo "VERSION=$ver" >> "$GITHUB_ENV"
-      - name: updater manifest
-        run: |
-          manifest=$(jq -n --arg version "$VERSION" '{version: $version, files: {}}')
-          for f in dist/*; do
-            sha=$(sha256sum "$f" | cut -d' ' -f1)
-            manifest=$(jq --arg name "$(basename "$f")" --arg sha "$sha" \
-              '.files[$name] = {sha256: $sha}' <<<"$manifest")
-          done
-          printf '%s' "$manifest" > manifest.json
       - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
-          name: ${{ env.VERSION }}
+          name: ${{ needs.verify.outputs.version }}
           files: |
             dist/*
-            manifest.json
           generate_release_notes: true
-          prerelease: ${{ contains(env.VERSION, '-') }}
+          prerelease: ${{ contains(needs.verify.outputs.version, '-') }}

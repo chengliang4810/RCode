@@ -1,1 +1,3 @@
 crates/agent/src/prompts/subagents/*.md text eol=lf
+/scripts/package-*.sh text eol=lf
+/dist/install.sh text eol=lf
