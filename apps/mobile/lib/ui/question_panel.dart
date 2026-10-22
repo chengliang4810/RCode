@@ -81,11 +81,12 @@ class _QuestionPanelState extends State<QuestionPanel> {
           },
       ]);
     } catch (error) {
-      if (mounted)
+      if (mounted) {
         setState(() {
           _saving = false;
           _error = '$error';
         });
+      }
     }
   }
 
@@ -95,11 +96,12 @@ class _QuestionPanelState extends State<QuestionPanel> {
     try {
       await widget.onDismiss();
     } catch (error) {
-      if (mounted)
+      if (mounted) {
         setState(() {
           _saving = false;
           _error = '$error';
         });
+      }
     }
   }
 
