@@ -36,6 +36,7 @@ class SessionController extends ChangeNotifier {
   JsonMap? goal;
   Object? error;
   bool hydrated = false;
+  bool _authoritativeTranscript = false;
   bool sending = false;
   double? transferProgress;
   bool disposed = false;
@@ -98,15 +99,7 @@ class SessionController extends ChangeNotifier {
             ? null
             : jsonMap(state['contextUsage']);
         goal = state['goal'] == null ? null : jsonMap(state['goal']);
-        for (final command in commands) {
-          if (command['issuedBy'] != workspace.clientDeviceId) continue;
-          final payload = jsonMap(command['payload']);
-          final messageId = payload['messageId'];
-          if (_echoes[messageId] case final echo?) {
-            echo['deliveryStatus'] = command['status'];
-            echo['deliveryError'] = command['resolution'];
-          }
-        }
+        _restoreCommandEchoes();
         _adoptEchoes();
         notifyListeners();
       }, onError: _streamError),
@@ -129,8 +122,11 @@ class SessionController extends ChangeNotifier {
             if (update.containsKey('goal')) {
               goal = update['goal'] == null ? null : jsonMap(update['goal']);
             }
+            final firstSnapshot = !_authoritativeTranscript;
+            _authoritativeTranscript = true;
             hydrated = true;
             error = null;
+            if (firstSnapshot) _restoreCommandEchoes();
             _adoptEchoes();
             notifyListeners();
             _saveCache();
@@ -197,6 +193,58 @@ class SessionController extends ChangeNotifier {
     _attempts.removeWhere(
       (_, entry) => adopted.contains(jsonMap(entry['payload'])['messageId']),
     );
+  }
+
+  void _restoreCommandEchoes() {
+    // A newly opened view needs the transcript reset before it can decide
+    // which accepted commands are still waiting to become user messages.
+    if (!_authoritativeTranscript) return;
+    final adopted = messages.map((entry) => entry['id']).toSet();
+    final attempts = <String, List<JsonMap>>{};
+    for (final command in commands) {
+      if (command['issuedBy'] != workspace.clientDeviceId) continue;
+      final payload = jsonMap(command['payload']);
+      if (payload['kind'] != 'run' && payload['kind'] != 'steer') continue;
+      final id = payload['messageId'];
+      if (id is! String || adopted.contains(id)) continue;
+      attempts.putIfAbsent(id, () => []).add(command);
+    }
+    for (final group in attempts.entries) {
+      final active = group.value
+          .where((entry) => entry['status'] != 'cancelled')
+          .toList();
+      if (active.isEmpty) {
+        _echoes.remove(group.key);
+        _attempts.remove(group.key);
+        continue;
+      }
+      final live = active.where(
+        (entry) => entry['status'] == 'pending' || entry['status'] == 'applied',
+      );
+      final command = live.lastOrNull ?? active.last;
+      final payload = jsonMap(command['payload']);
+      final prompt = payload['kind'] == 'run'
+          ? jsonMap(payload['request'])['prompt']
+          : payload['prompt'];
+      final echo = _echoes.putIfAbsent(
+        group.key,
+        () => {
+          'id': group.key,
+          'role': 'user',
+          'parts': [
+            {'id': 'pending-text', 'kind': 'text', 'text': prompt ?? ''},
+          ],
+          'createdAt': group.value.first['issuedAt'],
+          'deviceId': workspace.clientDeviceId,
+        },
+      );
+      echo['deliveryStatus'] = switch (command['status']) {
+        'expired' || 'superseded' => 'failed',
+        final status => status,
+      };
+      echo['deliveryError'] = command['resolution'];
+      _attempts[group.key] = command;
+    }
   }
 
   void _streamError(Object failure) {
@@ -293,12 +341,15 @@ class SessionController extends ChangeNotifier {
       try {
         await call('RelayCommand', {'entry': entry});
         if (_echoes[messageId] case final echo?) {
-          echo['deliveryStatus'] = 'pending';
+          if (echo['deliveryStatus'] == 'sending') {
+            echo['deliveryStatus'] = 'pending';
+          }
         }
       } catch (failure) {
         if (_echoes[messageId] case final echo?) {
           echo['deliveryStatus'] = 'unconfirmed';
         }
+        _restoreCommandEchoes();
         rethrow;
       }
       return messageId;
@@ -326,18 +377,31 @@ class SessionController extends ChangeNotifier {
   };
 
   Future<void> retryPending(String messageId) async {
-    final entry = _attempts[messageId];
-    if (entry == null) return;
-    // Only an explicit user retry resends, retaining the id already deduped by the host.
+    final previous = _attempts[messageId];
+    if (previous == null) return;
+    final settled = commands
+        .where((entry) => entry['id'] == previous['id'])
+        .firstOrNull;
+    // A lost acknowledgement retries the same command. A known failed attempt
+    // needs a new command id; the stable message id still deduplicates adoption.
+    final entry =
+        settled != null &&
+            {'rejected', 'expired', 'superseded'}.contains(settled['status'])
+        ? _command(jsonMap(previous['payload']))
+        : previous;
+    _attempts[messageId] = entry;
     error = null;
     _echoes[messageId]?['deliveryStatus'] = 'sending';
     notifyListeners();
     try {
       await call('RelayCommand', {'entry': entry});
-      _echoes[messageId]?['deliveryStatus'] = 'pending';
+      if (_echoes[messageId]?['deliveryStatus'] == 'sending') {
+        _echoes[messageId]?['deliveryStatus'] = 'pending';
+      }
     } catch (failure) {
       error = failure;
       _echoes[messageId]?['deliveryStatus'] = 'unconfirmed';
+      _restoreCommandEchoes();
       rethrow;
     } finally {
       if (!disposed) notifyListeners();

@@ -389,6 +389,77 @@ void main() {
     expect(session.contextUsage, {'tokens': 12, 'window': 1000});
   });
 
+  test('reopened views recover only their own undelivered commands and explicitly retry failures', () async {
+    final server = EngineFixture('server');
+    await server.start();
+    final model = workspace(MemoryStore());
+    addTearDown(() async {
+      model.dispose();
+      await server.close();
+    });
+    await model.connect(server.url, 'FixtureKey12');
+    await model.call('Mutate', {'op': 'createChat', 'chatId': 'chat'});
+    JsonMap command(
+      String id,
+      String status, {
+      String? device,
+      bool steer = false,
+    }) => {
+      'id': 'command-$id',
+      'payload': {
+        'kind': steer ? 'steer' : 'run',
+        'messageId': id,
+        if (steer)
+          'prompt': 'steer text'
+        else
+          'request': {
+            'prompt': 'retry text\n\nAttached images (local files — open them to view):\n- /uploads/recovered.png',
+          },
+      },
+      'issuedBy': device ?? model.clientDeviceId,
+      'issuedAt': 100,
+      'status': status,
+      'resolution': status == 'rejected' ? 'fixture_rejected' : null,
+    };
+    server.commands = [
+      command('failed', 'rejected'),
+      command('steer', 'pending', steer: true),
+      command('cancelled', 'cancelled'),
+      command('other', 'pending', device: 'another-phone'),
+    ];
+    final first = model.retainSession('chat');
+    await until(() => first.hydrated && first.pendingMessages.length == 2);
+    expect(first.pendingMessages.map((entry) => entry['id']), [
+      'failed',
+      'steer',
+    ]);
+    expect(first.pendingMessages.first['deliveryStatus'], 'rejected');
+    expect(first.pendingMessages.first['deliveryError'], 'fixture_rejected');
+    expect(
+      jsonMaps(first.pendingMessages.first['parts']).single['text'],
+      contains('/uploads/recovered.png'),
+    );
+    expect(server.relayCalls, 0);
+    model.releaseSession(first);
+    final reopened = model.retainSession('chat');
+    await until(
+      () => reopened.hydrated && reopened.pendingMessages.length == 2,
+    );
+    expect(server.relayCalls, 0);
+    await reopened.retryPending('failed');
+    await until(
+      () =>
+          reopened.messages.length == 1 && reopened.pendingMessages.length == 1,
+    );
+    expect(server.relayCalls, 1);
+    expect(server.lastCommand!['id'], isNot('command-failed'));
+    expect(jsonMap(server.lastCommand!['payload'])['messageId'], 'failed');
+    server.commands = [command('steer', 'cancelled', steer: true)];
+    server.publish('WatchSessionState');
+    await until(() => reopened.pendingMessages.isEmpty);
+    model.releaseSession(reopened);
+  });
+
   test('question responses, interrupt, queue identities and edit leases use the real wire shapes', () async {
     final server = EngineFixture('server');
     await server.start();
