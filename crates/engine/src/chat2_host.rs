@@ -39,6 +39,7 @@ pub struct EngineChatSink {
     store: Arc<DocsStore>,
     chat_id: String,
     handle: std::sync::Weak<crate::doc_host::ChatDocHandle>,
+    bound_to_handle: bool,
     persistence: Arc<crate::chat_persistence::ChatPersistence>,
 }
 
@@ -58,6 +59,7 @@ impl EngineChatSink {
             chat_id,
             persistence,
             handle: std::sync::Weak::new(),
+            bound_to_handle: false,
         }
     }
 
@@ -71,6 +73,7 @@ impl EngineChatSink {
             self.persistence = persistence.clone();
         }
         self.handle = handle;
+        self.bound_to_handle = true;
         self
     }
 
@@ -148,9 +151,14 @@ impl ChatDocSink for EngineChatSink {
             .map_err(|e| e.to_string())
     }
     fn persist_update(&self, batch_id: &str, bytes: &[u8]) -> Result<(), String> {
-        self.store
-            .enqueue_chat_update(&self.chat_id, batch_id, bytes)
-            .map_err(|e| e.to_string())
+        let write = || self.store
+                .enqueue_chat_update(&self.chat_id, batch_id, bytes)
+                .map_err(|e| e.to_string());
+        match self.handle.upgrade() {
+            Some(handle) => handle.with_persistence_write(write),
+            None if self.bound_to_handle => Err("cannot persist an evicted or deleted chat".into()),
+            None => write(),
+        }
     }
     fn acknowledge_update(&self, batch_id: &str) -> Result<(), String> {
         self.store

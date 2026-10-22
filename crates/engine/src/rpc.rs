@@ -1169,7 +1169,7 @@ impl EngineRpc {
         }
     }
 
-    fn mutate(&self, params: MutateParams) -> Result<(), RpcError> {
+    async fn mutate(&self, params: MutateParams) -> Result<(), RpcError> {
         let failed = |e: crate::EngineError| RpcError::Failed(e.to_string());
         match params {
             MutateParams::CreateChat {
@@ -1181,6 +1181,7 @@ impl EngineRpc {
                 cwd,
                 parent_chat_id,
             } => {
+                self.doc_host.ensure_not_deleted(&chat_id).map_err(failed)?;
                 self.workspace
                     .create_chat_with_parent(
                         &chat_id,
@@ -1214,21 +1215,29 @@ impl EngineRpc {
                 .map_err(failed)
                 .map(drop),
             MutateParams::DeleteSpace { space_id } => {
+                let chat_ids = self.workspace.begin_space_deletion(&space_id).map_err(failed)?;
+                // Mark the entire project before awaiting any one runtime.
+                for chat_id in &chat_ids {
+                    self.sessions.begin_chat_deletion(chat_id);
+                    self.doc_host.begin_chat_deletion(chat_id);
+                }
+                let mut settled = Vec::new();
+                for chat_id in &chat_ids {
+                    settled.push(self.sessions.settle_chat_deletion(chat_id).await.map_err(failed)?);
+                }
+                for chat_id in &chat_ids {
+                    self.doc_host.ensure_chat_settled(chat_id).map_err(failed)?;
+                }
                 let deleted = self.workspace.delete_space(&space_id).map_err(failed)?;
-                // Best-effort teardown of live runs we host for the deleted chats
-                // (the doc rows are already tombstoned; a straggler run would only
-                // write into an orphaned session doc).
-                let sessions = self.sessions.clone();
-                let doc_host = self.doc_host.clone();
-                let chat_ids = deleted.chat_ids;
-                tokio::spawn(async move {
-                    for chat_id in chat_ids {
-                        if let Err(err) = sessions.terminate(&chat_id).await {
-                            tracing::debug!(chat = %chat_id, error = %err, "deleteSpace teardown skipped");
-                        }
-                        doc_host.purge_chat(&chat_id);
-                    }
-                });
+                for chat_id in deleted.chat_ids {
+                    // The shared workspace gate admitted no local fork after
+                    // the first listing. Peer-added rows cannot start locally
+                    // while their project is closing either.
+                    self.sessions.begin_chat_deletion(&chat_id);
+                    self.doc_host.begin_chat_deletion(&chat_id);
+                    self.doc_host.purge_chat(&chat_id).map_err(failed)?;
+                    self.sessions.forget_deleted_chat(&chat_id);
+                }
                 Ok(())
             }
             MutateParams::RenameChat { chat_id, title } => self
@@ -1274,17 +1283,14 @@ impl EngineRpc {
                 .map_err(failed)
                 .map(drop),
             MutateParams::DeleteChat { chat_id } => {
+                self.workspace.begin_chat_deletion(&chat_id);
+                self.sessions.begin_chat_deletion(&chat_id);
+                self.doc_host.begin_chat_deletion(&chat_id);
+                let _settled = self.sessions.settle_chat_deletion(&chat_id).await.map_err(failed)?;
+                self.doc_host.ensure_chat_settled(&chat_id).map_err(failed)?;
                 self.workspace.delete_chat(&chat_id).map_err(failed)?;
-                // Settle the writer before dropping its document. Otherwise a
-                // live turn can persist the deleted snapshot again.
-                let sessions = self.sessions.clone();
-                let doc_host = self.doc_host.clone();
-                tokio::spawn(async move {
-                    if let Err(error) = sessions.terminate(&chat_id).await {
-                        tracing::warn!(chat = %chat_id, %error, "deleted chat teardown failed");
-                    }
-                    doc_host.purge_chat(&chat_id);
-                });
+                self.doc_host.purge_chat(&chat_id).map_err(failed)?;
+                self.sessions.forget_deleted_chat(&chat_id);
                 Ok(())
             }
             MutateParams::RenameDevice { device_id, name } => self
@@ -2478,6 +2484,7 @@ impl RpcService for EngineRpc {
                 chat.harness_session_id = None;
                 chat.harness_session_cwd = None;
                 chat.room_gen = Some(2);
+                let admission = self.workspace.admit_fork(&chat, &source.id).map_err(failed)?;
                 // Missing rows open on chat2. Persist history before publishing
                 // the registry row so a crash cannot leave a discoverable empty fork.
                 let target = self.doc_host.open(&chat.id).map_err(failed)?;
@@ -2536,7 +2543,7 @@ impl RpcService for EngineRpc {
                         .map_err(|e| RpcError::Failed(e.to_string()))?;
                 }
                 self.doc_host.persist_fork(&target).map_err(failed)?;
-                self.workspace.import_chat_row(&chat).map_err(failed)?;
+                admission.publish(&chat).map_err(failed)?;
                 RpcReply::value(&chat)
             }
             methods::FOCUS_CHAT => {
@@ -2875,7 +2882,7 @@ impl RpcService for EngineRpc {
             methods::MUTATE => {
                 let p: MutateParams = parse_params(params)?;
                 let sidebar_pins = matches!(&p, MutateParams::ChangeSidebarPin { .. });
-                self.mutate(p)?;
+                self.mutate(p).await?;
                 if sidebar_pins {
                     return RpcReply::value(&serde_json::json!({
                         "ok": true, "sidebarPreferences": self.workspace.sidebar_preferences_snapshot(),

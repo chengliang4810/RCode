@@ -171,6 +171,7 @@ pub struct WorkspaceHostConfig {
 }
 
 struct WorkspaceHostInner {
+    closing: Mutex<ClosingEntities>,
     store: Arc<DocsStore>,
     config: WorkspaceHostConfig,
     reg: Arc<Mutex<RegistryDoc>>,
@@ -199,6 +200,37 @@ struct WorkspaceHostInner {
     /// warm-up clock (`peer_liveness`): a just-joined room hasn't heard
     /// anyone's heartbeat yet, and that silence must not read as "offline".
     room_joined_at: std::sync::atomic::AtomicI64,
+}
+
+#[derive(Default)]
+struct ClosingEntities {
+    chats: std::collections::HashSet<String>,
+    spaces: std::collections::HashSet<String>,
+}
+
+/// A fork publishes its row only after its snapshot is durable. Admission must
+/// span both steps so project deletion cannot miss a snapshot-only child.
+pub(crate) struct ForkAdmission<'a> {
+    workspace: &'a WorkspaceHost,
+    _closing: MutexGuard<'a, ClosingEntities>,
+}
+
+impl ForkAdmission<'_> {
+    pub(crate) fn publish(self, chat: &Chat) -> Result<(), EngineError> {
+        Ok(self.workspace.mutate(|doc| doc.upsert_chat(chat))?)
+    }
+}
+
+impl ClosingEntities {
+    fn check_chat(&self, chat_id: &str, space_id: Option<&str>, parent: Option<&str>) -> Result<(), EngineError> {
+        if self.chats.contains(chat_id)
+            || space_id.is_some_and(|id| self.spaces.contains(id))
+            || parent.is_some_and(|id| self.chats.contains(id))
+        {
+            return Err(EngineError::Other("chat or project is closing or deleted".into()));
+        }
+        Ok(())
+    }
 }
 
 /// "This peer is alive" callback (device id) — see `WorkspaceHost::set_peer_alive_hook`.
@@ -322,6 +354,7 @@ impl WorkspaceHost {
 
         let host = Self {
             inner: Arc::new(WorkspaceHostInner {
+                closing: Mutex::new(ClosingEntities::default()),
                 store,
                 config,
                 reg: Arc::new(Mutex::new(doc)),
@@ -914,6 +947,12 @@ impl WorkspaceHost {
     /// Session-status row upsert (sessions engine transitions land here too, in
     /// addition to the local watch channel).
     pub fn record_session(&self, session: &Session) {
+        let closing = lock(&self.inner.closing);
+        let chat = self.chat(&session.chat_id).ok().flatten();
+        if closing.check_chat(&session.chat_id,
+            chat.as_ref().and_then(|chat| chat.space_id.as_deref()), None).is_err() {
+            return;
+        }
         if let Err(err) = self.mutate(|doc| doc.upsert_session(session)) {
             tracing::warn!(chat = %session.chat_id, error = %err, "registry session write failed");
         }
@@ -948,6 +987,10 @@ impl WorkspaceHost {
         cwd: Option<String>,
         parent_chat_id: Option<String>,
     ) -> Result<(), EngineError> {
+        // Includes internal forks, not only RPC creates. Keep this lock through
+        // publication so begin_space_deletion sees every admitted child.
+        let closing = lock(&self.inner.closing);
+        closing.check_chat(chat_id, space_id, parent_chat_id.as_deref())?;
         if self.read(|doc| doc.chat(chat_id))?.is_some() {
             return Ok(()); // idempotent: optimistic client retries never duplicate
         }
@@ -1036,6 +1079,10 @@ impl WorkspaceHost {
         name: Option<String>,
         git_detected: bool,
     ) -> Result<(), EngineError> {
+        let closing = lock(&self.inner.closing);
+        if closing.spaces.contains(space_id) {
+            return Err(EngineError::Other("project is closing or deleted".into()));
+        }
         let spaces = self.read(|doc| doc.read_spaces())?;
         if spaces
             .iter()
@@ -1137,9 +1184,11 @@ impl WorkspaceHost {
         last_message_at: Option<i64>,
         created_at: Option<i64>,
     ) -> Result<bool, EngineError> {
+        let closing = lock(&self.inner.closing);
         let Some(mut chat) = self.read(|doc| doc.chat(chat_id))? else {
             return Ok(false);
         };
+        closing.check_chat(chat_id, chat.space_id.as_deref(), chat.parent_chat_id.as_deref())?;
         if let Some(ms) = last_message_at {
             chat.last_message_at = chrono::DateTime::<Utc>::from_timestamp_millis(ms);
         }
@@ -1156,9 +1205,11 @@ impl WorkspaceHost {
     /// migration flow will drive this). Returns false when the chat doesn't
     /// exist.
     pub fn set_chat_host(&self, chat_id: &str, device_id: &str) -> Result<bool, EngineError> {
+        let closing = lock(&self.inner.closing);
         let Some(mut chat) = self.read(|doc| doc.chat(chat_id))? else {
             return Ok(false);
         };
+        closing.check_chat(chat_id, chat.space_id.as_deref(), chat.parent_chat_id.as_deref())?;
         chat.device_id = device_id.to_string();
         self.mutate(|doc| doc.upsert_chat(&chat))?;
         Ok(true)
@@ -1168,12 +1219,25 @@ impl WorkspaceHost {
     /// import). Same write path as every live mutation, so the row persists
     /// and pushes like any other; the caller fixes `room_gen` beforehand.
     pub fn import_chat_row(&self, chat: &Chat) -> Result<(), EngineError> {
+        let closing = lock(&self.inner.closing);
+        closing.check_chat(&chat.id, chat.space_id.as_deref(), chat.parent_chat_id.as_deref())?;
         Ok(self.mutate(|doc| doc.upsert_chat(chat))?)
+    }
+
+    pub(crate) fn admit_fork(&self, chat: &Chat, source_chat_id: &str) -> Result<ForkAdmission<'_>, EngineError> {
+        let closing = lock(&self.inner.closing);
+        closing.check_chat(&chat.id, chat.space_id.as_deref(), chat.parent_chat_id.as_deref())?;
+        closing.check_chat(source_chat_id, None, None)?;
+        Ok(ForkAdmission { workspace: self, _closing: closing })
     }
 
     /// Upsert a space row copied verbatim from another profile (local→synced
     /// import).
     pub fn import_space_row(&self, space: &Space) -> Result<(), EngineError> {
+        let closing = lock(&self.inner.closing);
+        if closing.spaces.contains(&space.id) {
+            return Err(EngineError::Other("project is closing or deleted".into()));
+        }
         Ok(self.mutate(|doc| doc.upsert_space(space))?)
     }
 
@@ -1198,6 +1262,28 @@ impl WorkspaceHost {
     /// doc remains untouched.
     pub fn delete_chat(&self, chat_id: &str) -> Result<bool, EngineError> {
         Ok(self.mutate(|doc| doc.delete_chat(chat_id))?)
+    }
+
+    pub(crate) fn begin_chat_deletion(&self, chat_id: &str) {
+        lock(&self.inner.closing).chats.insert(chat_id.to_owned());
+    }
+
+    pub(crate) fn begin_space_deletion(&self, space_id: &str) -> Result<Vec<String>, EngineError> {
+        let mut closing = lock(&self.inner.closing);
+        closing.spaces.insert(space_id.to_owned());
+        let chats: Vec<_> = self.read_chats()?.into_iter()
+            .filter(|chat| chat.space_id.as_deref() == Some(space_id))
+            .map(|chat| chat.id).collect();
+        closing.chats.extend(chats.iter().cloned());
+        Ok(chats)
+    }
+
+    pub(crate) fn chat_is_closing(&self, chat_id: &str) -> Result<bool, EngineError> {
+        let closing = lock(&self.inner.closing);
+        if closing.chats.contains(chat_id) { return Ok(true); }
+        Ok(self.chat(chat_id)?.as_ref().is_some_and(|chat| {
+            chat.space_id.as_ref().is_some_and(|id| closing.spaces.contains(id))
+        }))
     }
 
     pub fn rename_device(&self, device_id: &str, name: &str) -> Result<bool, EngineError> {

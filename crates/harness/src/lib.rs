@@ -62,6 +62,19 @@ impl SteerMessage {
 pub struct TurnControl {
     stop: std::sync::Arc<tokio::sync::Notify>,
     background: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    runtime_workers: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    runtime_changed: std::sync::Arc<tokio::sync::Notify>,
+}
+
+/// An actor is still alive until its streams, child tasks and cleanup finish.
+/// Cancellation requests and a closed event receiver do not prove that exit.
+pub struct RuntimeWorkerLease(TurnControl);
+
+impl Drop for RuntimeWorkerLease {
+    fn drop(&mut self) {
+        self.0.runtime_workers.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+        self.0.runtime_changed.notify_waiters();
+    }
 }
 
 impl TurnControl {
@@ -85,6 +98,23 @@ impl TurnControl {
     /// would kill work nobody asked to stop.
     pub fn background_live(&self) -> bool {
         self.background.load(std::sync::atomic::Ordering::Acquire) > 0
+    }
+
+    pub fn track_runtime_worker(&self) -> RuntimeWorkerLease {
+        self.runtime_workers.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        RuntimeWorkerLease(self.clone())
+    }
+
+    pub async fn wait_for_runtime_exit(&self) {
+        loop {
+            let changed = self.runtime_changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            if self.runtime_workers.load(std::sync::atomic::Ordering::Acquire) == 0 {
+                return;
+            }
+            changed.await;
+        }
     }
 }
 

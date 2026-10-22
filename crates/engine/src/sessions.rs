@@ -21,7 +21,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 
 use chrono::Utc;
-use futures::StreamExt;
+use futures::{FutureExt, StreamExt};
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 
 use rcode_doc::{
@@ -165,9 +165,6 @@ struct RunHandle {
     /// The harness stream is open. Before that there is no runtime to keep:
     /// a stop tears the pending start down instead.
     started: Arc<std::sync::atomic::AtomicBool>,
-    /// Engine-level cancel: arms the run task's grace deadline so a harness that
-    /// ignores its token can never strand the run.
-    cancel: watch::Sender<bool>,
     engine_tx: mpsc::UnboundedSender<AgentEvent>,
     pending_inputs: PendingInputs,
     /// Steers accepted into the mailbox but not yet confirmed by a `Steered`
@@ -185,6 +182,18 @@ struct RunHandle {
     /// is unambiguously before the stop (cancelled with it) or after it
     /// (re-dispatched to a fresh runtime — never lost).
     retiring: Arc<std::sync::atomic::AtomicBool>,
+}
+
+/// Kept until the driver AND its runtime actors finish, even if the prompt
+/// routing slot has already been released for a subsequent turn.
+#[derive(Clone)]
+struct RunTask {
+    run_id: String,
+    interrupt: CancellationToken,
+    /// Arms the driver's grace deadline even when the harness ignores its token.
+    cancel: watch::Sender<bool>,
+    abort: futures::future::AbortHandle,
+    completed: watch::Receiver<bool>,
 }
 
 /// One accepted-but-unconfirmed steer: enough to re-dispatch it verbatim.
@@ -226,6 +235,9 @@ struct Inner {
     title_jobs: Mutex<HashMap<String, CancellationToken>>,
     /// chat_id → live run.
     runs: Mutex<HashMap<String, RunHandle>>,
+    run_tasks: Mutex<HashMap<String, Vec<RunTask>>>,
+    deleting_chats: Mutex<std::collections::HashSet<String>>,
+    dispatch_locks: Mutex<HashMap<String, std::sync::Weak<tokio::sync::Mutex<()>>>>,
     /// chat_id → broadcast hub (retained across runs so subscribers survive turns).
     hubs: Mutex<HashMap<String, broadcast::Sender<JournaledEvent>>>,
     statuses: Mutex<HashMap<String, Session>>,
@@ -280,6 +292,9 @@ impl SessionsEngine {
                 workspace: Mutex::new(None),
                 title_jobs: Mutex::new(HashMap::new()),
                 runs: Mutex::new(HashMap::new()),
+                run_tasks: Mutex::new(HashMap::new()),
+                deleting_chats: Mutex::new(Default::default()),
+                dispatch_locks: Mutex::new(HashMap::new()),
                 hubs: Mutex::new(HashMap::new()),
                 statuses: Mutex::new(HashMap::new()),
                 sessions_tx,
@@ -361,6 +376,69 @@ impl SessionsEngine {
             .doc_host()
             .ok_or_else(|| EngineError::Other("doc host not wired into sessions engine".into()))?;
         host.open(chat_id)
+    }
+
+    fn dispatch_lock(&self, chat_id: &str) -> Arc<tokio::sync::Mutex<()>> {
+        let mut locks = lock(&self.inner.dispatch_locks);
+        if let Some(existing) = locks.get(chat_id).and_then(std::sync::Weak::upgrade) {
+            return existing;
+        }
+        let current = Arc::new(tokio::sync::Mutex::new(()));
+        locks.insert(chat_id.to_owned(), Arc::downgrade(&current));
+        current
+    }
+
+    fn ensure_chat_open(&self, chat_id: &str) -> Result<(), EngineError> {
+        if lock(&self.inner.deleting_chats).contains(chat_id)
+            || self.inner.shutting_down.load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Err(EngineError::Other(format!("chat `{chat_id}` is closing or deleted")));
+        }
+        if self.inner.workspace().is_some_and(|workspace| workspace.chat_is_closing(chat_id).unwrap_or(true)) {
+            return Err(EngineError::Other(format!("chat `{chat_id}` or its project is closing or deleted")));
+        }
+        Ok(())
+    }
+
+    /// Closing is permanent for this chat id. It precedes every await, so a
+    /// queued prompt, retry, background wake or late steer cannot reopen it.
+    pub(crate) fn begin_chat_deletion(&self, chat_id: &str) {
+        lock(&self.inner.deleting_chats).insert(chat_id.to_owned());
+        if let Some(cancel) = lock(&self.inner.title_jobs).get(chat_id) {
+            cancel.cancel();
+        }
+        if let Some(tasks) = lock(&self.inner.run_tasks).get(chat_id) {
+            for task in tasks {
+                let _ = task.cancel.send(true);
+                task.interrupt.cancel();
+            }
+        }
+    }
+
+    pub(crate) async fn settle_chat_deletion(
+        &self,
+        chat_id: &str,
+    ) -> Result<tokio::sync::OwnedMutexGuard<()>, EngineError> {
+        self.begin_chat_deletion(chat_id);
+        let gate = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            self.dispatch_lock(chat_id).lock_owned(),
+        )
+        .await
+        .map_err(|_| EngineError::Other(format!("chat deletion incomplete: `{chat_id}` still has a pending dispatch")))?;
+        self.terminate(chat_id).await?;
+        Ok(gate)
+    }
+
+    pub(crate) fn forget_deleted_chat(&self, chat_id: &str) {
+        lock(&self.inner.last_requests).remove(chat_id);
+        lock(&self.inner.harness_sessions).remove(chat_id);
+        lock(&self.inner.goal_stores).remove(chat_id);
+        let mut statuses = lock(&self.inner.statuses);
+        statuses.remove(chat_id);
+        let mut rows: Vec<_> = statuses.values().cloned().collect();
+        rows.sort_by(|a, b| a.chat_id.cmp(&b.chat_id));
+        self.inner.sessions_tx.send_replace(rows);
     }
 
     /// The conversation so far, for a harness that replays history itself.
@@ -907,6 +985,8 @@ impl SessionsEngine {
         startup_retry: bool,
         idle: bool,
     ) -> Result<String, EngineError> {
+        let _dispatch = self.dispatch_lock(chat_id).lock_owned().await;
+        self.ensure_chat_open(chat_id)?;
         // Project-less chats store a home-relative cwd (the creating device
         // can't know the host's home); expand it here, on the host, where the
         // run spawns, creating a new chat's scratch folder.
@@ -982,6 +1062,7 @@ impl SessionsEngine {
                     config: reconfigure.then(|| Box::new(request.clone())),
                 };
                 if let Ok(permit) = steer_tx.reserve().await {
+                    self.ensure_chat_open(chat_id)?;
                     let mut pending = lock(&ledger);
                     pending.push_back(RoutedSteer {
                         prompt: request.prompt.clone(),
@@ -1142,6 +1223,8 @@ impl SessionsEngine {
         // the engine's, and because the message being dispatched must be
         // excluded — it was written above and rides `request.prompt`.
         let history = self.conversation_history(chat_id, Some(&user_id)).await;
+        self.ensure_chat_open(chat_id)?;
+        let writer = handle.writer()?;
         let controls = RunControls {
             conversation_id: Some(chat_id.to_owned()),
             goal: if self.inner.doc_host().is_some() { Some(self.goal_store(chat_id)?) } else { None },
@@ -1152,6 +1235,22 @@ impl SessionsEngine {
             history,
         };
 
+        let (abort, abort_registration) = futures::future::AbortHandle::new_pair();
+        let (completed_tx, completed) = watch::channel(false);
+        let task = RunTask {
+            run_id: run_id.clone(),
+            interrupt: interrupt_token.clone(),
+            cancel: cancel_tx.clone(),
+            abort,
+            completed,
+        };
+        // Publication and the closing intent share this boundary. Deletion
+        // either observes this task, or prevents its insertion altogether.
+        let closing = lock(&self.inner.deleting_chats);
+        if closing.contains(chat_id) {
+            return Err(EngineError::Other(format!("chat `{chat_id}` is closing or deleted")));
+        }
+        lock(&self.inner.run_tasks).entry(chat_id.to_owned()).or_default().push(task);
         lock(&self.inner.runs).insert(
             chat_id.to_string(),
             RunHandle {
@@ -1163,7 +1262,6 @@ impl SessionsEngine {
                 stops_turn_in_place: harness.supports_steering() && harness.stops_turn_in_place(),
                 turn: turn.clone(),
                 started: started.clone(),
-                cancel: cancel_tx,
                 engine_tx,
                 pending_inputs,
                 routed_steers: Arc::new(Mutex::new(std::collections::VecDeque::new())),
@@ -1171,6 +1269,7 @@ impl SessionsEngine {
                 retiring: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             },
         );
+        drop(closing);
         self.set_status(
             chat_id,
             if idle {
@@ -1189,13 +1288,13 @@ impl SessionsEngine {
         // Title generation ran off the first prompt in the external-agent
         // design; the native agent titles within its own turn.
 
-        tokio::spawn(drive_run(
+        let driver = drive_run(
             self.inner.clone(),
             chat_id.to_string(),
             run_id.clone(),
             harness,
             request,
-            handle.writer(),
+            writer,
             controls,
             engine_rx,
             cancel_rx,
@@ -1207,8 +1306,37 @@ impl SessionsEngine {
                 fork_history_sent,
                 started,
             },
-            turn,
-        ));
+            turn.clone(),
+        );
+        let inner = self.inner.clone();
+        let chat = chat_id.to_owned();
+        let task_run_id = run_id.clone();
+        tokio::spawn(async move {
+            let result = std::panic::AssertUnwindSafe(futures::future::Abortable::new(driver, abort_registration))
+                .catch_unwind().await;
+            if result.is_err() {
+                tracing::error!(chat = %chat, "session driver panicked during execution");
+            }
+            // Dropping the stream requests shutdown; the actor lease confirms
+            // that the runtime has actually reaped its background children.
+            turn.wait_for_runtime_exit().await;
+            let still_current = lock(&inner.runs).get(&chat)
+                .is_some_and(|run| run.run_id == task_run_id);
+            if !matches!(result, Ok(Ok(())))
+                && still_current
+            {
+                inner.set_status(&chat, SessionStatus::Idle, false);
+            }
+            inner.remove_run(&chat, &task_run_id);
+            {
+                let mut all_tasks = lock(&inner.run_tasks);
+                if let Some(tasks) = all_tasks.get_mut(&chat) {
+                    tasks.retain(|task| task.run_id != task_run_id);
+                    if tasks.is_empty() { all_tasks.remove(&chat); }
+                }
+            }
+            completed_tx.send_replace(true);
+        });
         Ok(run_id)
     }
 
@@ -1259,6 +1387,8 @@ impl SessionsEngine {
         message_id: Option<String>,
         issued_at: i64,
     ) -> Result<SteerOutcome, EngineError> {
+        let _dispatch = self.dispatch_lock(chat_id).lock_owned().await;
+        self.ensure_chat_open(chat_id)?;
         let target = lock(&self.inner.runs)
             .get(chat_id)
             .filter(|h| h.steerable && !h.retiring.load(std::sync::atomic::Ordering::Acquire))
@@ -1302,6 +1432,7 @@ impl SessionsEngine {
         let Ok(permit) = steer_tx.reserve().await else {
             return Ok(SteerOutcome::NotSteerable);
         };
+        self.ensure_chat_open(chat_id)?;
         {
             // Serialize mailbox acceptance with confirmation and Done-time
             // inspection: a fast consumer must never outrun its ledger entry.
@@ -1423,44 +1554,51 @@ impl SessionsEngine {
     /// streaming entry stamped `aborted`; this waits (bounded) for that
     /// settlement. Background work the runtime held dies with it.
     pub async fn terminate(&self, chat_id: &str) -> Result<bool, EngineError> {
-        let target = lock(&self.inner.runs).get(chat_id).map(|h| {
-            (
-                h.run_id.clone(),
-                h.interrupt_token.clone(),
-                h.cancel.clone(),
-                h.pending_inputs.clone(),
-                h.routed_steers.clone(),
-                h.retiring.clone(),
-            )
-        });
-        let Some((run_id, token, cancel, pending, ledger, retiring)) = target else {
-            return Ok(false);
-        };
-        // From here the runtime takes no prompt: a send now starts a fresh
-        // runtime, and one that raced into this mailbox is re-dispatched.
-        {
-            let _order = lock(&ledger);
-            retiring.store(true, std::sync::atomic::Ordering::Release);
-        }
-        // Publish cancellation BEFORE waking the harness. Otherwise a fast
-        // EOF after token.cancel() can beat this watch notification and be
-        // classified as an error instead of an interrupted turn.
-        let _ = cancel.send(true);
-        // Unpark questions before harness teardown, which can await them.
-        let parked: Vec<_> = lock(&pending).drain().map(|(_, entry)| entry).collect();
-        for entry in parked {
-            let _ = entry
-                .resolver
-                .send(rcode_proto::InteractionResponse::Dismissed);
-        }
-        // Harness-level interrupt (protocol + child teardown) …
-        token.cancel();
-        // Bounded settle wait (the run task appends Done + stamps `aborted`).
-        for _ in 0..500 {
-            if !self.is_live(chat_id, &run_id) {
-                break;
+        self.terminate_with_deadlines(
+            chat_id,
+            std::time::Duration::from_secs(5),
+            std::time::Duration::from_secs(3),
+        ).await
+    }
+
+    async fn terminate_with_deadlines(
+        &self,
+        chat_id: &str,
+        grace: std::time::Duration,
+        forced: std::time::Duration,
+    ) -> Result<bool, EngineError> {
+        if let Some(handle) = lock(&self.inner.runs).get(chat_id) {
+            let _order = lock(&handle.routed_steers);
+            handle.retiring.store(true, std::sync::atomic::Ordering::Release);
+            let parked: Vec<_> = lock(&handle.pending_inputs).drain().map(|(_, entry)| entry).collect();
+            for entry in parked {
+                let _ = entry.resolver.send(rcode_proto::InteractionResponse::Dismissed);
             }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let tasks = lock(&self.inner.run_tasks).get(chat_id).cloned().unwrap_or_default();
+        if tasks.is_empty() {
+            return Ok(false);
+        }
+        // Cancellation is a request, not acknowledgement that the process or
+        // writer has exited. Retain each task until its completion signal.
+        for task in &tasks {
+            let _ = task.cancel.send(true);
+            task.interrupt.cancel();
+        }
+        let wait = || futures::future::try_join_all(tasks.iter().map(|task| async move {
+            let mut completed = task.completed.clone();
+            completed.wait_for(|done| *done).await.map(|_| ())
+                .map_err(|_| EngineError::Other(format!("runtime `{}` closed without confirming shutdown", task.run_id)))
+        }));
+        match tokio::time::timeout(grace, wait()).await {
+            Ok(result) => { result?; }
+            Err(_) => {
+                for task in &tasks {
+                    task.abort.abort();
+                }
+                tokio::time::timeout(forced, wait()).await
+                    .map_err(|_| EngineError::Other(format!("chat shutdown incomplete: `{chat_id}` still has runtime or background work")))??;
+            }
         }
         Ok(true)
     }
@@ -1686,7 +1824,7 @@ impl SessionsEngine {
                 cancel.cancel();
             }
         }
-        let chats: Vec<String> = lock(&self.inner.runs).keys().cloned().collect();
+        let chats: Vec<String> = lock(&self.inner.run_tasks).keys().cloned().collect();
         for chat_id in chats {
             if let Err(err) = self.terminate(&chat_id).await {
                 tracing::warn!(chat = %chat_id, error = %err, "shutdown interrupt failed");
@@ -1973,6 +2111,9 @@ impl Inner {
         fresh_start: bool,
         completed_turn: Option<String>,
     ) {
+        if lock(&self.deleting_chats).contains(chat_id) {
+            return;
+        }
         let now = Utc::now();
         let session = {
             let mut statuses = lock(&self.statuses);
@@ -3377,7 +3518,7 @@ async fn drive_run(
             // Open the sink lazily; an open failure degrades to chip-only.
             if !sink_known && !done_only {
                 let opened = inner.doc_host().and_then(|host| match host.open(&sub_id) {
-                    Ok(handle) => Some(handle.writer()),
+                    Ok(handle) => handle.writer().ok(),
                     Err(err) => {
                         tracing::warn!(doc = %sub_id, error = %err, "subagent doc open failed (chip-only)");
                         None
@@ -3984,6 +4125,7 @@ async fn drive_run(
     let orphans: Vec<RoutedSteer> = if inner
         .shutting_down
         .load(std::sync::atomic::Ordering::Acquire)
+        || lock(&inner.deleting_chats).contains(&chat_id)
     {
         Vec::new()
     } else if interrupted {
@@ -4047,6 +4189,10 @@ mod title_tests;
 #[cfg(test)]
 #[path = "sessions_history_tests.rs"]
 mod history_tests;
+
+#[cfg(test)]
+#[path = "sessions_deletion_tests.rs"]
+mod deletion_tests;
 
 #[cfg(test)]
 mod tests {
@@ -4574,7 +4720,7 @@ mod tests {
         let handle = host.open("chat-sub-flush--sub--t1").unwrap();
         let mut sink = SubagentSink {
             doc_id: "chat-sub-flush--sub--t1".into(),
-            doc: handle.writer(),
+            doc: handle.writer().unwrap(),
             entry_id: "entry-1".into(),
             started_at: 0,
             entry_index: None,

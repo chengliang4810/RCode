@@ -18,6 +18,7 @@ pub(crate) struct ChatPersistence {
     saved: AtomicU64,
     snapshot_bytes: AtomicUsize,
     urgent: AtomicBool,
+    stopped: AtomicBool,
     write: Mutex<()>,
     wake: Option<mpsc::Sender<()>>,
     pub(crate) initial_cursor_verified: bool,
@@ -48,6 +49,7 @@ impl ChatPersistence {
             saved: AtomicU64::new(0),
             snapshot_bytes: AtomicUsize::new(0),
             urgent: AtomicBool::new(false),
+            stopped: AtomicBool::new(false),
             write: Mutex::new(()),
             wake: runtime.as_ref().map(|_| tx),
             initial_cursor_verified: verified,
@@ -86,6 +88,9 @@ impl ChatPersistence {
     }
 
     pub(crate) fn dirty(&self, immediate: bool) {
+        if self.stopped.load(Ordering::Acquire) {
+            return;
+        }
         self.generation.fetch_add(1, Ordering::Release);
         if immediate {
             self.urgent.store(true, Ordering::Release);
@@ -103,6 +108,9 @@ impl ChatPersistence {
             let deadline = tokio::time::Instant::now() + SAVE_INTERVAL;
             loop {
                 let Some(this) = weak.upgrade() else { return };
+                if this.stopped.load(Ordering::Acquire) {
+                    return;
+                }
                 let urgent = this.urgent.swap(false, Ordering::AcqRel);
                 drop(this);
                 if urgent {
@@ -114,6 +122,9 @@ impl ChatPersistence {
                 }
             }
             let Some(this) = weak.upgrade() else { return };
+            if this.stopped.load(Ordering::Acquire) {
+                return;
+            }
             // All chat persisters sharing this SQLite connection queue
             // asynchronously, BEFORE occupying a blocking-pool thread.
             let permit = this.store.snapshot_writer.clone().lock_owned().await;
@@ -142,6 +153,9 @@ impl ChatPersistence {
     pub(crate) fn flush_sync(&self) {
         let flush = || {
             let _write = self.write.lock().unwrap_or_else(|e| e.into_inner());
+            if self.stopped.load(Ordering::Acquire) {
+                return;
+            }
             let generation = self.generation.load(Ordering::Acquire);
             if generation == self.saved.load(Ordering::Acquire) {
                 return;
@@ -189,6 +203,25 @@ impl ChatPersistence {
             tokio::task::block_in_place(flush);
         } else {
             flush();
+        }
+    }
+
+    /// Synchronize with an export already in flight, then permanently refuse
+    /// future saves. The caller may delete the snapshot only after this returns.
+    pub(crate) fn stop(&self) {
+        let stop = || {
+            let _write = self.write.lock().unwrap_or_else(|e| e.into_inner());
+            self.stopped.store(true, Ordering::Release);
+        };
+        if tokio::runtime::Handle::try_current()
+            .is_ok_and(|h| h.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread)
+        {
+            tokio::task::block_in_place(stop);
+        } else {
+            stop();
+        }
+        if let Some(wake) = &self.wake {
+            let _ = wake.try_send(());
         }
     }
 }
@@ -332,6 +365,46 @@ mod tests {
             0,
             "server-reset cursor must be allowed to decrease"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn deletion_stop_waits_for_inflight_export_and_rejects_late_saves() {
+        let (_directory, doc, store, persistence) = fixture();
+        doc.doc().get_map("test").insert("value", 1i64).unwrap();
+        doc.doc().commit();
+        persistence.dirty(false);
+        let entered = Arc::new(std::sync::Barrier::new(2));
+        let release = Arc::new(std::sync::Barrier::new(2));
+        *persistence.before_export.lock().unwrap() = Some({
+            let entered = entered.clone();
+            let release = release.clone();
+            Box::new(move || { entered.wait(); release.wait(); })
+        });
+        let exporting = {
+            let persistence = persistence.clone();
+            tokio::task::spawn_blocking(move || persistence.flush_sync())
+        };
+        entered.wait();
+        let stopping = Arc::new(AtomicBool::new(false));
+        let stopped = {
+            let persistence = persistence.clone();
+            let stopping = stopping.clone();
+            tokio::task::spawn_blocking(move || {
+                stopping.store(true, Ordering::Release);
+                persistence.stop();
+            })
+        };
+        while !stopping.load(Ordering::Acquire) { tokio::task::yield_now().await; }
+        assert!(!stopped.is_finished(), "in-flight export still owns the write lock");
+        release.wait();
+        exporting.await.unwrap();
+        stopped.await.unwrap();
+        store.delete_snapshot("whale").unwrap();
+        doc.doc().get_map("test").insert("late", 2i64).unwrap();
+        doc.doc().commit();
+        persistence.dirty(true);
+        persistence.flush_sync();
+        assert!(!store.has_snapshot("whale").unwrap());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

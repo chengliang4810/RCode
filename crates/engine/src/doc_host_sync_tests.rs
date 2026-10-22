@@ -251,7 +251,7 @@ async fn idle_connection_closes_while_caller_keeps_document() {
     until(|| !handle.sync_started.load(Ordering::Acquire)).await;
     assert!(lock(&handle.chat2).is_none());
     assert!(lock(&host.inner.handles).contains_key("idle"));
-    let writer = handle.writer();
+    let writer = handle.writer().unwrap();
     assert_eq!(handle.writers.load(Ordering::Acquire), 1);
     drop(writer);
     assert_eq!(handle.writers.load(Ordering::Acquire), 0);
@@ -485,7 +485,7 @@ async fn forty_eight_chats_drain_without_restarting_views_or_writers() {
         if i < PROTECTED / 2 {
             views.push(handle.watch_messages());
         } else if i < PROTECTED {
-            writers.push(handle.writer());
+            writers.push(handle.writer().unwrap());
         }
         handles.push(handle);
     }
@@ -607,7 +607,7 @@ async fn spare_capacity_admits_waiters_without_rotating_aged_clients() {
         let id = format!("spare-{i:02}");
         store.initialize_chat_outbox(&id, &[]).unwrap();
         let h = host.open(&id).unwrap();
-        writers.push(h.writer());
+        writers.push(h.writer().unwrap());
         handles.push(h);
     }
     until(|| {
@@ -622,7 +622,7 @@ async fn spare_capacity_admits_waiters_without_rotating_aged_clients() {
     }
     host.focus_chat("extra").unwrap();
     let extra = host.open("extra").unwrap();
-    let _writer = extra.writer();
+    let _writer = extra.writer().unwrap();
     until(|| lock(&extra.chat2).as_ref().is_some_and(|c| c.caught_up())).await;
     tokio::time::sleep(Duration::from_millis(300)).await;
     for h in &handles {
@@ -773,7 +773,7 @@ async fn newer_view_displaces_one_older_view_without_reconnect_ping_pong() {
         let h = host.open(&id).unwrap();
         views.push(h.watch_messages());
         if n == 0 {
-            writers.push(h.writer());
+            writers.push(h.writer().unwrap());
         }
         handles.push(h);
     }
@@ -825,7 +825,7 @@ async fn focused_waiter_displaces_one_running_writer_without_stopping_local_writ
     for n in 0..ACTIVE_SYNC_CAP {
         let id = format!("writer-{n}");
         store.initialize_chat_outbox(&id, &[]).unwrap();
-        writers.push(host.open(&id).unwrap().writer());
+        writers.push(host.open(&id).unwrap().writer().unwrap());
         host.focus_chat(&id).unwrap();
     }
     until(|| relay.joins.load(Ordering::SeqCst) == ACTIVE_SYNC_CAP).await;
@@ -959,7 +959,7 @@ async fn forty_eight_parent_and_subagent_writers_all_get_service_at_capacity() {
         let remote = loro::LoroDoc::new();
         remote.import(&h.doc.export_snapshot().unwrap()).unwrap();
         lock(&relay.received).insert(id, remote);
-        writers.push(h.writer());
+        writers.push(h.writer().unwrap());
         handles.push(h);
     }
     for h in &handles[..ACTIVE_SYNC_CAP] {
@@ -1072,7 +1072,7 @@ async fn overdue_writer_gets_a_full_service_turn_despite_new_focuses() {
         let id = format!("writer-{n:02}");
         store.initialize_chat_outbox(&id, &[]).unwrap();
         let h = host.open(&id).unwrap();
-        writers.push(h.writer());
+        writers.push(h.writer().unwrap());
         handles.push(h);
     }
     until(|| {
@@ -1082,7 +1082,7 @@ async fn overdue_writer_gets_a_full_service_turn_despite_new_focuses() {
     })
     .await;
     let overdue = host.open("overdue-child").unwrap();
-    let _writer = overdue.writer();
+    let _writer = overdue.writer().unwrap();
     for h in &handles {
         h.sync_last_started
             .store(now_ms() - SYNC_QUANTUM_MS - 1, Ordering::Release);
@@ -1121,7 +1121,7 @@ async fn global_saturation_rotates_between_profiles_below_their_local_caps() {
             let h = host
                 .open(&format!("profile-{profile}-writer-{n:02}"))
                 .unwrap();
-            writers.push(h.writer());
+            writers.push(h.writer().unwrap());
             handles.push(h);
         }
     }
@@ -1163,7 +1163,7 @@ async fn cold_jobs_get_a_real_timed_turn_without_any_writer_ending() {
     for n in 0..ACTIVE_SYNC_CAP {
         let id = format!("resident-{n:02}");
         store.initialize_chat_outbox(&id, &[]).unwrap();
-        writers.push(host.open(&id).unwrap().writer());
+        writers.push(host.open(&id).unwrap().writer().unwrap());
     }
     until(|| relay.joins.load(Ordering::SeqCst) == ACTIVE_SYNC_CAP).await;
     for n in 0..8 {

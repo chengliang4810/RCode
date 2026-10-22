@@ -80,7 +80,9 @@ pub(super) async fn start(
         .await?;
     let (tx, rx) = mpsc::channel(128);
     let state_worker = state.clone();
+    let runtime_worker = state.turn.track_runtime_worker();
     tokio::spawn(async move {
+        let _runtime_worker = runtime_worker;
         let state = state_worker;
         let mut streams = SelectAll::new();
         streams.push(first);

@@ -248,6 +248,9 @@ struct DocHostInner {
     /// Tracks every spawned worker so `shutdown_workers` can await them.
     tasks: TaskTracker,
     handles: Mutex<HashMap<String, Arc<ChatDocHandle>>>,
+    deleted_chats: Mutex<HashSet<String>>,
+    persisters: Mutex<HashMap<String, Vec<Weak<crate::chat_persistence::ChatPersistence>>>>,
+    lineages: Mutex<HashMap<String, Vec<Weak<ChatDocHandle>>>>,
     document_loads: AtomicU64,
     focus_clock: AtomicU64,
     /// Serialize cold opens without blocking access to already-live handles.
@@ -602,6 +605,8 @@ pub struct ChatDocHandle {
     /// thin lineage exists on disk at all; `save_snapshot` double-checks, so
     /// a doc that was never seeded can't lose its only copy).
     retired: AtomicBool,
+    deleting: AtomicBool,
+    snapshot_write: Mutex<()>,
     /// chat2 relay client (docs/chat2-sync.md) — populated once the
     /// registry names roomGen 2 for this chat and the join resolves.
     chat2: Mutex<Option<rcode_sync::ChatClient>>,
@@ -718,12 +723,26 @@ impl ChatDocHandle {
         &self.doc
     }
 
-    pub fn writer(&self) -> DocWriter {
+    pub fn writer(&self) -> Result<DocWriter, EngineError> {
+        let _write = lock(&self.snapshot_write);
+        if self.deleting.load(Ordering::Acquire) {
+            return Err(EngineError::Other("cannot start a writer for a closing chat".into()));
+        }
         self.writers.fetch_add(1, Ordering::AcqRel);
-        DocWriter {
+        Ok(DocWriter {
             doc: self.doc.clone(),
             writers: self.writers.clone(),
+        })
+    }
+
+    /// Transport callbacks can outlive cancellation. Synchronize their durable
+    /// writes with purge without holding this lock across document callbacks.
+    pub(crate) fn with_persistence_write<T>(&self, write: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+        let _write = lock(&self.snapshot_write);
+        if self.deleting.load(Ordering::Acquire) {
+            return Err("cannot persist a closing chat".into());
         }
+        write()
     }
 
     pub(crate) fn retain_window_view(&self) -> WindowView {
@@ -959,6 +978,9 @@ impl DocHost {
                 edge_disconnected: AtomicBool::new(false),
                 tasks: TaskTracker::new(),
                 handles: Mutex::new(HashMap::new()),
+                deleted_chats: Mutex::new(HashSet::new()),
+                persisters: Mutex::new(HashMap::new()),
+                lineages: Mutex::new(HashMap::new()),
                 document_loads: AtomicU64::new(0),
                 focus_clock: AtomicU64::new(0),
                 opening: Mutex::new(()),
@@ -1332,6 +1354,7 @@ impl DocHost {
     /// Materialize one authoritative local document without acquiring a network
     /// connection. Durable publication is installed before exposing any writer.
     pub fn open_local(&self, chat_id: &str) -> Result<Arc<ChatDocHandle>, EngineError> {
+        self.ensure_not_deleted(chat_id)?;
         // The registry names the sync room generation (docs/chat2-sync.md
         // M2): absent row / absent field = legacy s2. Read it BEFORE the
         // cached-handle check — a cached s2-mode handle for a chat another
@@ -1377,6 +1400,7 @@ impl DocHost {
             }
         }
         let opening = lock(&self.inner.opening);
+        self.ensure_not_deleted(chat_id)?;
         if let Some(handle) = lock(&self.inner.handles).get(chat_id) {
             handle.touch();
             return Ok(handle.clone());
@@ -1516,6 +1540,12 @@ impl DocHost {
                 chat2_cursor,
             )
         });
+        if let Some(persistence) = &persistence {
+            let mut persisters = lock(&self.inner.persisters);
+            let live = persisters.entry(chat_id.to_owned()).or_default();
+            live.retain(|previous| previous.strong_count() > 0);
+            live.push(Arc::downgrade(persistence));
+        }
         let changed_persistence = persistence.clone();
 
         let (changed_tx, changed_rx) = watch::channel(0u64);
@@ -1575,6 +1605,8 @@ impl DocHost {
             snapshot_bytes: AtomicUsize::new(snapshot_len),
             room_gen,
             retired: AtomicBool::new(false),
+            deleting: AtomicBool::new(false),
+            snapshot_write: Mutex::new(()),
             checkpointing: Arc::new(AtomicBool::new(false)),
             chat2: Mutex::new(None),
             sync_started: AtomicBool::new(false),
@@ -1649,6 +1681,9 @@ impl DocHost {
                             // slip between, orphaning the update forever).
                             let batch_id = uuid::Uuid::new_v4().to_string();
                             let client_guard = lock(&handle.chat2);
+                            if handle.deleting.load(Ordering::Acquire) {
+                                return false;
+                            }
                             if let Err(err) = publication_store.enqueue_chat_update(&publication_chat, &batch_id, bytes) {
                                 handle.publication_failed.store(true, Ordering::Release);
                                 lock(&handle.chat2_pending_local).push((batch_id.clone(), bytes.clone()));
@@ -1674,6 +1709,12 @@ impl DocHost {
             }
         }
         // Publish only after the durable subscription and bootstrap are installed.
+        {
+            let mut lineages = lock(&self.inner.lineages);
+            let live = lineages.entry(chat_id.to_owned()).or_default();
+            live.retain(|previous| previous.strong_count() > 0);
+            live.push(Arc::downgrade(&handle));
+        }
         lock(&self.inner.handles).insert(chat_id.to_string(), handle.clone());
         drop(opening);
         self.spawn_worker(chat_task(self.clone(), Arc::downgrade(&handle), changed_rx));
@@ -1685,6 +1726,7 @@ impl DocHost {
     /// Concurrent callers activate at most one supervisor for this handle.
     /// Called on the device control link. Acceptance never cold-opens a chat.
     pub fn enqueue_wakeup(&self, chat_id: &str) -> Result<(), EngineError> {
+        self.ensure_not_deleted(chat_id)?;
         self.inner
             .store
             .schedule_sync_job(chat_id, if chat_id == "*" { "reconcile" } else { "wake" })?;
@@ -1692,6 +1734,9 @@ impl DocHost {
     }
 
     pub fn activate_sync(&self, handle: &Arc<ChatDocHandle>) {
+        if handle.deleting.load(Ordering::Acquire) || self.ensure_not_deleted(&handle.chat_id).is_err() {
+            return;
+        }
         handle.sync_background.store(false, Ordering::Release);
         if !handle.sync_started.load(Ordering::Acquire) {
             let _ = handle.sync_wait_since.compare_exchange(
@@ -2564,6 +2609,10 @@ impl DocHost {
         if !res.status().is_success() {
             return Err(format!("seed checkpoint HTTP {}", res.status()));
         }
+        // A checkpoint POST may finish after deletion began. Serialize its
+        // local commit with open/purge and refuse to revive the deleted doc.
+        let _opening = lock(&self.inner.opening);
+        self.ensure_not_deleted(chat_id).map_err(|error| error.to_string())?;
         // PINNED RE-CHECK before anything irreversible (review B1): if a
         // run/watcher attached during the rebuild+POST, abort — everything
         // they write would fork away from the thin lineage. The orphan
@@ -3374,15 +3423,63 @@ impl DocHost {
         rows
     }
 
-    /// Drop a chat's doc unconditionally and delete its local snapshot — the
-    /// chat is gone (DeleteChat / DeleteSpace cascade). Watchers see the
-    /// stream end; a racing writer keeps its orphaned doc until the run ends.
-    pub fn purge_chat(&self, chat_id: &str) {
-        let removed = lock(&self.inner.handles).remove(chat_id);
-        drop(removed);
-        if let Err(err) = self.inner.store.delete_snapshot(chat_id) {
-            tracing::warn!(chat = %chat_id, error = %err, "snapshot delete failed");
+    pub(crate) fn ensure_not_deleted(&self, chat_id: &str) -> Result<(), EngineError> {
+        if lock(&self.inner.deleted_chats).contains(chat_id) {
+            return Err(EngineError::Other(format!("chat `{chat_id}` is closing or deleted")));
         }
+        Ok(())
+    }
+
+    /// Stop admission and synchronize with every snapshot/outbox writer before
+    /// deletion. Retained document references cannot resurrect durable state.
+    pub(crate) fn begin_chat_deletion(&self, chat_id: &str) {
+        let _opening = lock(&self.inner.opening);
+        lock(&self.inner.deleted_chats).insert(chat_id.to_owned());
+        // Retired lineages can still be pinned by a caller. Their independent
+        // persisters must stop as well as the currently cached handle's one.
+        let persisters: Vec<_> = lock(&self.inner.persisters).get(chat_id)
+            .into_iter().flatten().filter_map(Weak::upgrade).collect();
+        for persistence in persisters { persistence.stop(); }
+        let handles: Vec<_> = lock(&self.inner.lineages).get(chat_id)
+            .into_iter().flatten().filter_map(Weak::upgrade).collect();
+        for handle in &handles {
+            handle.deleting.store(true, Ordering::Release);
+            handle.queue_paused.store(true, Ordering::Release);
+        }
+        for handle in handles {
+            lock(&handle.sync_cancel).cancel();
+            lock(&handle.chat2).take();
+            lock(&handle.chat2_local_sub).take();
+            let _write = lock(&handle.snapshot_write);
+            if let Some(persistence) = &handle.persistence {
+                persistence.stop();
+            }
+        }
+    }
+
+    /// Only a settled runtime may release its document. A failed deletion is
+    /// reported to the caller rather than silently acknowledging success.
+    pub(crate) fn ensure_chat_settled(&self, chat_id: &str) -> Result<(), EngineError> {
+        let _opening = lock(&self.inner.opening);
+        let handles: Vec<_> = lock(&self.inner.lineages).get(chat_id)
+            .into_iter().flatten().filter_map(Weak::upgrade).collect();
+        for handle in &handles {
+            if handle.writers.load(Ordering::Acquire) != 0 {
+                return Err(EngineError::Other(format!("chat deletion incomplete: `{chat_id}` still has document writers")));
+            }
+        }
+        Ok(())
+    }
+
+    pub fn purge_chat(&self, chat_id: &str) -> Result<(), EngineError> {
+        self.begin_chat_deletion(chat_id);
+        self.ensure_chat_settled(chat_id)?;
+        let _opening = lock(&self.inner.opening);
+        self.inner.store.delete_snapshot(chat_id)?;
+        lock(&self.inner.handles).remove(chat_id);
+        lock(&self.inner.persisters).remove(chat_id);
+        lock(&self.inner.lineages).remove(chat_id);
+        Ok(())
     }
 
     /// Composer path: append an immutable pending command entry (rule 1). Durable by
@@ -4024,6 +4121,7 @@ impl DocHost {
     ///
     /// One at a time by design: each send changes the status this reads.
     pub async fn drain_queue(&self, handle: &Arc<ChatDocHandle>) {
+        if handle.deleting.load(Ordering::Acquire) { return; }
         let Some(sessions) = self.sessions() else {
             return; // executor not wired yet; the set_sessions kick re-drains
         };
@@ -4038,6 +4136,7 @@ impl DocHost {
             return;
         }
         loop {
+            if handle.deleting.load(Ordering::Acquire) { return; }
             let Ok(Some(head)) = handle.doc.read_queue().map(|q| q.into_iter().next()) else {
                 return;
             };
@@ -4976,6 +5075,7 @@ impl DocHost {
     }
 
     async fn drain_command_kind(&self, handle: &Arc<ChatDocHandle>, controls_only: bool) {
+        if handle.deleting.load(Ordering::Acquire) { return; }
         let Some(sessions) = self.sessions() else {
             return; // executor not wired yet (or retired); the set_sessions kick re-drains
         };
@@ -4993,6 +5093,7 @@ impl DocHost {
         // Entries this pass decided to leave alone (processed dedupe hits).
         let mut skipped: HashSet<String> = HashSet::new();
         loop {
+            if handle.deleting.load(Ordering::Acquire) { return; }
             let commands = match handle.doc.read_commands() {
                 Ok(commands) => commands,
                 Err(err) => {
@@ -5811,6 +5912,8 @@ impl DocHost {
     }
 
     fn save_snapshot(&self, handle: &ChatDocHandle) {
+        let _write = lock(&handle.snapshot_write);
+        if handle.deleting.load(Ordering::Acquire) { return; }
         if handle.retired.load(Ordering::Relaxed) {
             // A chat2 seed replaced this lineage on disk; persisting this
             // handle's fat doc would clobber the thin one. But retired with
@@ -5845,6 +5948,10 @@ impl DocHost {
 
     /// A fork must be durable before publishing its discoverable registry row.
     pub(crate) fn persist_fork(&self, handle: &ChatDocHandle) -> Result<(), EngineError> {
+        let _write = lock(&handle.snapshot_write);
+        if handle.deleting.load(Ordering::Acquire) {
+            return Err(EngineError::Other("cannot persist a closing chat".into()));
+        }
         let bytes = handle.doc.export_snapshot()?;
         self.inner.store.save_snapshot(&handle.chat_id, &bytes)?;
         handle.snapshot_bytes.store(bytes.len(), Ordering::Relaxed);
@@ -5870,6 +5977,10 @@ impl DocHost {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "doc_host_deletion_tests.rs"]
+mod deletion_tests;
 
 /// The resumed-turn prompt for answers to a question whose run died: each
 /// answer paired with its question text so the reattached conversation reads
@@ -6387,6 +6498,7 @@ async fn chat_task(host: DocHost, weak: Weak<ChatDocHandle>, mut changed_rx: wat
             let Some(handle) = control_weak.upgrade() else {
                 break;
             };
+            if handle.deleting.load(Ordering::Acquire) { break; }
             control_host.drain_command_kind(&handle, true).await;
             drop(handle);
             if control_changes.changed().await.is_err() {
@@ -6410,6 +6522,7 @@ async fn chat_task(host: DocHost, weak: Weak<ChatDocHandle>, mut changed_rx: wat
                     break; // doc handle (and its change sender) is gone
                 }
                 let Some(handle) = weak.upgrade() else { break };
+                if handle.deleting.load(Ordering::Acquire) { break; }
                 let publishing = handle.clone();
                 let _ = tokio::task::spawn_blocking(move || {
                     publishing.publish_messages_if_watched();
@@ -6427,6 +6540,7 @@ async fn chat_task(host: DocHost, weak: Weak<ChatDocHandle>, mut changed_rx: wat
             _ = tokio::time::sleep_until(sleep_until), if save_deadline.is_some() => {
                 save_deadline = None;
                 let Some(handle) = weak.upgrade() else { break };
+                if handle.deleting.load(Ordering::Acquire) { break; }
                 // chat2 has its own coalescing blocking-pool persister. The
                 // legacy worker must not duplicate every scheduled export.
                 if handle.persistence.is_none() { host.save_snapshot(&handle); }
