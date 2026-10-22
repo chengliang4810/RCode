@@ -4,6 +4,17 @@ use url::Url;
 
 use crate::{ModelError, ModelResult, ProtocolErrorKind};
 
+/// Configuration diagnostics may identify a provider without copying URL-borne
+/// credentials. Requests keep the original URL, including its routing query.
+pub(crate) fn for_debug(endpoint: &Url) -> Url {
+    let mut endpoint = endpoint.clone();
+    let _ = endpoint.set_username("");
+    let _ = endpoint.set_password(None);
+    endpoint.set_query(None);
+    endpoint.set_fragment(None);
+    endpoint
+}
+
 pub(crate) fn resolve(endpoint: &Url, route: &[&str]) -> ModelResult<Url> {
     if !matches!(endpoint.scheme(), "http" | "https") || endpoint.host_str().is_none() {
         return Err(ModelError::protocol(ProtocolErrorKind::InvalidEndpoint));

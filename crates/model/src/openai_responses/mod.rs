@@ -98,7 +98,7 @@ impl fmt::Debug for OpenAiResponsesConfig {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("OpenAiResponsesConfig")
-            .field("endpoint", &self.endpoint)
+            .field("endpoint", &crate::endpoint::for_debug(&self.endpoint))
             .field("api_key", &"<redacted>")
             .field("model", &self.model)
             .field("reasoning_effort", &self.reasoning_effort)

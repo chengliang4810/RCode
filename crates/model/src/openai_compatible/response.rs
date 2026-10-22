@@ -91,28 +91,12 @@ pub(super) fn decode_assistant_message(
                         .get("name")
                         .and_then(Value::as_str)
                         .ok_or_else(provider_protocol_error)?;
-                    // 缺失或空白（trim 后为空）的 arguments 等价于空对象：
-                    // 部分 OpenAI-compatible 端点对无参工具返回 `"arguments": ""`。
-                    let arguments = function
-                        .get("arguments")
-                        .and_then(Value::as_str)
-                        .map(str::trim)
-                        .filter(|arguments| !arguments.is_empty());
-                    let arguments = match arguments {
-                        Some(arguments) => {
-                            let value = serde_json::from_str(arguments).map_err(|error| {
-                                provider_protocol_error()
-                                    .with_error(&error)
-                                    .with_body(arguments)
-                            })?;
-                            JsonObject::from_value(value).map_err(|error| {
-                                provider_protocol_error()
-                                    .with_error(&error)
-                                    .with_body(arguments)
-                            })?
-                        }
-                        None => JsonObject::default(),
-                    };
+                    let arguments = decode_tool_arguments(
+                        function
+                            .get("arguments")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default(),
+                    )?;
                     Ok(ToolCall::new(id, name, arguments))
                 })
                 .collect::<ModelResult<Vec<_>>>()
@@ -120,6 +104,26 @@ pub(super) fn decode_assistant_message(
         .transpose()?
         .unwrap_or_default();
     Ok((content, tool_calls))
+}
+
+/// Some compatible endpoints encode parameterless calls as an empty string.
+/// Keep streaming and non-streaming responses consistent while still rejecting
+/// malformed JSON and valid JSON values that are not argument objects.
+pub(super) fn decode_tool_arguments(arguments: &str) -> ModelResult<JsonObject> {
+    let arguments = arguments.trim();
+    if arguments.is_empty() {
+        return Ok(JsonObject::default());
+    }
+    let value = serde_json::from_str(arguments).map_err(|error| {
+        provider_protocol_error()
+            .with_error(&error)
+            .with_body(arguments)
+    })?;
+    JsonObject::from_value(value).map_err(|error| {
+        provider_protocol_error()
+            .with_error(&error)
+            .with_body(arguments)
+    })
 }
 
 pub(super) fn decode_usage(value: &Value) -> Option<TokenUsage> {

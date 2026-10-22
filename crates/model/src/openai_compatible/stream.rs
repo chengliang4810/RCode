@@ -7,12 +7,11 @@ use std::{
 use serde_json::Value;
 
 use crate::{
-    ContentBlock, JsonObject, ModelError, ModelMessage, ModelResponse, ModelResult,
-    ModelStreamEvent, TokenUsage, ToolCall, runtime::stream::SseDecoderFactory,
-    transport::SseEvent,
+    ContentBlock, ModelError, ModelMessage, ModelResponse, ModelResult, ModelStreamEvent,
+    TokenUsage, ToolCall, runtime::stream::SseDecoderFactory, transport::SseEvent,
 };
 
-use super::response::{decode_usage, provider_protocol_error, stop_reason};
+use super::response::{decode_tool_arguments, decode_usage, provider_protocol_error, stop_reason};
 
 /// 畸形帧的解码诊断：保留 `Provider` 分类并附带有界摘要，
 /// 使 fail-closed 的原因在错误出口可见，而不是被降级成空事件。
@@ -209,13 +208,7 @@ fn completed_response(
                 .name
                 .as_deref()
                 .ok_or_else(provider_protocol_error)?;
-            let arguments: Value = serde_json::from_str(&tool_call.arguments).map_err(|error| {
-                provider_protocol_error()
-                    .with_error(&error)
-                    .with_body(&tool_call.arguments)
-            })?;
-            let arguments = JsonObject::from_value(arguments)
-                .map_err(|error| provider_protocol_error().with_error(&error))?;
+            let arguments = decode_tool_arguments(&tool_call.arguments)?;
             Ok(ToolCall::new(id, name, arguments))
         })
         .collect::<ModelResult<Vec<_>>>()?;

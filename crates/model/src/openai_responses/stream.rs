@@ -137,7 +137,7 @@ fn decode_event_inner(
             let Some(item_id) = item.get("id").and_then(Value::as_str) else {
                 return Err(malformed_frame_error("openai_responses_item_without_id"));
             };
-            let mut accumulator = FunctionCallAccumulator {
+            let accumulator = FunctionCallAccumulator {
                 call_id: item
                     .get("call_id")
                     .and_then(Value::as_str)
@@ -149,9 +149,10 @@ fn decode_event_inner(
                     .unwrap_or_default()
                     .to_owned(),
             };
-            // Some servers send the arguments up front rather than streaming
-            // them; in that case there is nothing left to accumulate.
-            let arguments_delta = std::mem::take(&mut accumulator.arguments);
+            // The delta is a view of the accumulated arguments. Retain the
+            // initial bytes for Completed, including providers that send the
+            // whole object here and never emit an arguments.delta frame.
+            let arguments_delta = accumulator.arguments.clone();
             let index = state.order.len();
             if !state.function_calls.contains_key(item_id) {
                 state.order.push(item_id.to_owned());

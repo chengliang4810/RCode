@@ -98,16 +98,12 @@ impl AnthropicConfig {
     }
 }
 
-// SECURITY (ported as-is, behavior intentionally unchanged): this Debug impl
-// prints `api_key` verbatim, so any `{:?}` of AnthropicConfig — including via a
-// tracing/log line — leaks the credential. Kept identical to the original project per the port's
-// no-silent-behavior-change rule; mask it here if the risk is unacceptable.
 impl fmt::Debug for AnthropicConfig {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("AnthropicConfig")
-            .field("endpoint", &self.endpoint)
-            .field("api_key", &self.api_key)
+            .field("endpoint", &crate::endpoint::for_debug(&self.endpoint))
+            .field("api_key", &"<redacted>")
             .field("model", &self.model)
             .field("extended_thinking", &self.extended_thinking)
             .field("thinking_budget", &self.thinking_budget)
