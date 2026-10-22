@@ -35,4 +35,6 @@ GitHub Release 使用普通发布；版本名中的 `beta` 不决定 prerelease 
 
 ## 移动端
 
-移动端统一为 `apps/mobile` 下的 Flutter 应用，兼容 Android 和 iOS，通过 API 密钥连接桌面或 headless 引擎。Flutter 界面测试、真实引擎与 Dart 控制器集成、Rust visual/math 已在本机通过；Android APK 正在构建验收，Xcode 与 iOS 实机未验证。构建和真实引擎测试命令见 [移动端 README](../apps/mobile/README.md)。
+移动端统一为 `apps/mobile` 下的 Flutter 应用，以 Android 和 iOS 为目标，通过 API 密钥连接桌面或 headless 引擎。最终 Flutter 套件 80 项通过，5 项环境门控跳过；真实引擎与 Dart 门控另行通过，Rust 移动核心 75 项通过、1 项既有忽略，原生 FFI 专项 5 项通过。Windows Flutter 测试使用版本受限的临时工具副本关闭采样分析器，安装的 SDK 和测试断言未改动。
+
+Android arm64/x86_64 APK 均构建并通过原生库和 ZIP 的 16 KiB 对齐检查。x86_64 包已在 Android 16/API 36 模拟器中验证鉴权连接、强制关闭后服务端继续执行与重连恢复、问答、图片上传和系统分享、真实原生绘图/数学、首次通知权限及手机/平板草稿往返。Android arm64 实机、Xcode 编译和 iOS 运行尚未验证，当前没有可用 Mac 或 macOS CI 执行环境。构建命令见 [移动端 README](../apps/mobile/README.md)，证据与边界见 [迁移记录](flutter-mobile-migration.md)。
