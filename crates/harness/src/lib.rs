@@ -482,6 +482,7 @@ pub mod mock;
 pub mod native;
 mod native_session;
 mod native_bridge;
+mod native_recovery;
 pub mod native_subagents;
 mod builtin_subagents;
 pub mod prompts;

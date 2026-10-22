@@ -51,6 +51,9 @@ impl HttpTransport for ScriptedTransport {
 
 fn config(endpoint: &str) -> OpenAiResponsesConfig {
     OpenAiResponsesConfig::new(Url::parse(endpoint).expect("valid url"), "sk-test", "gpt-5")
+        .with_runtime(crate::ModelRuntimeConfig::default().with_retry(
+            crate::RetryConfig::default().with_max_attempts(1),
+        ))
 }
 
 /// Run one request through the model and collect every event.

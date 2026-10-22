@@ -25,3 +25,6 @@ tracing.workspace = true
 # provider adapters parse/validate endpoints with `url`.
 rand = "0.10"
 url = { version = "2", features = ["serde"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }

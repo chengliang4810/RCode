@@ -118,7 +118,7 @@ pub struct OpenAiResponsesModel {
 
 impl OpenAiResponsesModel {
     pub fn new(config: OpenAiResponsesConfig) -> Self {
-        let client = reqwest::Client::new();
+        let client = crate::transport::http::model_http_client();
         Self {
             config,
             transport: Arc::new(ReqwestTransport::new(client.clone())),

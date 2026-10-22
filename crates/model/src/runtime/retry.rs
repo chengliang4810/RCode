@@ -57,10 +57,15 @@ impl RetryableErrorClasses {
     }
 
     fn matches(self, error: &ModelError) -> Option<RetryErrorKind> {
-        if self.transport && error.transport_kind().is_some() {
+        let diagnostic = error.diagnostic();
+        let cause = error.interruption_diagnostic().unwrap_or(&diagnostic);
+        if self.transport
+            && (cause.transport().is_some()
+                || (error.is_stream_interrupted() && error.interruption_diagnostic().is_none()))
+        {
             return Some(RetryErrorKind::Transport);
         }
-        match error.http_status_code() {
+        match cause.status() {
             Some(408) if self.request_timeout => return Some(RetryErrorKind::HttpStatus),
             Some(429) if self.rate_limited => return Some(RetryErrorKind::HttpStatus),
             Some(500..=599) if self.server_error => return Some(RetryErrorKind::HttpStatus),
@@ -69,9 +74,9 @@ impl RetryableErrorClasses {
         if self.protocol {
             // 瞬态集合；ToolCallMissingId/Name/InvalidArguments、AssistantMessageRequired、
             // InvalidEndpoint、Other 保持不重试。
-            if let Some(protocol) = error.protocol_error() {
+            if let Some(protocol) = cause.protocol() {
                 if matches!(
-                    protocol.kind(),
+                    protocol,
                     crate::ProtocolErrorKind::Provider
                         | crate::ProtocolErrorKind::InvalidJsonObject
                         | crate::ProtocolErrorKind::StreamEndedWithoutCompleted
@@ -97,9 +102,10 @@ pub struct RetryConfig {
 impl Default for RetryConfig {
     fn default() -> Self {
         Self {
-            max_attempts: 6,
-            base_delay: Duration::from_millis(500),
-            max_delay: Duration::from_secs(32),
+            // The initial request plus ten automatic retries.
+            max_attempts: 11,
+            base_delay: Duration::from_secs(1),
+            max_delay: Duration::from_secs(60),
             jitter: true,
             retryable: RetryableErrorClasses::default(),
         }
@@ -136,10 +142,16 @@ impl RetryConfig {
         self.max_attempts
     }
 
+    /// Shared policy for the transport retry and the host's continuation retry.
+    pub fn is_retryable(&self, error: &ModelError) -> bool {
+        self.retryable.matches(error).is_some()
+    }
+
     pub fn delay_for_retry(&self, completed_attempts: u32) -> Duration {
         let multiplier = 1_u32
             .checked_shl(completed_attempts.min(31))
-            .unwrap_or(u32::MAX);
+            .unwrap_or(u32::MAX)
+            .saturating_sub(1);
         let delay = self
             .base_delay
             .saturating_mul(multiplier)
@@ -256,6 +268,61 @@ type AttemptFuture = Pin<Box<dyn Future<Output = ModelResult<ModelStream>> + Sen
 pub(crate) type StreamAttempt = Arc<dyn Fn(CancellationToken) -> AttemptFuture + Send + Sync>;
 
 const EVENT_CHANNEL_CAPACITY: usize = 16;
+
+#[cfg(test)]
+mod policy_tests {
+    use super::*;
+
+    #[test]
+    fn defaults_allow_ten_retries_with_capped_exponential_backoff() {
+        let config = RetryConfig::default().with_jitter(false);
+        assert_eq!(config.max_attempts(), 11);
+        let seconds: Vec<_> = (1..=10)
+            .map(|n| config.delay_for_retry(n).as_secs())
+            .collect();
+        assert_eq!(seconds, [1, 3, 7, 15, 31, 60, 60, 60, 60, 60]);
+        assert_eq!(config.delay_for_retry(u32::MAX), Duration::from_secs(60));
+    }
+
+    #[test]
+    fn jitter_stays_within_a_quarter_of_the_delay_and_the_cap() {
+        let config = RetryConfig::default();
+        for attempt in 1..=10 {
+            let base = config.clone().with_jitter(false).delay_for_retry(attempt);
+            for _ in 0..20 {
+                let delay = config.delay_for_retry(attempt);
+                assert!(delay >= base);
+                assert!(delay <= (base + base / 4).min(Duration::from_secs(60)));
+            }
+        }
+    }
+
+    #[test]
+    fn recovery_retries_connection_failures_but_not_auth_or_cancellation() {
+        let config = RetryConfig::default();
+        assert!(config.is_retryable(&ModelError::transport(
+            crate::TransportErrorKind::Connection,
+            None::<&str>
+        )));
+        assert!(config.is_retryable(&ModelError::http_status(429, "test", None::<&str>)));
+        assert!(!config.is_retryable(&ModelError::http_status(401, "test", None::<&str>)));
+        assert!(!config.is_retryable(&ModelError::cancelled()));
+        let interruption = observe_interruption(
+            None,
+            1,
+            11,
+            ModelError::transport(crate::TransportErrorKind::Other, None::<&str>),
+        );
+        assert!(config.is_retryable(&interruption));
+        assert!(
+            !config
+                .with_retryable_error_classes(
+                    RetryableErrorClasses::default().with_transport(false)
+                )
+                .is_retryable(&interruption)
+        );
+    }
+}
 
 pub(crate) fn retrying_stream(
     config: RetryConfig,

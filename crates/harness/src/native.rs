@@ -1795,16 +1795,21 @@ impl NativeHost {
         let mut request = crate::native_bridge::to_model_request(&self.model, messages, tools);
         if coding { request.system_prompt = self.prompt_system.clone(); }
 
-        // The provider stream owns its own child token; the run's cancellation
-        // reaches it through this one, which `NativeHost` holds for the run.
-        let stream = self.client()?.stream(request, self.cancellation.clone()).await
-        .map_err(|error| AgentError::Model(error.to_string()))?;
-
-        // Fold the provider's events into the loop's terms as they arrive. The
-        // loop reads tool calls only off the finished message, so the builder
-        // has to see every event before the `Done` chunk is emitted.
-        Ok(crate::native_bridge::reasoning_chunks(
-            stream,
+        // One outer budget covers connection failures and mid-output recovery;
+        // disable nested retries so eleven requests cannot multiply into 121.
+        let retry = rcode_model::RetryConfig::default();
+        let runtime = rcode_model::ModelRuntimeConfig::default()
+            .with_retry(retry.clone().with_max_attempts(1));
+        let client = Arc::new(self.client_with_runtime(runtime)?);
+        let open: crate::native_recovery::StreamFactory = Arc::new(move |request, cancellation| {
+            let client = client.clone();
+            Box::pin(async move { client.stream(request, cancellation).await })
+        });
+        Ok(crate::native_recovery::recovering_reasoning_chunks(
+            request,
+            open,
+            self.cancellation.clone(),
+            retry,
             self.model.clone(),
             self.provider.id.clone(),
         ))
