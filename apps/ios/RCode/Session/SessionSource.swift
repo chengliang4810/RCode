@@ -18,7 +18,7 @@ struct SessionChrome: Equatable {
         let id: String
         let header: String
         let text: String
-        let options: [String]
+        let options: [QuestionOption]
         let multiSelect: Bool
         var prefill: String? = nil
         var multiline: Bool = false
@@ -67,7 +67,7 @@ protocol SessionSource: AnyObject {
     @discardableResult
     func send(text: String, images: [StagedImage], mode: DeliveryMode) -> Bool
     func stop()
-    func answer(requestId: String, answers: [(questionId: String, labels: [String])])
+    func answer(requestId: String, answers: [UserInputAnswer])
     func queueAction(_ id: String, _ action: QueueAction)
     func retryDelivery()
     /// Lease a queued message for editing; returns its text when acquired.
@@ -188,7 +188,7 @@ final class FixtureSessionSource: SessionSource {
         }
     }
 
-    func answer(requestId: String, answers: [(questionId: String, labels: [String])]) {
+    func answer(requestId: String, answers: [UserInputAnswer]) {
         update { $0.questions = nil }
     }
 

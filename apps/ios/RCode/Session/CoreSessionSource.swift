@@ -141,8 +141,8 @@ final class CoreSessionSource: SessionSource {
         try? handle.interrupt()
     }
 
-    func answer(requestId: String, answers: [(questionId: String, labels: [String])]) {
-        try? handle.respondInput(requestId: requestId, answers: answers.map { UserInputAnswer(questionId: $0.questionId, labels: $0.labels) })
+    func answer(requestId: String, answers: [UserInputAnswer]) {
+        try? handle.respondInput(requestId: requestId, answers: answers)
     }
 
     func queueAction(_ id: String, _ action: QueueAction) {
@@ -250,7 +250,7 @@ final class CoreSessionSource: SessionSource {
     }
 
     private func setConfig(_ change: (inout ChatConfig) -> Void) {
-        var config = client.sessionConfig(chatId: chatId) ?? ChatConfig(harness: app?.row(chatId)?.harness ?? "claude-code", model: nil, reasoning: nil, modelOptions: [:], sandbox: .workspaceWrite)
+        var config = client.sessionConfig(chatId: chatId) ?? ChatConfig(harness: app?.row(chatId)?.harness ?? "native", model: nil, reasoning: nil, modelOptions: [:])
         change(&config)
         try? client.setSessionConfig(chatId: chatId, config: config)
     }

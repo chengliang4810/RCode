@@ -4,7 +4,7 @@ import UIKit
 /// question, large option rows, "Other…" free text, and a single-select
 /// auto-advance (220ms) so a 3-question form is three taps.
 final class QuestionPanel: UIView, UITextFieldDelegate, UITextViewDelegate {
-    var onSubmit: (([(questionId: String, labels: [String])]) -> Void)?
+    var onSubmit: (([UserInputAnswer]) -> Void)?
     var onHeightChange: (() -> Void)?
 
     private let card = Glass.surface(radius: 26)
@@ -116,10 +116,10 @@ final class QuestionPanel: UIView, UITextFieldDelegate, UITextViewDelegate {
         let chosen = picks[q.id] ?? []
         for (i, option) in q.options.enumerated() {
             var c = UIButton.Configuration.plain()
-            c.title = option
-            c.image = UIImage(systemName: chosen.contains(option) ? (q.multiSelect ? "checkmark.square.fill" : "checkmark.circle.fill") : "\(i + 1).circle")
+            c.title = option.label
+            c.image = UIImage(systemName: chosen.contains(option.id) ? (q.multiSelect ? "checkmark.square.fill" : "checkmark.circle.fill") : "\(i + 1).circle")
             c.imagePadding = 10
-            c.baseForegroundColor = chosen.contains(option) ? Palette.accent : Palette.text
+            c.baseForegroundColor = chosen.contains(option.id) ? Palette.accent : Palette.text
             c.contentInsets = NSDirectionalEdgeInsets(top: 11, leading: 12, bottom: 11, trailing: 12)
             c.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer { a in
                 var a = a
@@ -127,12 +127,12 @@ final class QuestionPanel: UIView, UITextFieldDelegate, UITextViewDelegate {
                 return a
             }
             c.titleAlignment = .leading
-            c.background.backgroundColor = chosen.contains(option) ? Palette.accent.withAlphaComponent(0.12) : Palette.chip.withAlphaComponent(0.55)
+            c.background.backgroundColor = chosen.contains(option.id) ? Palette.accent.withAlphaComponent(0.12) : Palette.chip.withAlphaComponent(0.55)
             c.background.cornerRadius = 14
             let b = UIButton(configuration: c)
             b.contentHorizontalAlignment = .leading
             b.accessibilityIdentifier = "question-option-\(i)"
-            b.addAction(UIAction { [weak self] _ in self?.pick(option) }, for: .touchUpInside)
+            b.addAction(UIAction { [weak self] _ in self?.pick(option.id) }, for: .touchUpInside)
             options.addArrangedSubview(b)
         }
         other.isHidden = q.multiline
@@ -199,14 +199,10 @@ final class QuestionPanel: UIView, UITextFieldDelegate, UITextViewDelegate {
             go(1)
             return
         }
-        let answers = items.map { q -> (questionId: String, labels: [String]) in
-            var labels = q.options.filter { (picks[q.id] ?? []).contains($0) }
-            if q.multiline {
-                labels.append(custom[q.id] ?? "")
-            } else if let c = custom[q.id]?.trimmingCharacters(in: .whitespaces), !c.isEmpty {
-                labels.append(c)
-            }
-            return (q.id, labels)
+        let answers = items.map { q -> UserInputAnswer in
+            let ids = q.options.filter { (picks[q.id] ?? []).contains($0.id) }.map(\.id)
+            let typed = q.multiline ? (custom[q.id] ?? "") : (custom[q.id] ?? "").trimmingCharacters(in: .whitespaces)
+            return UserInputAnswer(questionId: q.id, selectedOptionIds: ids, text: q.multiline || !typed.isEmpty ? typed : nil)
         }
         submitted = true
         UIImpactFeedbackGenerator(style: .medium).impactOccurred()

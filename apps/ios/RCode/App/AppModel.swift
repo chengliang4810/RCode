@@ -60,7 +60,7 @@ final class AppModel {
     /// effort), kept across launches.
     var lastDraft: NewSessionDraft = {
         var d = !AppModel.persistsNewSession ? NewSessionDraft() : UserDefaults.standard.data(forKey: "newSessionDraft").flatMap { try? JSONDecoder().decode(NewSessionDraft.self, from: $0) } ?? NewSessionDraft()
-        // `-harness mock`: live-stack tests must never start a real agent.
+        // Launch arguments may select a harness for fixtures and online tests.
         let args = ProcessInfo.processInfo.arguments
         if let i = args.firstIndex(of: "-harness"), i + 1 < args.count { d.harness = args[i + 1] }
         return d
@@ -625,7 +625,7 @@ final class AppModel {
         } else {
             return nil
         }
-        let config = ChatConfig(harness: draft.harness, model: draft.model, reasoning: draft.effort, modelOptions: [:], sandbox: .workspaceWrite)
+        let config = ChatConfig(harness: draft.harness, model: draft.model, reasoning: draft.effort, modelOptions: [:])
         do {
             let chatId = try client.createSession(newSession: NewSession(target: target, config: config, branch: draft.worktree ? nil : draft.branch, cwd: nil, title: nil))
             let handle = try client.openSession(chatId: chatId)
