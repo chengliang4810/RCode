@@ -69,10 +69,18 @@ Native visual tests use the existing Luau, chart, Canvas, scene/shader and zatex
 engines. Their setup is in [native/README.md](native/README.md). The six math
 fonts are passed to the native renderer; they are not just display preferences.
 
-The current Windows validation covers Flutter unit/widgets, the real
-engine/Dart integration and Rust visual/math tests. Android APK compilation is
-being checked separately. Xcode simulator builds, physical iOS execution,
-signing and TestFlight upload remain unverified on this host.
+Both Android arm64 and x86_64 debug APKs have been built and checked for 16 KiB
+native-library/ZIP alignment. The x86_64 app was exercised on Android 16/API 36
+against a real local engine with a mock model: pairing, interrupted-client
+recovery, questions, image upload/preview/sharing, native visuals/math,
+notifications permission and phone/tablet draft preservation. Physical Android
+arm64 execution remains unverified. Detailed evidence and remaining limits are
+in [the migration record](../../docs/flutter-mobile-migration.md).
+
+The real engine/Dart integration, Rust visual/math suite and native Flutter FFI
+checks also pass separately. Xcode simulator builds, physical iOS execution,
+signing and TestFlight upload remain unverified because no Mac or macOS CI
+execution environment is available in this session.
 
 Notifications are local and depend on receiving workspace events while the app
 is running. The direct service does not implement background APNs/FCM delivery
