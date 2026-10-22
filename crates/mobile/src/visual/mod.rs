@@ -34,7 +34,7 @@ use palette::Palette;
 // ---- FFI ----------------------------------------------------------------------
 
 /// sRGB, straight alpha, 0–1.
-#[derive(Debug, Clone, Copy, PartialEq, Default, uniffi::Record, serde::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Default, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Rgba {
     pub r: f32,
@@ -44,7 +44,7 @@ pub struct Rgba {
 }
 
 /// `text[start..start+len]` (UTF-16) in `style`, its origin at (x, baseline).
-#[derive(Debug, Clone, PartialEq, uniffi::Record, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VisualRun {
     pub start: u32,
@@ -56,7 +56,7 @@ pub struct VisualRun {
     pub color: Rgba,
 }
 
-#[derive(Debug, Clone, PartialEq, uniffi::Enum, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 #[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum VisualShape {
     Rect {
@@ -80,7 +80,7 @@ pub enum VisualShape {
 }
 
 /// One layer of vector paint: shapes, then text over them.
-#[derive(Debug, Clone, PartialEq, Default, uniffi::Record, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VisualPaint {
     pub text: String,
@@ -89,7 +89,7 @@ pub struct VisualPaint {
 }
 
 /// How a surface takes touches.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum, serde::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum SurfaceGesture {
     /// Not interactive: drags scroll the transcript.
@@ -104,7 +104,7 @@ pub enum SurfaceGesture {
 }
 
 /// A region the worker redraws on its own (canvas, chart, scene, shader).
-#[derive(Debug, Clone, PartialEq, uniffi::Record, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VisualSurface {
     /// Stable across renders: frames and touches address it.
@@ -116,7 +116,7 @@ pub struct VisualSurface {
     pub gesture: SurfaceGesture,
 }
 
-#[derive(Debug, Clone, PartialEq, uniffi::Enum, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 #[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum ControlKind {
     Button {
@@ -148,7 +148,7 @@ pub enum ControlKind {
 }
 
 /// A touch target over painted control art.
-#[derive(Debug, Clone, PartialEq, uniffi::Record, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VisualControl {
     /// Stable across renders.
@@ -163,7 +163,7 @@ pub struct VisualControl {
 }
 
 /// A visual laid out at one width.
-#[derive(Debug, Clone, PartialEq, uniffi::Record, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VisualDisplay {
     pub revision: u64,
@@ -179,7 +179,7 @@ pub struct VisualDisplay {
 
 /// Premultiplied BGRA8, top row first (CoreGraphics' native
 /// `byteOrder32Little | premultipliedFirst`).
-#[derive(Debug, Clone, PartialEq, uniffi::Record, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FrameImage {
     pub width: u32,
@@ -189,7 +189,7 @@ pub struct FrameImage {
 
 /// A surface's latest picture: an image (scenes, shaders) under vector
 /// paint (canvas drawings, charts, scene labels), in surface coordinates.
-#[derive(Debug, Clone, PartialEq, uniffi::Record, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SurfaceFrame {
     pub surface: u64,
@@ -198,7 +198,7 @@ pub struct SurfaceFrame {
     pub styles: Vec<StyleDesc>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum, serde::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum PointerPhase {
     Down,
@@ -208,7 +208,6 @@ pub enum PointerPhase {
 }
 
 /// Where a visual's output goes (called on its worker thread).
-#[uniffi::export(with_foreign)]
 pub trait VisualListener: Send + Sync {
     fn display(&self, display: VisualDisplay);
     fn frame(&self, frame: SurfaceFrame);
@@ -392,7 +391,6 @@ enum Cmd {
 }
 
 /// One visual: the handle the platform paints and touches through.
-#[derive(uniffi::Object)]
 pub struct VisualSession {
     tx: Mutex<Sender<Cmd>>,
     title: String,
@@ -428,7 +426,6 @@ impl VisualSession {
     }
 }
 
-#[uniffi::export]
 impl VisualSession {
     /// Start delivering displays and frames (replacing any listener).
     pub fn attach(&self, listener: Arc<dyn VisualListener>, dark: bool, reduce_motion: bool) {

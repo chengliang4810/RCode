@@ -36,7 +36,6 @@ pub use style::{FaceRole, StyleDesc};
 /// Measures text the bundled faces can't render (emoji, CJK…) with the
 /// platform's own text engine — pretext's "browser as ground truth".
 /// Self-describing (face, size, ligatures) because style ids are per-view.
-#[uniffi::export(with_foreign)]
 pub trait PlatformMeasurer: Send + Sync {
     fn measure(&self, face: FaceRole, size: f32, ligatures: bool, text: String) -> f32;
     /// Lay `text` out as one run and return one advance per Unicode scalar
@@ -89,14 +88,12 @@ pub(crate) fn typography(text: &TextSystem) -> Typography {
     Typography::new(&text.faces, fallback, styles)
 }
 
-#[derive(uniffi::Record)]
 pub struct FaceData {
     pub role: FaceRole,
     pub bytes: Vec<u8>,
 }
 
 /// Registered faces + fallback measurer, shared by every transcript.
-#[derive(uniffi::Object)]
 pub struct TextSystem {
     /// Leaked once here: every transcript and visual measures with the same
     /// bytes (a font book holds its faces for the process).
@@ -110,9 +107,7 @@ impl TextSystem {
     }
 }
 
-#[uniffi::export]
 impl TextSystem {
-    #[uniffi::constructor]
     pub fn new(faces: Vec<FaceData>, measurer: Option<Arc<dyn PlatformMeasurer>>) -> Arc<Self> {
         Arc::new(Self {
             faces: faces
@@ -125,13 +120,12 @@ impl TextSystem {
 }
 
 /// Frame-ready notifications (called on the layout thread).
-#[uniffi::export(with_foreign)]
 pub trait LayoutListener: Send + Sync {
     fn frame_ready(&self, revision: u64);
 }
 
 /// A row's position in a frame.
-#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct RowPlacement {
     pub index: u32,
     pub key: u64,
@@ -162,7 +156,6 @@ impl FrameRow {
 }
 
 /// An immutable, fully measured transcript at one width.
-#[derive(uniffi::Object)]
 pub struct LayoutFrame {
     revision: u64,
     width: f32,
@@ -175,7 +168,6 @@ pub struct LayoutFrame {
     build_micros: u64,
 }
 
-#[uniffi::export]
 impl LayoutFrame {
     pub fn revision(&self) -> u64 {
         self.revision
@@ -336,7 +328,6 @@ impl LayoutFrame {
 }
 
 /// Rich markdown exercising every block type (lab screen, benches, tests).
-#[uniffi::export]
 pub fn layout_fixture_markdown() -> String {
     FIXTURE.to_owned()
 }
@@ -349,7 +340,6 @@ pub(crate) const FIXTURE: &str = include_str!("fixture.md");
 /// Rust's line breaks for `text` in one face/size at `width`, as UTF-16
 /// offsets of each line start — the accuracy harness compares these with
 /// CoreText's own framesetter (platform engine as ground truth).
-#[uniffi::export]
 pub fn debug_line_starts(
     text_system: Arc<TextSystem>,
     face: FaceRole,
@@ -386,7 +376,7 @@ pub fn debug_line_starts(
 }
 
 /// A debug/demo transcript entry (markdown text), for fixtures and benches.
-#[derive(Debug, Clone, uniffi::Record)]
+#[derive(Debug, Clone)]
 pub struct DebugEntry {
     pub id: String,
     pub user: bool,
@@ -417,7 +407,6 @@ struct Shared {
 }
 
 /// One transcript's layout engine.
-#[derive(uniffi::Object)]
 pub struct TranscriptView {
     tx: Mutex<Sender<Msg>>,
     shared: Arc<Shared>,
@@ -426,9 +415,7 @@ pub struct TranscriptView {
     visuals: Arc<crate::visual::VisualHub>,
 }
 
-#[uniffi::export]
 impl TranscriptView {
-    #[uniffi::constructor]
     pub fn new(text: Arc<TextSystem>, listener: Arc<dyn LayoutListener>) -> Arc<Self> {
         let (tx, rx) = mpsc::channel();
         let shared = Arc::new(Shared {
@@ -464,7 +451,7 @@ impl TranscriptView {
     /// host device), and the screen's pixel density for their frames.
     pub fn set_visual_source(
         &self,
-        client: Arc<crate::client_ffi::CoreClient>,
+        client: rcode_client::Client,
         device_id: String,
         pixel_scale: f32,
     ) {
@@ -472,7 +459,7 @@ impl TranscriptView {
             return;
         }
         self.visuals
-            .set_source(client.client().clone(), device_id, pixel_scale);
+            .set_source(client, device_id, pixel_scale);
         self.send(Msg::Visual(None));
     }
 
@@ -483,8 +470,8 @@ impl TranscriptView {
 
     /// Follow a session's transcript: every snapshot (coalesced by the
     /// client) becomes a layout input. Returns false for an unknown chat.
-    pub fn attach(&self, client: Arc<crate::client_ffi::CoreClient>, chat_id: String) -> bool {
-        let Some(handle) = client.session_handle(&chat_id) else {
+    pub fn attach(&self, client: rcode_client::Client, chat_id: String) -> bool {
+        let Ok(handle) = client.open_session(&chat_id) else {
             return false;
         };
         let tx = Mutex::new(self.tx.lock().unwrap().clone());
