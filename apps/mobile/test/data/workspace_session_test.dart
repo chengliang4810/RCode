@@ -54,6 +54,9 @@ class EngineFixture {
   bool loseReply = false;
   bool loseQueueReply = false, dropQueueBeforeAccepting = false;
   bool slowIdentity = false;
+  bool rejectConnections = false;
+  JsonMap contextUsage = {'tokens': 12, 'window': 1000};
+  JsonMap? goal;
   final identityRead = Completer<void>();
   final identityRelease = Completer<void>();
   JsonMap? lastCommand;
@@ -64,6 +67,11 @@ class EngineFixture {
   Future<void> start() async {
     http = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
     http.listen((request) async {
+      if (rejectConnections) {
+        request.response.statusCode = 503;
+        await request.response.close();
+        return;
+      }
       if (request.headers.value('Authorization') != 'Bearer FixtureKey12') {
         request.response.statusCode = 401;
         await request.response.close();
@@ -233,8 +241,8 @@ class EngineFixture {
     'WatchSessionState' => {
       'version': 1,
       'commands': commands,
-      'contextUsage': {'tokens': 12, 'window': 1000},
-      'goal': null,
+      'contextUsage': contextUsage,
+      'goal': goal,
     },
     _ => <String, dynamic>{},
   };
