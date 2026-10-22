@@ -4,6 +4,7 @@ import '../data/workspace_controller.dart';
 import '../l10n.dart';
 import '../preferences.dart';
 import '../theme.dart';
+import '../wallpaper.dart';
 import 'project_browser_page.dart';
 
 String sessionTitle(Map<String, dynamic> chat) =>
@@ -44,49 +45,76 @@ List<SessionGroup> projectSessionGroups({
   required Map<String, dynamic> preferences,
   bool archived = false,
   bool byProject = false,
+  bool search = false,
   String query = '',
   String? folderId,
   String pinnedTitle = 'Pinned',
   String recentTitle = 'Recent',
   String homeTitle = 'Home',
 }) {
+  final terms = query.trim().toLowerCase().split(RegExp(r'\s+'))
+    ..removeWhere((term) => term.isEmpty);
   final rows = chats
       .where(
-        (chat) => chat['archived'] == archived && chat['parentChatId'] == null,
+        (chat) =>
+            (terms.isNotEmpty || (chat['archived'] == true) == archived) &&
+            chat['parentChatId'] == null,
       )
       .toList();
-  rows.sort(
-    (a, b) => (b['lastMessageAt'] ?? b['createdAt'] ?? '').toString().compareTo(
-      (a['lastMessageAt'] ?? a['createdAt'] ?? '').toString(),
-    ),
-  );
+  int recency(Map<String, dynamic> a, Map<String, dynamic> b) {
+    final activity = (b['lastMessageAt'] ?? b['createdAt'] ?? '')
+        .toString()
+        .compareTo((a['lastMessageAt'] ?? a['createdAt'] ?? '').toString());
+    return activity != 0
+        ? activity
+        : (a['id'] as String).compareTo(b['id'] as String);
+  }
+
+  rows.sort(recency);
   final lookup = {for (final row in rows) row['id'] as String: row};
   final pinned = (preferences['pinnedSessionIds'] as List? ?? [])
       .whereType<String>()
       .toList();
   final sections = jsonRows(preferences['sections']);
   final projects = {for (final space in spaces) space['id'] as String: space};
-  final filter = query.trim().toLowerCase();
-  if (filter.isNotEmpty) {
-    return [
-      SessionGroup(
-        'search',
-        '',
-        rows.where((chat) {
-          final project = projects[chat['spaceId']];
-          return [
-            sessionTitle(chat),
-            chat['branch'],
-            chat['cwd'],
-            project?['name'],
-            project?['path'],
-          ].whereType<String>().any(
-            (text) => text.toLowerCase().contains(filter),
-          );
-        }).toList(),
-      ),
-    ];
+  if (terms.isNotEmpty) {
+    final scores = <String, int>{};
+    final hits = rows.where((chat) {
+      final fields = <(String, int)>[
+        (sessionTitle(chat).toLowerCase(), 100),
+        (
+          (projects[chat['spaceId']]?['name'] as String? ?? '').toLowerCase(),
+          40,
+        ),
+        ((chat['branch'] as String? ?? '').toLowerCase(), 30),
+        ((chat['lastMessagePreview'] as String? ?? '').toLowerCase(), 20),
+      ];
+      var total = 0;
+      for (final term in terms) {
+        var best = 0;
+        for (final (text, weight) in fields) {
+          final at = text.indexOf(term);
+          if (at < 0) continue;
+          final boundary =
+              at == 0 || !RegExp(r'[a-z0-9]').hasMatch(text[at - 1]);
+          final score = weight + (boundary ? weight ~/ 2 : 0);
+          if (score > best) best = score;
+        }
+        if (best == 0) return false;
+        total += best;
+      }
+      scores[chat['id'] as String] = chat['archived'] == true
+          ? total ~/ 2
+          : total;
+      return true;
+    }).toList();
+    hits.sort((a, b) {
+      final rank = scores[b['id']]!.compareTo(scores[a['id']]!);
+      return rank != 0 ? rank : recency(a, b);
+    });
+    return [SessionGroup('search', '', hits.take(60).toList())];
   }
+  if (search) return [SessionGroup('search', '', rows)];
   if (folderId != null) {
     final ids = folderId == 'pinned'
         ? pinned
@@ -364,6 +392,7 @@ class _SessionsPageState extends State<SessionsPage> {
 
   Future<void> _rowMenu(Map<String, dynamic> chat) async {
     final id = chat['id'] as String;
+    final archived = chat['archived'] == true;
     final pinned =
         (widget.workspace.sidebarPreferences['pinnedSessionIds'] as List? ?? [])
             .contains(id);
@@ -374,7 +403,7 @@ class _SessionsPageState extends State<SessionsPage> {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            if (!widget.archived)
+            if (!archived)
               ListTile(
                 leading: Icon(
                   pinned ? Icons.push_pin : Icons.push_pin_outlined,
@@ -386,7 +415,7 @@ class _SessionsPageState extends State<SessionsPage> {
                 ),
                 onTap: () => Navigator.pop(context, 'pin'),
               ),
-            if (!widget.archived)
+            if (!archived)
               ListTile(
                 leading: const Icon(Icons.drive_file_move_outline),
                 title: Text(context.tr('移动到分组', 'Move to Section')),
@@ -399,12 +428,10 @@ class _SessionsPageState extends State<SessionsPage> {
             ),
             ListTile(
               leading: Icon(
-                widget.archived
-                    ? Icons.unarchive_outlined
-                    : Icons.archive_outlined,
+                archived ? Icons.unarchive_outlined : Icons.archive_outlined,
               ),
               title: Text(
-                widget.archived
+                archived
                     ? context.tr('取消归档', 'Unarchive')
                     : context.tr('归档', 'Archive'),
               ),
@@ -438,7 +465,7 @@ class _SessionsPageState extends State<SessionsPage> {
           await widget.workspace.call('Mutate', {
             'op': 'setChatArchived',
             'chatId': id,
-            'archived': !widget.archived,
+            'archived': !archived,
           });
       }
     });
@@ -504,6 +531,7 @@ class _SessionsPageState extends State<SessionsPage> {
 
   Widget _row(Map<String, dynamic> chat, SessionGroup group) {
     final id = chat['id'] as String;
+    final archived = chat['archived'] == true;
     final spaces = widget.workspace.spaces.where(
       (space) => space['id'] == chat['spaceId'],
     );
@@ -553,6 +581,7 @@ class _SessionsPageState extends State<SessionsPage> {
               children: [
                 LongPressDraggable<String>(
                   data: id,
+                  maxSimultaneousDrags: archived ? 0 : 1,
                   feedback: Material(
                     elevation: 6,
                     borderRadius: BorderRadius.circular(16),
@@ -680,7 +709,7 @@ class _SessionsPageState extends State<SessionsPage> {
             .contains(id);
     final draggable = Dismissible(
       key: ValueKey('swipe:$id'),
-      direction: widget.archived
+      direction: archived
           ? DismissDirection.endToStart
           : DismissDirection.horizontal,
       background: Container(
@@ -694,13 +723,13 @@ class _SessionsPageState extends State<SessionsPage> {
         padding: const EdgeInsets.only(right: 24),
         color: colors.secondary,
         child: Icon(
-          widget.archived ? Icons.unarchive_outlined : Icons.archive_outlined,
+          archived ? Icons.unarchive_outlined : Icons.archive_outlined,
           color: Colors.white,
         ),
       ),
       confirmDismiss: (direction) async {
         await performUiAction(context, () async {
-          if (!widget.archived && direction == DismissDirection.startToEnd) {
+          if (!archived && direction == DismissDirection.startToEnd) {
             await _change({
               'action': pinned ? 'unpin' : 'pin',
               'sessionId': id,
@@ -709,7 +738,7 @@ class _SessionsPageState extends State<SessionsPage> {
             await widget.workspace.call('Mutate', {
               'op': 'setChatArchived',
               'chatId': id,
-              'archived': !widget.archived,
+              'archived': !archived,
             });
           }
         });
@@ -717,7 +746,7 @@ class _SessionsPageState extends State<SessionsPage> {
       },
       child: row,
     );
-    if (widget.archived) return draggable;
+    if (archived) return draggable;
     if (group.id.startsWith('project:') || group.id == 'search') {
       return draggable;
     }
@@ -764,6 +793,7 @@ class _SessionsPageState extends State<SessionsPage> {
         preferences: widget.workspace.sidebarPreferences,
         archived: widget.archived,
         byProject: widget.preferences.groupByProject,
+        search: widget.search,
         query: _query.text,
         folderId: widget.folderId,
         pinnedTitle: context.tr('置顶', 'Pinned'),
@@ -845,120 +875,134 @@ class _SessionsPageState extends State<SessionsPage> {
                   ),
                 ],
         ),
-        body: Column(
-          children: [
-            if (widget.search)
-              Padding(
-                padding: const EdgeInsets.fromLTRB(20, 4, 20, 12),
-                child: TextField(
-                  key: const Key('session-search'),
-                  controller: _query,
-                  onChanged: (_) => setState(() {}),
-                  autofocus: !widget.embedded,
-                  decoration: InputDecoration(
-                    prefixIcon: const Icon(Icons.search),
-                    hintText: context.tr(
-                      '会话、项目、分支',
-                      'Sessions, projects, branches',
+        body: WallpaperBackdrop(
+          preferences: widget.preferences,
+          child: Column(
+            children: [
+              if (widget.search)
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(20, 4, 20, 12),
+                  child: TextField(
+                    key: const Key('session-search'),
+                    controller: _query,
+                    onChanged: (_) => setState(() {}),
+                    autofocus: !widget.embedded,
+                    decoration: InputDecoration(
+                      prefixIcon: const Icon(Icons.search),
+                      hintText: context.tr(
+                        '会话、项目、分支',
+                        'Sessions, projects, branches',
+                      ),
+                      suffixIcon: _query.text.isEmpty
+                          ? null
+                          : IconButton(
+                              tooltip: context.tr('清空', 'Clear'),
+                              icon: const Icon(Icons.close),
+                              onPressed: () => setState(_query.clear),
+                            ),
                     ),
-                    suffixIcon: _query.text.isEmpty
-                        ? null
-                        : IconButton(
-                            tooltip: context.tr('清空', 'Clear'),
-                            icon: const Icon(Icons.close),
-                            onPressed: () => setState(_query.clear),
-                          ),
                   ),
                 ),
-              ),
-            Expanded(
-              child: RefreshIndicator(
-                onRefresh: widget.workspace.reconnect,
-                child: ListView(
-                  padding: const EdgeInsets.fromLTRB(8, 4, 8, 100),
-                  physics: const AlwaysScrollableScrollPhysics(),
-                  children: [
-                    if (groups.every((group) => group.rows.isEmpty) &&
-                        !groups.any((group) => group.userSection))
-                      Padding(
-                        padding: const EdgeInsets.only(top: 96),
-                        child: Center(
-                          child: Text(
-                            widget.search
-                                ? context.tr('没有匹配的会话', 'No matching sessions')
-                                : widget.archived
-                                ? context.tr('没有已归档会话', 'No archived sessions')
-                                : context.tr(
-                                    '点击新建会话开始',
-                                    'Tap New session to begin',
-                                  ),
-                            style: TextStyle(color: colors.secondary),
-                          ),
-                        ),
-                      ),
-                    for (final group in groups) ...[
-                      if (group.title.isNotEmpty)
-                        DragTarget<String>(
-                          onWillAcceptWithDetails: (_) =>
-                              group.id == 'pinned' ||
-                              group.id == 'recent' ||
-                              group.userSection,
-                          onAcceptWithDetails: (details) => performUiAction(
-                            context,
-                            () => _place(details.data, group.id),
-                          ),
-                          builder: (context, candidates, rejected) => InkWell(
-                            onTap: () => _collapse(group.id),
-                            onLongPress:
-                                group.userSection || group.id == 'pinned'
-                                ? () => _headerMenu(group)
-                                : null,
-                            borderRadius: BorderRadius.circular(10),
-                            child: Container(
-                              color: candidates.isNotEmpty
-                                  ? colors.accent.withValues(alpha: .1)
-                                  : null,
-                              padding: const EdgeInsets.fromLTRB(12, 18, 12, 8),
-                              child: Row(
-                                children: [
-                                  Icon(
-                                    _collapsed.contains(group.id)
-                                        ? Icons.chevron_right
-                                        : Icons.keyboard_arrow_down,
-                                    size: 18,
-                                    color: colors.secondary,
-                                  ),
-                                  const SizedBox(width: 5),
-                                  Expanded(
-                                    child: Text(
-                                      group.title,
-                                      style: TextStyle(
-                                        fontSize: 13,
-                                        fontWeight: FontWeight.w600,
-                                        color: colors.secondary,
-                                      ),
+              Expanded(
+                child: RefreshIndicator(
+                  onRefresh: widget.workspace.reconnect,
+                  child: ListView(
+                    padding: const EdgeInsets.fromLTRB(8, 4, 8, 100),
+                    physics: const AlwaysScrollableScrollPhysics(),
+                    children: [
+                      if (groups.every((group) => group.rows.isEmpty) &&
+                          !groups.any((group) => group.userSection))
+                        Padding(
+                          padding: const EdgeInsets.only(top: 96),
+                          child: Center(
+                            child: Text(
+                              widget.search
+                                  ? context.tr(
+                                      '没有匹配的会话',
+                                      'No matching sessions',
+                                    )
+                                  : widget.archived
+                                  ? context.tr(
+                                      '没有已归档会话',
+                                      'No archived sessions',
+                                    )
+                                  : context.tr(
+                                      '点击新建会话开始',
+                                      'Tap New session to begin',
                                     ),
-                                  ),
-                                  Text(
-                                    '${group.rows.length}',
-                                    style: TextStyle(
-                                      fontSize: 12,
-                                      color: colors.tertiary,
-                                    ),
-                                  ),
-                                ],
-                              ),
+                              style: TextStyle(color: colors.secondary),
                             ),
                           ),
                         ),
-                      if (!_collapsed.contains(group.id))
-                        for (final chat in group.rows) _row(chat, group),
+                      for (final group in groups) ...[
+                        if (group.title.isNotEmpty)
+                          DragTarget<String>(
+                            onWillAcceptWithDetails: (_) =>
+                                group.id == 'pinned' ||
+                                group.id == 'recent' ||
+                                group.userSection,
+                            onAcceptWithDetails: (details) => performUiAction(
+                              context,
+                              () => _place(details.data, group.id),
+                            ),
+                            builder: (context, candidates, rejected) => InkWell(
+                              onTap: () => _collapse(group.id),
+                              onLongPress:
+                                  group.userSection || group.id == 'pinned'
+                                  ? () => _headerMenu(group)
+                                  : null,
+                              borderRadius: BorderRadius.circular(10),
+                              child: Container(
+                                color: candidates.isNotEmpty
+                                    ? colors.accent.withValues(alpha: .1)
+                                    : null,
+                                padding: const EdgeInsets.fromLTRB(
+                                  12,
+                                  18,
+                                  12,
+                                  8,
+                                ),
+                                child: Row(
+                                  children: [
+                                    Icon(
+                                      _collapsed.contains(group.id)
+                                          ? Icons.chevron_right
+                                          : Icons.keyboard_arrow_down,
+                                      size: 18,
+                                      color: colors.secondary,
+                                    ),
+                                    const SizedBox(width: 5),
+                                    Expanded(
+                                      child: Text(
+                                        group.title,
+                                        style: TextStyle(
+                                          fontSize: 13,
+                                          fontWeight: FontWeight.w600,
+                                          color: colors.secondary,
+                                        ),
+                                      ),
+                                    ),
+                                    Text(
+                                      '${group.rows.length}',
+                                      style: TextStyle(
+                                        fontSize: 12,
+                                        color: colors.tertiary,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ),
+                          ),
+                        if (!_collapsed.contains(group.id))
+                          for (final chat in group.rows) _row(chat, group),
+                      ],
                     ],
-                  ],
+                  ),
                 ),
               ),
-            ),
-          ],
+            ],
+          ),
         ),
       );
     },

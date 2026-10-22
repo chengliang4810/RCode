@@ -4,6 +4,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:rcode_mobile/data/workspace_controller.dart';
 import 'package:rcode_mobile/preferences.dart';
+import 'package:rcode_mobile/wallpaper.dart';
 
 import 'support/page_workspace.dart';
 
@@ -66,6 +67,97 @@ void main() {
       'archive',
     );
   });
+
+  test('search matches every term across fields, ranks matches and includes archived sessions', () {
+    final chats = <JsonMap>[
+      {'id': 'title', 'title': 'build fix', 'createdAt': '2026-01-01'},
+      {'id': 'archive', 'title': 'build fix', 'archived': true},
+      {'id': 'preview', 'title': 'Other', 'lastMessagePreview': 'build fix'},
+      {
+        'id': 'mixed',
+        'title': 'build',
+        'branch': 'fix',
+        'createdAt': '2026-01-02',
+      },
+      {'id': 'missing', 'title': 'build'},
+      {'id': 'worker', 'title': 'build fix', 'parentChatId': 'title'},
+    ];
+    final results = projectSessionGroups(
+      chats: chats,
+      spaces: [],
+      preferences: {},
+      query: '  BUILD  fix ',
+      search: true,
+    ).single.rows;
+    expect(results.map((row) => row['id']), [
+      'title',
+      'mixed',
+      'archive',
+      'preview',
+    ]);
+    final empty = projectSessionGroups(
+      chats: chats,
+      spaces: [],
+      preferences: {
+        'pinnedSessionIds': ['title'],
+      },
+      search: true,
+    );
+    expect(empty.single.id, 'search');
+    expect(
+      empty.single.rows.map((row) => row['id']),
+      isNot(contains('archive')),
+    );
+    expect(
+      projectSessionGroups(
+        chats: List.generate(70, (index) => {'id': '$index', 'title': 'match'}),
+        spaces: [],
+        preferences: {},
+        query: 'match',
+      ).single.rows.length,
+      60,
+    );
+  });
+
+  testWidgets(
+    'archived search result offers restore and uses the shared wallpaper',
+    (tester) async {
+      final workspace = PageWorkspace();
+      workspace.chats = [
+        {'id': 'archive', 'title': 'Old change', 'archived': true},
+      ];
+      final preferences = await AppPreferences.load();
+      addTearDown(workspace.dispose);
+      addTearDown(preferences.dispose);
+      await tester.pumpWidget(
+        app(
+          SessionsPage(
+            workspace: workspace,
+            preferences: preferences,
+            onOpen: (_) {},
+            search: true,
+          ),
+        ),
+      );
+      expect(find.byType(WallpaperBackdrop), findsOneWidget);
+      await tester.enterText(find.byKey(const Key('session-search')), 'old');
+      await tester.pumpAndSettle();
+      await tester.longPress(find.text('Old change'));
+      await tester.pumpAndSettle();
+      expect(find.text('Pin'), findsNothing);
+      await tester.tap(find.text('Unarchive'));
+      await tester.pumpAndSettle();
+      expect(
+        workspace.calls.any(
+          (call) =>
+              call.params['op'] == 'setChatArchived' &&
+              call.params['archived'] == false,
+        ),
+        true,
+      );
+      expect(tester.takeException(), null);
+    },
+  );
 
   testWidgets('session context actions send real pin and archive mutations', (
     tester,
