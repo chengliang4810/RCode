@@ -3,9 +3,8 @@
 //!
 //! The in-memory bridge below stands in for the edge room: it cross-imports Loro
 //! updates (`export(updates)`) between the two engines' workspace docs on a timer,
-//! which is exactly what `RoomClient` + the SessionRoom DO do over the wire. A live
-//! variant against a real edge runs behind `#[ignore]` (RCODE_EDGE_WS, like
-//! rcode-sync's edge_convergence test).
+//! preserving the incremental document exchange used by `RoomClient`. These
+//! tests run locally and do not require the retired hosted edge service.
 
 use std::sync::Arc;
 use std::time::Duration;

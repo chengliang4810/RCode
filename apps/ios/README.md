@@ -22,7 +22,7 @@ xcodebuild -project RCode.xcodeproj -scheme RCode \
 
 The RCode target's **Rust core** build phase runs `scripts/ios/build-core.sh`,
 which builds `crates/mobile` for the active platform (always optimized — the
-`mobile` cargo profile) and refreshes the committed UniFFI bindings in
+`mobile` cargo profile) and regenerates the ignored UniFFI bindings in
 `RCode/Core/Generated/`. `RCODE_SKIP_CORE=1` reuses the last built library
 when iterating on Swift only.
 
@@ -46,7 +46,7 @@ RCode/
   Threads/     Sessions (foldable sidebar sections)/folder/search lists,
                cells, new-project folder browser
   Shell/       Tab bar (Sessions, Settings, search; "New session" accessory
-               with live summary), sign-in
+               with live summary), pairing
   Debug/       Transcript lab + hitch meter
 ```
 
@@ -80,9 +80,9 @@ RCode/
 | `-fast` / `-longreply` | Demo stream speed / reply length |
 | `-big` / `-huge` | Demo transcripts with 120 / 600 turns |
 | `-route chat:<id>` / `new` / `more` / `search` | Open a screen at launch |
-| `-signedout` | Clear stored credentials |
-| `-dev <userId> <orgId> [-edge <url>]` | Dev bearer against an `AUTH_MODE=dev` edge (e.g. `wrangler dev`); not persisted |
-| `-harness <id>` | Default harness for new sessions (`mock` for live-stack tests) |
+| `-signedout` | Clear stored credentials (Debug builds only) |
+| `-pair <host> <userId> <orgId>` | Pair with a supplied host and its `userId@orgId` bearer (Debug builds only) |
+| `-harness native` | Use RCode's in-process agent for new sessions |
 | `-bench` (with `-lab`) | Display-link fling benchmark; writes `Documents/bench.json` |
 | `-measureopen` | Session open latency; writes `Documents/open.json` |
 | `-lab [-turns N] [-autostream] [-autoscroll] [-top] [-meter]` | Transcript lab over fixture markdown, with an on-screen hitch meter |
@@ -100,34 +100,31 @@ xcodebuild … -only-testing:RCodeUITests/SessionFlowTests test
 xcodebuild … -only-testing:RCodeUITests/ScrollPerformanceTests test
 ```
 
-Live stack (real edge + headless engine; see `RCodeUITests/LiveStackTests.swift`):
+Online integration requires a separately provisioned, reachable host that
+implements the registry/session transport and a configured Native provider.
+This repository does not ship the former Cloudflare Worker service.
+`rcode headless` alone is not a replacement for that service. Pair in the app
+using the host address and token; the Debug hook is `-pair host userId orgId`.
+
+The opt-in test in `RCodeUITests/LiveStackTests.swift` uses those same inputs:
 
 ```sh
-(cd edge && npx wrangler dev --port 27650 --var AUTH_MODE:dev) &
-RCODE_DATA_DIR=/tmp/e2e RCODE_IPC_PORT=27811 RCODE_EDGE_URL=http://localhost:27650 \
-  RCODE_EDGE_TOKEN=alice@org1 RCODE_ORG_ID=org1 RCODE_HARNESS=mock target/debug/rcode headless &
-TEST_RUNNER_RCODE_LIVE_EDGE=http://localhost:27650 xcodebuild … -only-testing:RCodeUITests/LiveStackTests test
+TEST_RUNNER_RCODE_LIVE_HOST=https://your-host.example \
+TEST_RUNNER_RCODE_LIVE_PAIR_TOKEN="$PAIR_TOKEN" \
+  xcodebuild … -only-testing:RCodeUITests/LiveStackTests test
 ```
 
-The test launches the app with `-harness mock`: a chat's configured harness
-wins over the engine's `RCODE_HARNESS` default, so without it a real agent
-would run.
+This test sends a real prompt to the host's configured Native provider. It
+skips when pairing inputs are absent. The offline `-demo` fixtures remain
+available without a host or provider credentials.
 
 ## Session notifications
 
-The edge sends them (`edge/src/push-notify.ts`, `registry-room.ts`): when a
-session's registry row changes it applies the desktop's rule (run finished,
-waiting on your input, run failed) and pushes to every phone that registered
-with `POST /registry/:org/push-target`. The app asks for permission the first
-time a session is started from the phone (or from Settings → Notifications),
-registers its APNs token with the choices from Settings, stays quiet while
-open, and opens the session a notification is tapped for.
-
-Setup once per deployment: an APNs auth key (Apple Developer → Keys →
-Apple Push Notifications service), then `wrangler secret put APNS_KEY_P8` (the
-`.p8` contents) and `wrangler secret put APNS_KEY_ID` in `edge/`. The
-TestFlight workflow enables the Push capability on the App ID itself.
-`/registry/:org/stats` shows registered phones and recent deliveries.
+The client retains notification permissions, APNs token registration and
+notification navigation. Remote delivery requires the paired host to implement
+`POST /registry/:org/push-target` and APNs delivery; that backend is not included
+here. The former Worker deployment and `wrangler` instructions no longer
+apply. The TestFlight workflow still configures the app's Push capability.
 
 ## TestFlight release
 

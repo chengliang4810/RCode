@@ -1,5 +1,7 @@
 # Streaming selection and prompt expansion
 
+> 历史记录：本文保留旧实现的测量与设计过程。外部 CLI、云端 edge 及相关演示/性能脚本已退役，文中的旧命令不再作为当前验证步骤。现行入口见 [开发验证](development-validation.md)。
+
 Text selection now releases automatic viewport following at mouse-down and
 materializes the current list position. A stream burst can no longer remove
 the drag anchor before the first mouse move. Selection retains the runway;

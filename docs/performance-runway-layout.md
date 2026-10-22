@@ -1,5 +1,7 @@
 # Runway layout regression and performance validation — PR #261
 
+> 历史记录：本文保留旧实现的测量与设计过程。外部 CLI、云端 edge 及相关演示/性能脚本已退役，文中的旧命令不再作为当前验证步骤。现行入口见 [开发验证](development-validation.md)。
+
 The layout fix showed no material CPU or memory regression in eight matched
 Linux replays against v0.2.41 (`489a8c2`). The tested candidate is `d8c5760`,
 including that same sidebar fix. Streaming CPU changed by −0.26% on long replies

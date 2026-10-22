@@ -1,9 +1,8 @@
-//! In-process registry server speaking the same JSON WS protocol as
-//! `registry-room.ts`, built on the SAME merge fn the client uses
+//! In-process registry server speaking the client's JSON WebSocket protocol,
+//! built on the same merge function the client uses
 //! (`rcode_doc::apply_op`). Test infrastructure only (`mock-server` feature):
 //! rcode-sync's client tests and rcode-engine's two-engine integration tests
-//! run against this; TS↔Rust interop is proven separately against a real DO
-//! by the `--ignored` live-edge tests and scripts/e2e-smoke.sh.
+//! run against this. It does not validate a separately deployed backend.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};

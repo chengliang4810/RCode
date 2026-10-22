@@ -1,5 +1,7 @@
 # Runway scrolling performance check — PR #257
 
+> 历史记录：本文保留旧实现的测量与设计过程。外部 CLI、云端 edge 及相关演示/性能脚本已退役，文中的旧命令不再作为当前验证步骤。现行入口见 [开发验证](development-validation.md)。
+
 No material CPU or memory regression was detected against the newly optimized
 `main` (`6d642ac`, PR #255 including #256). The candidate is `ee08569`, the runway
 fix merged with that same main. Its only application difference is

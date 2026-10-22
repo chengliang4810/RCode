@@ -1,5 +1,7 @@
 # Idle presence updates and Metal memory attribution
 
+> 历史记录：本文保留旧实现的测量与设计过程。外部 CLI、云端 edge 及相关演示/性能脚本已退役，文中的旧命令不再作为当前验证步骤。现行入口见 [开发验证](development-validation.md)。
+
 This pass starts at v0.2.43 (`3e96088`) and uses the signed-in production
 backend, including the existing populated history. It follows the unresolved
 graphics-memory observation in [the earlier report](performance-macos-stability.md).

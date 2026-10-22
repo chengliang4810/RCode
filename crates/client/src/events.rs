@@ -29,10 +29,8 @@ pub enum ClientEvent {
     ComposerChanged { chat_id: String, revision: u64 },
     /// Graced connectivity posture changed.
     ConnectivityChanged(Connectivity),
-    /// The WorkOS pair rotated — persist it (Keychain) now; the old refresh
-    /// token is already spent.
-    /// The session cannot be refreshed any more (refresh token rejected) —
-    /// the platform should sign out and show sign-in.
+    /// The configured host rejected the pairing credentials; the platform
+    /// should request pairing again.
     AuthExpired { reason: String },
 }
 

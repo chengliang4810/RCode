@@ -1,5 +1,7 @@
 # Composer performance validation — PR #271
 
+> 历史记录：本文保留旧实现的测量与设计过程。外部 CLI、云端 edge 及相关演示/性能脚本已退役，文中的旧命令不再作为当前验证步骤。现行入口见 [开发验证](development-validation.md)。
+
 The audit found and fixed an unbounded repaint loop in the earlier PR. Intrinsic
 layout measured the editor at a provisional 320px width and then its resolved
 width. Notifying the composer for both heights scheduled another layout forever
@@ -50,7 +52,7 @@ builds, immutable executable copies, fresh UI data directories, the same isolate
 mock-engine fixture, a dedicated 1280×900 Xvfb window, and `LP_NUM_THREADS=4`.
 Compilation was finished before each measurement. Linux x86_64, Rust 1.97.1.
 
-[The profiler](../scripts/profile-composer.py) drives real key, clipboard, and
+[The profiler](https://github.com/chengliang4810/RCode/blob/aed4433/scripts/profile-composer.py) drives real key, clipboard, and
 wheel events without submitting a turn. It samples RSS every 100ms and reads
 process and main-thread CPU counters at phase boundaries. The fixture has two
 seeded chats in its sidebar and no streaming activity. For each binary, use a

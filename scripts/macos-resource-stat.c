@@ -1,4 +1,4 @@
-// Native process counters for resource-profile.mjs. CPU time uses Mach ticks;
+// Standalone native process counters for macOS profiling. CPU time uses Mach ticks;
 // footprint includes charged compressed/GPU memory that RSS alone misses.
 #include <libproc.h>
 #include <mach/mach_time.h>

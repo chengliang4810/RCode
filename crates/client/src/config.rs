@@ -1,19 +1,16 @@
-//! Construction inputs: where the edge is, who this device is, and how it
-//! authenticates. Token *persistence* stays on the platform (Keychain /
-//! Keystore): the client takes tokens in and reports rotations through
-//! [`crate::ClientEvent::AuthRefreshed`].
+//! Construction inputs for the user-configured host and this device.
+//! The platform persists pairing credentials in Keychain / Keystore.
 
 use std::path::PathBuf;
 
 /// Static per-install configuration.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClientConfig {
-    /// Edge base URL, e.g. `https://edge.example.com` (no trailing slash
-    /// needed). There is no default: this build ships no deployment, and a
-    /// runtime dials one only when the user configures it.
+    /// User-configured host base URL. The historical field name is retained
+    /// for platform bindings; no deployment is selected by default.
     pub edge_url: String,
     /// Writable directory for registry/doc snapshots and caches. Scoped by the
-    /// platform to the signed-in identity (sign-out wipes it).
+    /// platform to the paired identity (a different pairing starts fresh).
     pub data_dir: PathBuf,
     /// This device's stable id (`ios-xxxxxxxx`) — stamped on every command
     /// and queue row this device writes.
@@ -45,10 +42,8 @@ impl ClientConfig {
 
 /// How this client authenticates against the host it was pointed at.
 ///
-/// It used to carry a WorkOS session — an access/refresh pair rotated
-/// single-flight, reported back through [`crate::ClientEvent::AuthRefreshed`] —
-/// for an account on a hosted edge. There is no account and no hosted edge, so
-/// a client carries the bearer its host expects and nothing to refresh.
+/// A client carries the bearer its host expects; it has no account session
+/// or refresh token.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Credentials {
     /// The bearer is `userId@orgId`.

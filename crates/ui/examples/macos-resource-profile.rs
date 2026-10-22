@@ -1,5 +1,5 @@
 //! UI-only replay with native CoreText/Metal and real animation clocks.
-//! Input is frames.json from scripts/resource-profile.mjs. An offscreen target
+//! Input is a saved frames.json capture (historical capture tooling is retired). An offscreen target
 //! replaces the window compositor; this is not a whole-app CPU measurement.
 use gpui::{AppContext, Bounds, WindowBounds, WindowOptions, px, size};
 use rcode_ui::*;

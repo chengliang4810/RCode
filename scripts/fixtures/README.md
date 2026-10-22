@@ -8,9 +8,13 @@ The assistant text is 51,769 bytes, SHA-256
 Reasoning contributes another 853 bytes. The production transcript's part
 separators bring the combined short reply to 52,624 bytes.
 
-Use `RCODE_REPLAY_REPEAT=10 RCODE_REPLAY_DELAY_MS=8` for the synthetic long
-workload. See [the profiling report](../../docs/performance-resource-usage.md)
-for build settings, commands and measured results.
+The former CLI replay tooling and its `RCODE_REPLAY_*` controls are retired.
+These sanitized streams remain historical inputs for UI replay and measurement;
+see [the profiling report](../../docs/performance-resource-usage.md) for the
+original results and [current validation](../../docs/development-validation.md).
+
+`preview-server/` pins the Vite dependency used by the macOS native preview
+fixture. Install it with `npm ci --prefix scripts/fixtures/preview-server`.
 
 `runway-short-stream.jsonl` is a synthetic short reply in 24-character chunks.
 It keeps the own-send runway active through completion. Use a 400 ms replay

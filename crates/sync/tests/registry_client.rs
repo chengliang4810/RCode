@@ -1,7 +1,7 @@
 //! RegistryClient integration tests against the in-process mock server
-//! (`registry::mock_server`), which runs the SAME merge fn as the client and
-//! speaks the DO's JSON WS protocol. TS↔Rust interop is proven separately by
-//! the `--ignored` live-edge test (registry_edge.rs) and scripts/e2e-smoke.sh.
+//! (`registry::mock_server`), which runs the same merge function as the client
+//! and speaks its JSON WebSocket protocol. These tests require no hosted service;
+//! they do not establish interoperability with an external deployment.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
