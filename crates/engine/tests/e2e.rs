@@ -498,6 +498,14 @@ async fn interrupt_stamps_streaming_entry_aborted() {
     )
     .await;
 
+    // The stream settles before the durable Interrupt command is acknowledged.
+    // Wait for both publications before inspecting the journal and final state.
+    wait_for(
+        || command_status(&core, "cmd-int-1") == Some((SessionCommandStatus::Applied, None)),
+        "interrupt command applied",
+    )
+    .await;
+
     let all = entries(&core);
     let assistant = all
         .iter()
@@ -1243,7 +1251,7 @@ async fn rpc_surface_over_in_memory_transport() {
     // Delta protocol: the stream opens with a full reset frame.
     assert_eq!(
         initial,
-        serde_json::json!({ "reset": [], "contextUsage": null, "replayBaseline": {"entries": {}} })
+        serde_json::json!({ "reset": [], "contextUsage": null, "goal": null, "replayBaseline": {"entries": {}} })
     );
 
     // QueueCommand (as this device's composer would over IPC).
@@ -1438,6 +1446,12 @@ async fn respond_input_resolves_pending_question() {
             })
         },
         "answered turn to complete",
+    )
+    .await;
+    wait_for(
+        || command_status(&core, "cmd-answer-1")
+            .is_some_and(|(status, _)| status != SessionCommandStatus::Pending),
+        "answer command acknowledged",
     )
     .await;
     assert_eq!(
@@ -1987,6 +2001,12 @@ async fn harness_emitted_input_twin_is_dropped_and_answer_resumes() {
             })
         },
         "answered turn to complete",
+    )
+    .await;
+    wait_for(
+        || command_status(&core, "cmd-answer-twin")
+            .is_some_and(|(status, _)| status != SessionCommandStatus::Pending),
+        "answer command acknowledged",
     )
     .await;
     assert_eq!(

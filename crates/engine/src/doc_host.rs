@@ -5022,19 +5022,7 @@ impl DocHost {
             // 2026-08-19); terminalize it so the truth lands in the doc and
             // a user retry can mint a fresh attempt.
             for c in &commands {
-                if c.status == SessionCommandStatus::Pending
-                    && !skipped.contains(&c.id)
-                    && is_processed(&c.id)
-                    && !lock(&self.inner.executing).contains(&c.id)
-                {
-                    tracing::warn!(chat = %handle.chat_id, command = %c.id,
-                        "command consumed but never resolved (crash mid-execute?); rejecting");
-                    self.resolve_command(
-                        handle,
-                        &c.id,
-                        SessionCommandStatus::Rejected,
-                        Some("interrupted before completion — retry to send again"),
-                    );
+                if !skipped.contains(&c.id) && self.reject_dead_command(handle, c) {
                     skipped.insert(c.id.clone());
                 }
             }
@@ -5113,10 +5101,20 @@ impl DocHost {
             }
             // Mark BEFORE executing: a crash mid-execution must never double-run a
             // command whose side effect may already have happened.
-            if let Err(err) = self.inner.store.mark_processed(&entry.id) {
-                tracing::error!(chat = %handle.chat_id, error = %err, "processed-ledger write failed; halting drain");
-                lock(&self.inner.executing).remove(&entry.id);
-                return;
+            match self.inner.store.mark_processed(&entry.id) {
+                Ok(true) => {}
+                Ok(false) => {
+                    // A concurrent drain may finish between our snapshot and
+                    // in-flight claim. Its ledger receipt prevents re-execution.
+                    lock(&self.inner.executing).remove(&entry.id);
+                    skipped.insert(entry.id.clone());
+                    continue;
+                }
+                Err(err) => {
+                    tracing::error!(chat = %handle.chat_id, error = %err, "processed-ledger write failed; halting drain");
+                    lock(&self.inner.executing).remove(&entry.id);
+                    return;
+                }
             }
             match disposition {
                 CommandDisposition::Skip => {
@@ -5278,6 +5276,40 @@ impl DocHost {
     }
 
     /// Host-only outcome write (ledger rule 2).
+    fn reject_dead_command(&self, handle: &ChatDocHandle, snapshot: &SessionCommandEntry) -> bool {
+        if snapshot.status != SessionCommandStatus::Pending
+            || !self.inner.store.is_processed(&snapshot.id).unwrap_or(false)
+        {
+            return false;
+        }
+        // Claiming a command and sweeping its crash window use the same lock.
+        // An executor publishes its outcome before removing this in-flight id.
+        let executing = lock(&self.inner.executing);
+        if executing.contains(&snapshot.id) {
+            return false;
+        }
+        // The caller's snapshot may predate that outcome. Re-read while claims
+        // are excluded so a completed answer/Stop cannot become a rejection.
+        let still_pending = handle.doc.read_commands().is_ok_and(|commands| {
+            commands.iter().any(|current| {
+                current.id == snapshot.id && current.status == SessionCommandStatus::Pending
+            })
+        });
+        if !still_pending {
+            return false;
+        }
+        tracing::warn!(chat = %handle.chat_id, command = %snapshot.id,
+            "command consumed but never resolved (crash mid-execute?); rejecting");
+        self.resolve_command(
+            handle,
+            &snapshot.id,
+            SessionCommandStatus::Rejected,
+            Some("interrupted before completion — retry to send again"),
+        );
+        drop(executing);
+        true
+    }
+
     fn resolve_command(
         &self,
         handle: &ChatDocHandle,
@@ -5936,6 +5968,74 @@ fn encode_part_segment(part_id: &str) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod command_sweep_tests {
+    use super::*;
+
+    fn pending(host: &DocHost, handle: &ChatDocHandle) -> SessionCommandEntry {
+        let entry = SessionCommandEntry {
+            id: "answer".into(),
+            payload: SessionCommandPayload::Interrupt {},
+            issued_by: "viewer".into(),
+            issued_at: now_ms(),
+            based_on: None,
+            expires_at: None,
+            status: SessionCommandStatus::Pending,
+            resolution: None,
+        };
+        handle.doc.queue_command(&entry).unwrap();
+        assert!(host.inner.store.mark_processed(&entry.id).unwrap());
+        entry
+    }
+
+    fn host() -> (tempfile::TempDir, DocHost) {
+        let dir = tempfile::tempdir().unwrap();
+        let host = DocHost::new(
+            Arc::new(DocsStore::open(dir.path()).unwrap()),
+            DocHostConfig {
+                device_id: "host".into(),
+                default_harness: HarnessId::Mock,
+                edge: None,
+            },
+        );
+        (dir, host)
+    }
+
+    #[tokio::test]
+    async fn stale_pending_snapshot_cannot_reject_a_completed_command() {
+        let (_dir, host) = host();
+        let handle = host.open_local("completed-command").unwrap();
+        let snapshot = pending(&host, &handle);
+        host.resolve_command(&handle, &snapshot.id, SessionCommandStatus::Applied, None);
+        assert!(!host.reject_dead_command(&handle, &snapshot));
+        assert_eq!(
+            handle.doc.read_commands().unwrap()[0].status,
+            SessionCommandStatus::Applied
+        );
+        host.shutdown_workers().await;
+    }
+
+    #[tokio::test]
+    async fn crash_sweep_protects_in_flight_commands_but_rejects_abandoned_receipts() {
+        let (_dir, host) = host();
+        let handle = host.open_local("in-flight-command").unwrap();
+        let snapshot = pending(&host, &handle);
+        lock(&host.inner.executing).insert(snapshot.id.clone());
+        assert!(!host.reject_dead_command(&handle, &snapshot));
+        assert_eq!(
+            handle.doc.read_commands().unwrap()[0].status,
+            SessionCommandStatus::Pending
+        );
+        lock(&host.inner.executing).remove(&snapshot.id);
+        assert!(host.reject_dead_command(&handle, &snapshot));
+        assert_eq!(
+            handle.doc.read_commands().unwrap()[0].status,
+            SessionCommandStatus::Rejected
+        );
+        host.shutdown_workers().await;
+    }
 }
 
 #[cfg(test)]
