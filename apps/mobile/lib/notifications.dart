@@ -29,12 +29,16 @@ class NotificationTracker {
         if (row['status'] == 'awaitingInput' &&
             before['status'] != 'awaitingInput') {
           events.add((chatId: id, kind: 'input'));
-        } else if (row['status'] == 'errored' && before['status'] != 'errored')
+        } else if (row['status'] == 'errored' &&
+            before['status'] != 'errored') {
           events.add((chatId: id, kind: 'failed'));
-        else if ((row['lastCompletedTurn'] != null &&
+        } else if ((row['lastCompletedTurn'] != null &&
                 row['lastCompletedTurn'] != before['lastCompletedTurn']) ||
-            (row['status'] == 'idle' && before['status'] == 'working'))
+            (!row.containsKey('lastCompletedTurn') &&
+                row['status'] == 'idle' &&
+                before['status'] == 'working')) {
           events.add((chatId: id, kind: 'done'));
+        }
       }
       _previous[id] = {...row};
     }
@@ -110,8 +114,9 @@ class MobileNotifications {
       if (!_disposed &&
           workspace.authenticated &&
           workspace.cacheScope == scope &&
-          workspace.chat(id) != null)
+          workspace.chat(id) != null) {
         openChat(id);
+      }
     });
   }
 

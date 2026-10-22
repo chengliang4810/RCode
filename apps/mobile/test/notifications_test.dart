@@ -2,6 +2,13 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:rcode_mobile/notifications.dart';
 
 void main() {
+  test('interrupt and liveness expiry do not announce successful completion', () {
+    final tracker = NotificationTracker();
+    tracker.update('a', [{'chatId': 'one', 'status': 'working', 'lastCompletedTurn': null}]);
+    expect(tracker.update('a', [{'chatId': 'one', 'status': 'idle', 'lastCompletedTurn': null}]), isEmpty);
+    tracker.update('a', [{'chatId': 'one', 'status': 'working', 'lastCompletedTurn': 'turn-1'}]);
+    expect(tracker.update('a', [{'chatId': 'one', 'status': 'idle', 'lastCompletedTurn': 'turn-1'}]), isEmpty);
+  });
   test(
     'notices follow live transitions while snapshots and reconnects stay quiet',
     () {
