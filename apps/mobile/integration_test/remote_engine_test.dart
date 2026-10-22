@@ -58,6 +58,31 @@ bool _painted(WidgetTester tester, String text) =>
     _paints(tester)
         .any((paint) => '${paint.display['text'] ?? ''}'.contains(text));
 
+Future<void> _settleText(WidgetTester tester, Finder text) async {
+  final editable = find.descendant(
+    of: text,
+    matching: find.byType(EditableText),
+  );
+  final deadline = DateTime.now().add(const Duration(seconds: 5));
+  var stableFrames = 0;
+  // These short fixture paragraphs fit their own SelectableText viewport.
+  // Its scroll correction can outlive the surrounding transcript's layout.
+  while (stableFrames < 3) {
+    if (DateTime.now().isAfter(deadline)) {
+      fail('Timed out waiting for the visible text scroll correction');
+    }
+    await tester.pump(const Duration(milliseconds: 100));
+    final states = tester.stateList<EditableTextState>(editable);
+    stableFrames =
+        states.isNotEmpty &&
+            states.every(
+              (state) => state.renderEditable.offset.pixels.abs() < .01,
+            )
+        ? stableFrames + 1
+        : 0;
+  }
+}
+
 Future<void> _send(WidgetTester tester, String prompt) async {
   final composer = find.byKey(const Key('composer-text'));
   await tester.ensureVisible(composer);
@@ -68,7 +93,10 @@ Future<void> _send(WidgetTester tester, String prompt) async {
 }
 
 void main() {
-  final binding = IntegrationTestWidgetsFlutterBinding.ensureInitialized();
+  final binding = IntegrationTestWidgetsFlutterBinding.ensureInitialized()
+    // Native workers, scroll anchoring and screenshot presentation request
+    // frames independently of tester.pump, just as in the shipping app.
+    ..framePolicy = LiveTestWidgetsFlutterBindingFramePolicy.fullyLive;
 
   testWidgets(
     'shipping app pairs, renders native content and restores an offline turn',
@@ -371,9 +399,17 @@ void main() {
               ),
           'server-accepted slow turn',
         );
-        final acceptedText = find.textContaining(
-          'Mobile QA mock received: slow offline integration',
-          findRichText: true,
+        final acceptedEntry = session.messages.lastWhere(
+          (entry) => _text(entry)
+              .contains('Mobile QA mock received: slow offline integration'),
+        );
+        final acceptedRow = find.byKey(ValueKey('${acceptedEntry['id']}'));
+        final acceptedText = find.descendant(
+          of: acceptedRow,
+          matching: find.textContaining(
+            'Mobile QA mock received: slow offline integration',
+            findRichText: true,
+          ),
         );
         await _until(
           tester,
@@ -386,7 +422,21 @@ void main() {
           () => acceptedText.hitTestable().evaluate().isNotEmpty,
           'visible accepted slow turn',
         );
+        await _settleText(tester, acceptedRow);
         await screenshot('04-accepted-slow-turn');
+        expect(
+          session.working,
+          isTrue,
+          reason: 'Disconnect while the accepted turn is still running',
+        );
+        expect(
+          session.messages
+              .where(
+                (entry) => _text(entry).contains('Fixture response completed.'),
+              )
+              .length,
+          completedBefore,
+        );
         await workspace.flushCaches();
         await tester.pumpWidget(const SizedBox.shrink());
         await workspace.disconnect(forget: false);
@@ -494,6 +544,7 @@ void main() {
           () => completedText.hitTestable().evaluate().isNotEmpty,
           'visible restored completion text',
         );
+        await _settleText(tester, completedRow);
         checks.add(
           'accepted turn finishes offline and restores visible text and native content once without resending',
         );
