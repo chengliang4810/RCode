@@ -1,5 +1,7 @@
 import 'package:rcode_mobile/ui/settings_page.dart';
 import 'package:rcode_mobile/ui/workspace_shell.dart';
+import 'package:rcode_mobile/ui/session_page.dart';
+import 'package:rcode_mobile/ui/attachments.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
@@ -143,4 +145,110 @@ void main() {
     await tester.pumpWidget(const SizedBox());
     await tester.pump(const Duration(milliseconds: 300));
   });
+
+  testWidgets(
+    'an open tablet conversation keeps its draft across both width changes',
+    (tester) async {
+      final workspace = PageWorkspace();
+      workspace.chats = [
+        {'id': 'chat', 'title': 'Rotate me', 'archived': false},
+      ];
+      workspace.session('chat').hydrated = true;
+      final preferences = await AppPreferences.load();
+      addTearDown(workspace.dispose);
+      addTearDown(preferences.dispose);
+      resetRecoveredImagesForTesting(retrieval: Future.value([]));
+      addTearDown(resetRecoveredImagesForTesting);
+      tester.view.devicePixelRatio = 1;
+      tester.view.physicalSize = const Size(1100, 800);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      addTearDown(tester.view.resetPhysicalSize);
+      await tester.pumpWidget(
+        app(
+          WorkspaceShell(
+            workspace: workspace,
+            preferences: preferences,
+            sessionBuilder: (id) => SessionPage(
+              workspace: workspace,
+              chatId: id,
+              preferences: preferences,
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('session-chat')));
+      await tester.pumpAndSettle();
+      await tester.enterText(
+        find.byKey(const Key('composer-text')),
+        'Draft survives rotation',
+      );
+      tester.testTextInput.hide();
+      FocusManager.instance.primaryFocus?.unfocus();
+      await tester.pumpAndSettle();
+
+      tester.view.physicalSize = const Size(600, 900);
+      await tester.pumpAndSettle();
+      expect(find.byType(SessionPage), findsOneWidget);
+      expect(find.byType(BackButton), findsOneWidget);
+      expect(find.text('Draft survives rotation'), findsOneWidget);
+      expect(find.byKey(const Key('sidebar-settings')), findsNothing);
+
+      tester.view.physicalSize = const Size(1100, 800);
+      await tester.pumpAndSettle();
+      expect(find.byType(SessionPage), findsOneWidget);
+      expect(find.byType(BackButton), findsNothing);
+      expect(find.text('Draft survives rotation'), findsOneWidget);
+      expect(find.byKey(const Key('sidebar-settings')), findsOneWidget);
+      expect(tester.takeException(), null);
+      await tester.pumpWidget(const SizedBox());
+      await tester.pump(const Duration(milliseconds: 400));
+    },
+  );
+
+  testWidgets(
+    'a compact conversation widens in place and closing it stays closed',
+    (tester) async {
+      final workspace = PageWorkspace();
+      workspace.chats = [
+        {'id': 'chat', 'title': 'Open me', 'archived': false},
+      ];
+      final preferences = await AppPreferences.load();
+      addTearDown(workspace.dispose);
+      addTearDown(preferences.dispose);
+      tester.view.devicePixelRatio = 1;
+      tester.view.physicalSize = const Size(390, 844);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      addTearDown(tester.view.resetPhysicalSize);
+      await tester.pumpWidget(
+        app(
+          WorkspaceShell(
+            workspace: workspace,
+            preferences: preferences,
+            sessionBuilder: (id) =>
+                Scaffold(appBar: AppBar(), body: Text('Session $id')),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('session-chat')));
+      await tester.pumpAndSettle();
+      tester.view.physicalSize = const Size(1100, 800);
+      await tester.pumpAndSettle();
+      expect(find.text('Session chat'), findsOneWidget);
+      expect(find.byKey(const Key('sidebar-settings')), findsOneWidget);
+      expect(find.byType(BackButton), findsNothing);
+      tester.view.physicalSize = const Size(390, 844);
+      await tester.pumpAndSettle();
+      expect(find.byType(BackButton), findsOneWidget);
+      await tester.pageBack();
+      await tester.pumpAndSettle();
+      tester.view.physicalSize = const Size(1100, 800);
+      await tester.pumpAndSettle();
+      expect(find.text('Session chat'), findsNothing);
+      expect(find.byKey(const Key('sidebar-settings')), findsOneWidget);
+      expect(tester.takeException(), null);
+      await tester.pumpWidget(const SizedBox());
+    },
+  );
 }

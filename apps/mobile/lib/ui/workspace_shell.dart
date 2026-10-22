@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:math' as math;
 import 'dart:ui';
 
@@ -29,41 +30,114 @@ class WorkspaceShell extends StatefulWidget {
   State<WorkspaceShell> createState() => WorkspaceShellState();
 }
 
-class WorkspaceShellState extends State<WorkspaceShell> {
+class WorkspaceShellState extends State<WorkspaceShell>
+    with WidgetsBindingObserver {
   int _tab = 0;
   String? _selectedChat;
   bool _wide = false;
+  bool _layoutKnown = false;
+  bool _layoutSyncScheduled = false;
+  bool _transferringSession = false;
+  bool _coveringRoute = false;
   String? _phoneChat;
+  MaterialPageRoute<void>? _phoneRoute;
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _selectedChat = widget.initialChatId;
-    if (_selectedChat != null) {
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted && !_wide) openSession(_selectedChat!);
-      });
-    }
+  }
+
+  @override
+  void didChangeMetrics() {
+    // An opaque phone route can keep the shell offstage while the window
+    // changes size. Observe the view as well as the shell's layout constraints.
+    if (mounted) setState(() {});
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
   }
 
   Future<void> openSession(String id) async {
     if (!mounted) return;
-    if (_wide) {
-      setState(() {
-        _selectedChat = id;
-        _tab = 0;
-      });
+    setState(() {
+      _selectedChat = id;
+      _tab = 0;
+    });
+    if (_wide || _transferringSession) {
+      _scheduleLayoutSync();
       return;
     }
-    if (_phoneChat == id) return;
+    await _showPhoneSession(id);
+  }
+
+  Future<void> _showPhoneSession(String id) async {
+    if (_phoneChat == id && _phoneRoute?.isActive == true) return;
+    final navigator = Navigator.of(context);
+    final previous = _phoneRoute;
+    final route = MaterialPageRoute<void>(
+      builder: (_) => widget.sessionBuilder(id),
+    );
     setState(() {
-      _tab = 0;
       _phoneChat = id;
+      _phoneRoute = route;
     });
-    await Navigator.of(
-      context,
-    ).push(MaterialPageRoute<void>(builder: (_) => widget.sessionBuilder(id)));
-    if (mounted) setState(() => _phoneChat = null);
+    if (previous != null && previous.isActive) {
+      navigator.popUntil(
+        (candidate) => candidate == previous || candidate.isFirst,
+      );
+      await navigator.pushReplacement<void, void>(route);
+    } else {
+      await navigator.push(route);
+    }
+    if (mounted && identical(_phoneRoute, route)) {
+      setState(() {
+        _phoneRoute = null;
+        _phoneChat = null;
+        _selectedChat = null;
+      });
+    }
+  }
+
+  void _scheduleLayoutSync() {
+    if (_layoutSyncScheduled) return;
+    _layoutSyncScheduled = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _layoutSyncScheduled = false;
+      if (mounted) unawaited(_syncLayout());
+    });
+  }
+
+  Future<void> _syncLayout() async {
+    if (_transferringSession) return;
+    final route = _phoneRoute;
+    if (_wide && route != null && route.isActive) {
+      final navigator = Navigator.of(context);
+      setState(() {
+        _transferringSession = true;
+        _phoneRoute = null;
+        _phoneChat = null;
+      });
+      navigator.popUntil(
+        (candidate) => candidate == route || candidate.isFirst,
+      );
+      navigator.removeRoute(route);
+      // The outgoing page saves its draft while disposing. Create the column's
+      // replacement only after its overlay is gone, keeping one live page.
+      await route.completed;
+      if (!mounted) return;
+      setState(() => _transferringSession = false);
+      _scheduleLayoutSync();
+    } else if (!_wide &&
+        _selectedChat != null &&
+        _phoneRoute == null &&
+        !_coveringRoute) {
+      unawaited(_showPhoneSession(_selectedChat!));
+    }
   }
 
   Future<void> _newSession() async {
@@ -74,27 +148,42 @@ class WorkspaceShellState extends State<WorkspaceShell> {
       });
       return;
     }
-    final id = await Navigator.of(context).push<String>(
-      MaterialPageRoute(
-        fullscreenDialog: true,
-        builder: (_) => NewSessionPage(
-          workspace: widget.workspace,
-          preferences: widget.preferences,
+    _coveringRoute = true;
+    String? id;
+    try {
+      id = await Navigator.of(context).push<String>(
+        MaterialPageRoute(
+          fullscreenDialog: true,
+          builder: (_) => NewSessionPage(
+            workspace: widget.workspace,
+            preferences: widget.preferences,
+          ),
         ),
-      ),
-    );
+      );
+    } finally {
+      _coveringRoute = false;
+    }
     if (id != null && mounted) await openSession(id);
+    if (mounted) _scheduleLayoutSync();
   }
 
-  Future<void> _settings() => Navigator.of(context).push(
-    MaterialPageRoute<void>(
-      builder: (_) => SettingsPage(
-        workspace: widget.workspace,
-        preferences: widget.preferences,
-        onOpen: openSession,
-      ),
-    ),
-  );
+  Future<void> _settings() async {
+    _coveringRoute = true;
+    try {
+      await Navigator.of(context).push(
+        MaterialPageRoute<void>(
+          builder: (_) => SettingsPage(
+            workspace: widget.workspace,
+            preferences: widget.preferences,
+            onOpen: openSession,
+          ),
+        ),
+      );
+    } finally {
+      _coveringRoute = false;
+    }
+    if (mounted) _scheduleLayoutSync();
+  }
 
   Widget _connection(BuildContext context) => ListenableBuilder(
     listenable: widget.workspace,
@@ -239,7 +328,14 @@ class WorkspaceShellState extends State<WorkspaceShell> {
   @override
   Widget build(BuildContext context) => LayoutBuilder(
     builder: (context, constraints) {
-      _wide = constraints.maxWidth >= 840 && constraints.maxHeight >= 520;
+      final view = View.of(context);
+      final size = view.physicalSize / view.devicePixelRatio;
+      final wide = size.width >= 840 && size.height >= 520;
+      if (!_layoutKnown || _wide != wide) {
+        _layoutKnown = true;
+        _wide = wide;
+        _scheduleLayoutSync();
+      }
       if (_wide) {
         final width = math.min(360.0, constraints.maxWidth * .36);
         return Scaffold(
@@ -302,7 +398,9 @@ class WorkspaceShellState extends State<WorkspaceShell> {
                     ),
                     VerticalDivider(width: 1, color: context.colors.hairline),
                     Expanded(
-                      child: _selectedChat == null
+                      child: _phoneRoute != null || _transferringSession
+                          ? const SizedBox.shrink()
+                          : _selectedChat == null
                           ? NewSessionPage(
                               key: const ValueKey('wide-new-session'),
                               workspace: widget.workspace,
