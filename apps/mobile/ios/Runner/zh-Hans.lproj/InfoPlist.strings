@@ -1,0 +1,3 @@
+"NSCameraUsageDescription" = "拍摄照片并附加到对话。";
+"NSPhotoLibraryUsageDescription" = "选择图片并附加到对话。";
+"NSLocalNetworkUsageDescription" = "连接局域网中的 RCode 服务。";

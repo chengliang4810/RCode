@@ -1,0 +1,3 @@
+"NSCameraUsageDescription" = "Attach a photo to a conversation.";
+"NSPhotoLibraryUsageDescription" = "Choose images to attach to a conversation.";
+"NSLocalNetworkUsageDescription" = "Connect to your RCode engine on the local network.";
