@@ -6,6 +6,32 @@ fn drive_root(path: &str) -> bool {
     bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && bytes[2] == b'\\'
 }
 
+/// Whether `path` is absolute on a Windows host: a drive letter, a colon and
+/// a separator, `C:\x` or `C:/x`. The drive-relative `C:x` spelling names a
+/// location against that drive's own working directory, so it stays out — no
+/// link or request grammar accepts it as a location.
+///
+/// This is a lexical test on purpose: the path belongs to whichever device
+/// owns it, so the viewer's own `std::path` rules must not decide.
+pub fn is_windows_drive(path: &str) -> bool {
+    let bytes = path.as_bytes();
+    bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && matches!(bytes[2], b'\\' | b'/')
+}
+
+/// Whether `path` is absolute on the host that owns it: a POSIX root or a
+/// Windows drive.
+///
+/// A viewport reads paths another device wrote, so the viewer's own
+/// `std::path` rules must not decide: on macOS a `D:\dir` path has no root,
+/// and on Windows a `/dir` path has a root but no drive. The spelling travels
+/// with the path.
+pub fn is_host_absolute(path: &str) -> bool {
+    path.starts_with('/') || is_windows_drive(path)
+}
+
 fn unc_root_len(path: &str, prefix: usize) -> Option<usize> {
     let server_end = prefix + path.get(prefix..)?.find('\\')?;
     if server_end == prefix {
@@ -88,6 +114,26 @@ pub fn expand_home(path: &str, home: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The absolute-path test reads the spelling the path was written in, so a
+    /// viewport never applies its own filesystem's rules to another device's
+    /// path.
+    #[test]
+    fn absolute_paths_are_recognised_in_either_spelling() {
+        for path in [r"C:\", r"C:\dir", "C:/dir", r"d:\x\y.md"] {
+            assert!(is_windows_drive(path), "{path}");
+            assert!(is_host_absolute(path), "{path}");
+        }
+        // Drive-relative names a location against that drive's own working
+        // directory, not an absolute one.
+        for path in ["C:", "C:dir", "C", "", "<C:/x>"] {
+            assert!(!is_windows_drive(path), "{path}");
+        }
+        for path in ["/", "/usr/local/bin", "~/x"] {
+            assert!(!is_windows_drive(path), "{path}");
+            assert_eq!(is_host_absolute(path), path.starts_with('/'), "{path}");
+        }
+    }
 
     #[test]
     fn windows_navigation_preserves_prefixes_and_stops_at_roots() {
