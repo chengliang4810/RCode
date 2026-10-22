@@ -65,7 +65,10 @@ class _ConnectionPageState extends State<ConnectionPage> {
             padding: const EdgeInsets.all(24),
             child: ConstrainedBox(
               constraints: BoxConstraints(
-                minHeight: constraints.maxHeight - 48,
+                minHeight: (constraints.maxHeight - 48).clamp(
+                  0,
+                  double.infinity,
+                ),
               ),
               child: IntrinsicHeight(
                 child: Center(

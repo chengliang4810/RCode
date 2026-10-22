@@ -42,6 +42,13 @@ class _NewSessionPageState extends State<NewSessionPage> {
   bool _loadingModels = false;
   bool _sending = false;
   bool _created = false;
+  String? _pendingChatId;
+  String? _pendingMessageId;
+  SessionController? _pendingSession;
+  Map<String, dynamic>? _pendingCreate;
+  Map<String, dynamic>? _pendingWorktree;
+  String? _pendingText;
+  List<UploadAttachment>? _pendingAttachments;
   String? _error;
   int _modelGeneration = 0;
   Timer? _draftTimer;
@@ -60,6 +67,7 @@ class _NewSessionPageState extends State<NewSessionPage> {
   List<String> get _efforts => (_chosenModel?['reasoningLevels'] as List? ?? [])
       .whereType<String>()
       .toList();
+  bool get _locked => _sending || _pendingChatId != null;
 
   @override
   void initState() {
@@ -110,6 +118,9 @@ class _NewSessionPageState extends State<NewSessionPage> {
     _persistDraft();
     _text.removeListener(_remember);
     _text.dispose();
+    if (_pendingSession case final session?) {
+      widget.workspace.releaseSession(session);
+    }
     super.dispose();
   }
 
@@ -157,7 +168,12 @@ class _NewSessionPageState extends State<NewSessionPage> {
       }
       setState(() {
         _models = models;
-        _applyCatalog();
+        if (models.isEmpty) {
+          _model = null;
+          _reasoning = null;
+        } else {
+          _applyCatalog();
+        }
       });
       _remember();
     } catch (error) {
@@ -332,7 +348,11 @@ class _NewSessionPageState extends State<NewSessionPage> {
                 .toList()
           : widget.workspace.devices
                 .where(
-                  (device) => !['ios', 'android'].contains(device['platform']),
+                  (device) => ![
+                    'ios',
+                    'ipados',
+                    'android',
+                  ].contains(device['platform']),
                 )
                 .map(
                   (device) => ListTile(
@@ -473,7 +493,7 @@ class _NewSessionPageState extends State<NewSessionPage> {
   Future<void> _create() async {
     if (_sending || (_text.text.trim().isEmpty && _attachments.isEmpty)) return;
     final target = _target;
-    if (target == null || _model == null) {
+    if (_pendingChatId == null && (target == null || _chosenModel == null)) {
       setState(
         () => _error = context.tr(
           '请选择执行设备和模型',
@@ -486,10 +506,10 @@ class _NewSessionPageState extends State<NewSessionPage> {
       _sending = true;
       _error = null;
     });
-    final id = mobileId('chat');
+    final id = _pendingChatId ??= mobileId('chat');
     try {
       final project = _project;
-      await widget.workspace.call('Mutate', {
+      _pendingCreate ??= {
         'op': 'createChat',
         'chatId': id,
         if (project != null) 'spaceId': project['id'] else 'deviceId': target,
@@ -500,20 +520,33 @@ class _NewSessionPageState extends State<NewSessionPage> {
           'reasoning': _reasoning,
           'modelOptions': <String, dynamic>{},
         },
-      });
-      await widget.workspace
-          .session(id)
-          .send(
-            _text.text.trim(),
-            attachments: _attachments,
-            worktree: _worktree && project != null
-                ? {
-                    'repoPath': project['path'],
-                    'base': _branch ?? 'HEAD',
-                    'spaceId': project['id'],
-                  }
-                : null,
-          );
+      };
+      _pendingText ??= _text.text.trim();
+      _pendingAttachments ??= List.of(_attachments);
+      _pendingWorktree ??= _worktree && project != null
+          ? {
+              'repoPath': project['path'],
+              'base': _branch ?? 'HEAD',
+              'spaceId': project['id'],
+            }
+          : null;
+      // CreateChat is idempotent: an acknowledgement lost during reconnect
+      // retries the same chat instead of leaving a second empty conversation.
+      if (widget.workspace.chat(id) == null) {
+        await widget.workspace.call('Mutate', _pendingCreate!);
+      }
+      final session = _pendingSession ??= widget.workspace.retainSession(id);
+      if (_pendingMessageId case final messageId?) {
+        if (!session.messages.any((entry) => entry['id'] == messageId)) {
+          await session.retryPending(messageId);
+        }
+      } else {
+        _pendingMessageId = await session.send(
+          _pendingText!,
+          attachments: _pendingAttachments!,
+          worktree: _pendingWorktree,
+        );
+      }
       _created = true;
       await widget.preferences.setJson(_draftKey, {
         'projectId': _projectId,
@@ -532,6 +565,8 @@ class _NewSessionPageState extends State<NewSessionPage> {
         Navigator.of(context).pop(id);
       }
     } catch (error) {
+      _pendingMessageId ??=
+          _pendingSession?.pendingMessages.lastOrNull?['id'] as String?;
       if (mounted) setState(() => _error = error.toString());
     } finally {
       if (mounted) setState(() => _sending = false);
@@ -543,7 +578,7 @@ class _NewSessionPageState extends State<NewSessionPage> {
         key: ValueKey('new-$id'),
         avatar: Icon(icon, size: 14),
         label: Text(label, overflow: TextOverflow.ellipsis),
-        onPressed: _sending ? null : action,
+        onPressed: _locked ? null : action,
         padding: const EdgeInsets.symmetric(horizontal: 3),
         visualDensity: VisualDensity.compact,
         side: BorderSide.none,
@@ -573,7 +608,10 @@ class _NewSessionPageState extends State<NewSessionPage> {
               padding: const EdgeInsets.fromLTRB(20, 20, 20, 20),
               child: ConstrainedBox(
                 constraints: BoxConstraints(
-                  minHeight: constraints.maxHeight - 40,
+                  minHeight: (constraints.maxHeight - 40).clamp(
+                    0,
+                    double.infinity,
+                  ),
                 ),
                 child: IntrinsicHeight(
                   child: Column(
@@ -663,7 +701,7 @@ class _NewSessionPageState extends State<NewSessionPage> {
                             TextField(
                               key: const Key('new-message'),
                               controller: _text,
-                              readOnly: _sending,
+                              readOnly: _locked,
                               minLines: 3,
                               maxLines: 9,
                               style: const TextStyle(
@@ -685,7 +723,7 @@ class _NewSessionPageState extends State<NewSessionPage> {
                                   for (var i = 0; i < _attachments.length; i++)
                                     InputChip(
                                       label: Text(_attachments[i].name),
-                                      onDeleted: _sending
+                                      onDeleted: _locked
                                           ? null
                                           : () => setState(
                                               () => _attachments.removeAt(i),
@@ -698,7 +736,7 @@ class _NewSessionPageState extends State<NewSessionPage> {
                                 IconButton(
                                   key: const Key('new-attach'),
                                   tooltip: context.tr('添加附件', 'Add attachment'),
-                                  onPressed: _sending ? null : _pickAttachments,
+                                  onPressed: _locked ? null : _pickAttachments,
                                   icon: const Icon(Icons.add),
                                 ),
                                 const Spacer(),
@@ -715,16 +753,26 @@ class _NewSessionPageState extends State<NewSessionPage> {
                                   ),
                                 IconButton.filled(
                                   key: const Key('new-send'),
-                                  tooltip: context.tr('发送', 'Send'),
+                                  tooltip: _pendingChatId == null
+                                      ? context.tr('发送', 'Send')
+                                      : context.tr('重试', 'Retry'),
                                   style: IconButton.styleFrom(
                                     backgroundColor: colors.text,
                                     foregroundColor: colors.background,
                                   ),
                                   onPressed:
-                                      _sending || !widget.workspace.connected
+                                      _sending ||
+                                          !widget.workspace.connected ||
+                                          (_pendingChatId == null &&
+                                              (_loadingModels ||
+                                                  _chosenModel == null))
                                       ? null
                                       : _create,
-                                  icon: const Icon(Icons.arrow_upward),
+                                  icon: Icon(
+                                    _pendingChatId == null
+                                        ? Icons.arrow_upward
+                                        : Icons.refresh,
+                                  ),
                                 ),
                               ],
                             ),
