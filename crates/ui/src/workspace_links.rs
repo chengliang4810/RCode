@@ -1,5 +1,6 @@
 //! Safe resolution of agent-authored Markdown links into workspace files.
 
+use rcode_proto::device_paths::is_windows_drive;
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
@@ -97,7 +98,12 @@ impl FileLinkRoot {
     /// The on-disk path `link` names under this root — never built from the
     /// raw link text, always from the resolved root join.
     pub(crate) fn absolute(&self, link: &WorkspaceFileLink) -> PathBuf {
-        Path::new(&self.root).join(&link.path)
+        // Append with the root's own separators: the file this names is
+        // `D:\dir\file.md` under a Windows root, whatever OS this viewport
+        // runs on.
+        PathBuf::from(rcode_proto::device_paths::child_folder(
+            &self.root, &link.path,
+        ))
     }
 }
 
@@ -177,9 +183,22 @@ pub(crate) fn resolve_inline_code_path(
     // The trailing slash of a directory the text introduces ("all under
     // `dir/`:") is presentation, not part of the path.
     let decoded = decoded.trim_end_matches('/');
-    if decoded.is_empty() || !clean_path(decoded) {
+    if decoded.is_empty() {
         return None;
     }
+    // A drive path is absolute on its own host, and its backslashes are that
+    // host's separators rather than escapes: normalize them exactly as the
+    // link grammar does, so the target produced here reads back to the same
+    // path.
+    let decoded: Cow<str> = if is_windows_drive(decoded) {
+        Cow::Owned(decoded.replace('\\', "/"))
+    } else {
+        Cow::Borrowed(decoded)
+    };
+    if !clean_path(&decoded) {
+        return None;
+    }
+    let decoded = decoded.as_ref();
     // The anchor rides along on the link target, so opening it lands on the
     // line the author named.
     let anchor = match fragment.line.or(suffix.line) {
@@ -190,12 +209,19 @@ pub(crate) fn resolve_inline_code_path(
         None => String::new(),
     };
     let file = |path: &Path| {
-        // File links are POSIX-only: a drive path (Windows) would become a
-        // target the link grammar rejects, turning the span into a dead link,
-        // so it keeps its inline-code look instead.
+        // A POSIX path becomes the `file://` target the grammar reads back. A
+        // drive path keeps its own spelling instead: `file://C:\…` would parse
+        // as a URL with `C:` for a host, and the grammar already reads a bare
+        // drive path as an absolute file.
         let path = path.to_string_lossy();
-        path.starts_with('/')
-            .then(|| InlineCodePath::File(format!("file://{}{anchor}", percent_encode_path(&path))))
+        let target = if is_windows_drive(&path) {
+            path.replace('\\', "/")
+        } else if path.starts_with('/') {
+            format!("file://{}", percent_encode_path(&path))
+        } else {
+            return None;
+        };
+        Some(InlineCodePath::File(format!("{target}{anchor}")))
     };
     if let Some(rest) = decoded.strip_prefix("~/") {
         let home = std::env::var_os("HOME").filter(|home| !home.is_empty())?;
@@ -264,8 +290,9 @@ enum ClassifiedKind {
     Mention,
     /// Root-relative path.
     Relative,
-    /// POSIX-absolute path — inside a root when one owns it, a host file
-    /// read-only otherwise.
+    /// Absolute host path — inside a root when one owns it, a host file
+    /// read-only otherwise. Two spellings: POSIX `/dir/file.md`, and a Windows
+    /// drive `/`-normalized to `C:/dir/file.md`.
     Absolute,
 }
 
@@ -347,7 +374,13 @@ fn classify_file_link(target: &str) -> Option<ClassifiedLink> {
         if !rest[..host_end].is_empty() || rest.contains('?') {
             return None;
         }
-        &rest[host_end..]
+        let path = &rest[host_end..];
+        // `file:///C:/x` is the URL spelling of a Windows drive path: that
+        // slash belongs to the scheme, not to a POSIX root.
+        match path.strip_prefix('/') {
+            Some(rest) if is_windows_drive(rest) => rest,
+            _ => path,
+        }
     } else {
         if target.contains("://") || target.starts_with("mailto:") {
             return None;
@@ -367,13 +400,23 @@ fn classify_file_link(target: &str) -> Option<ClassifiedLink> {
     } else {
         Cow::Borrowed(raw)
     };
+    // A Windows drive path is absolute on its own host, and a backslash is
+    // that host's separator rather than an escape: normalize it to the `/`
+    // spelling every later check and the wire path read. Only a drive prefix
+    // earns this — elsewhere `\` stays a rejected byte.
+    let decoded: Cow<str> = if is_windows_drive(&decoded) {
+        Cow::Owned(decoded.replace('\\', "/"))
+    } else {
+        decoded
+    };
     if decoded.is_empty() || !clean_path(&decoded) {
         return None;
     }
-    let kind = if decoded.starts_with('/') {
-        // Absolute POSIX path: one leading slash, not the root itself, and
-        // no trailing slash. A plain absolute path also wants a `.` in its
-        // file name (`/usr/bin/ls` stays plain text); `file://` is exempt.
+    let kind = if decoded.starts_with('/') || is_windows_drive(&decoded) {
+        // Absolute host path: one leading slash or one drive, not the root
+        // itself, and no trailing separator. A plain absolute path also wants
+        // a `.` in its file name (`/usr/bin/ls` and `C:/Windows/System32`
+        // stay plain text); `file://` is exempt.
         if decoded.len() == 1
             || decoded.starts_with("//")
             || decoded.ends_with('/')
@@ -429,7 +472,7 @@ fn split_line_fragment(target: &str) -> Option<(&str, ParsedAnchor)> {
     if fragment.is_empty() {
         return Some((path, ParsedAnchor::default()));
     }
-    if fragment.contains('/') {
+    if fragment.contains(['/', '\\']) {
         // The `#` is inside the path, not an anchor.
         return Some((target, ParsedAnchor::default()));
     }
@@ -552,6 +595,12 @@ fn parse_line_column(value: &str) -> Option<(u32, Option<u32>)> {
 /// only its workspace-relative remainder, anything else must already be a
 /// clean relative path. Returns `None` when the path escapes the root.
 fn resolve_decoded_path(target: &str, root: &str) -> Option<String> {
+    // A drive path is absolute on its own host, whatever OS renders this
+    // viewport, so `std::path` would read it with the wrong rules (or read it
+    // as relative at all): compare it lexically instead.
+    if is_windows_drive(target) {
+        return drive_relative(target, root);
+    }
     let root = Path::new(root);
     // A remote engine may supply POSIX paths to a Windows viewport. A leading
     // slash has a root on Windows, but is_absolute() also requires a drive;
@@ -562,6 +611,29 @@ fn resolve_decoded_path(target: &str, root: &str) -> Option<String> {
         Path::new(target)
     };
     safe_relative_path(relative)
+}
+
+/// `target` below `root` when both are drive paths on the same drive, as a
+/// `/`-separated tail. Separators normalize and segments compare without
+/// regard to case, the way that filesystem does — so a drive path never nests
+/// under a POSIX root, and the reverse holds too.
+fn drive_relative(target: &str, root: &str) -> Option<String> {
+    if !is_windows_drive(root) {
+        return None;
+    }
+    let target = target.replace('\\', "/");
+    let root = root.replace('\\', "/");
+    let target: Vec<&str> = target.split('/').filter(|part| !part.is_empty()).collect();
+    let root: Vec<&str> = root.split('/').filter(|part| !part.is_empty()).collect();
+    // The root itself is a directory, not the file inside it.
+    if root.len() >= target.len() {
+        return None;
+    }
+    let owned = root
+        .iter()
+        .zip(&target)
+        .all(|(root, target)| root.eq_ignore_ascii_case(target));
+    owned.then(|| target[root.len()..].join("/"))
 }
 
 fn safe_relative_path(path: &Path) -> Option<String> {
@@ -1009,8 +1081,6 @@ mod tests {
             "src/Makefile",
             "Makefile",
             "a:b/file.md",
-            "C:\\dir\\file.md",
-            "C:/dir/file.md",
             "https://example.com/file.rs",
             "mailto:dev@example.com",
             "../secret.rs",
@@ -1020,6 +1090,15 @@ mod tests {
         ] {
             assert!(
                 resolve_workspace_file_link(target, root).is_none(),
+                "{target}"
+            );
+        }
+        // A drive path is absolute on its own host, so a POSIX root never
+        // owns one: it resolves as a host file that device can read.
+        for target in ["C:\\dir\\file.md", "C:/dir/file.md"] {
+            assert_eq!(
+                resolve_workspace_file_link(target, root),
+                Some(outside_link("C:/dir/file.md")),
                 "{target}"
             );
         }
@@ -1099,5 +1178,152 @@ mod tests {
             Some(link("a.md", None, None))
         );
         assert!(resolve_workspace_file_link("rcode-file:/tmp/a.md", "/work/comet").is_none());
+    }
+
+    /// A Windows chat writes its absolute links in its own spelling — the one
+    /// its shell prints — and those resolve under its own root exactly as
+    /// POSIX links do under theirs.
+    #[test]
+    fn drive_links_resolve_against_a_drive_root() {
+        let root = r"D:\projects\zeron";
+        // The chat's own checkout owns the file, so the link is the wire path
+        // the file surface reads.
+        assert_eq!(
+            resolve_workspace_file_link(r"D:\projects\zeron\ARCHITECTURE.md", root),
+            Some(link("ARCHITECTURE.md", None, None))
+        );
+        // Either separator works, names compare without regard to case, and a
+        // line suffix survives both.
+        assert_eq!(
+            resolve_workspace_file_link("d:/projects/zeron/docs/a.md:12", root),
+            Some(link("docs/a.md", Some(12), None))
+        );
+        assert_eq!(
+            resolve_workspace_file_link(r"D:\PROJECTS\Zeron\docs\a.md#L12C5", root),
+            Some(link("docs/a.md", Some(12), Some(5)))
+        );
+        // A sibling directory sharing the root's prefix is not inside it.
+        assert_eq!(
+            resolve_workspace_file_link(r"D:\projects\zeron-other\src\lib.rs", root),
+            Some(outside_link("D:/projects/zeron-other/src/lib.rs"))
+        );
+        // Neither is a path on another drive.
+        assert_eq!(
+            resolve_workspace_file_link(r"C:\projects\zeron\src\lib.rs", root),
+            Some(outside_link("C:/projects/zeron/src/lib.rs"))
+        );
+        // The root alone is a directory, not a file below it — and its name
+        // carries no dot, so it is not a file link either.
+        assert_eq!(
+            resolve_workspace_file_link(r"D:\projects\zeron", root),
+            None
+        );
+        // Escaped spaces still decode, and `file:///C:/…` is the URL spelling
+        // of the same drive path.
+        assert_eq!(
+            resolve_workspace_file_link(r"D:\projects\zeron\My%20Report.md", root),
+            Some(link("My Report.md", None, None))
+        );
+        assert_eq!(
+            resolve_workspace_file_link("file:///D:/projects/zeron/docs/a.md", root),
+            Some(link("docs/a.md", None, None))
+        );
+    }
+
+    /// A drive link falls through the roots in order and becomes a host file
+    /// when none owns it, like any other absolute path.
+    #[test]
+    fn a_drive_link_falls_through_roots_in_order() {
+        let roots = [r"D:\projects\fork", r"D:\projects\main"];
+        assert!(resolution_eq(
+            first_root_owning(r"D:\projects\main\src\lib.rs", roots),
+            owned(1, link("src/lib.rs", None, None))
+        ));
+        assert!(resolution_eq(
+            first_root_owning(r"D:\projects\fork\src\lib.rs", roots),
+            owned(0, link("src/lib.rs", None, None))
+        ));
+        assert!(matches!(
+            first_root_owning(r"D:\elsewhere\a.md", roots),
+            Some(FileLinkResolution::Outside(link)) if link.path == "D:/elsewhere/a.md"
+        ));
+        // A POSIX root never owns a drive path, and the reverse holds too.
+        assert!(matches!(
+            first_root_owning(r"D:\projects\main\src\lib.rs", ["/projects/main"]),
+            Some(FileLinkResolution::Outside(_))
+        ));
+        assert!(matches!(
+            first_root_owning("/projects/main/src/lib.rs", [r"D:\projects\main"]),
+            Some(FileLinkResolution::Outside(_))
+        ));
+    }
+
+    #[test]
+    fn drive_paths_follow_the_strict_shape() {
+        let root = r"D:\work\comet";
+        // A bare drive, a trailing separator, a doubled one, a `.`/`..` step,
+        // a dotless file name and a drive-relative spelling are not file
+        // links — the same envelope a POSIX absolute path has.
+        for target in [
+            "D:",
+            r"D:\",
+            "D:/",
+            r"D:\work\comet\",
+            r"D:\\work\comet\a.md",
+            r"D:\work\..\comet\a.md",
+            r"D:\work\.\comet\a.md",
+            r"D:\work\comet\Makefile",
+            r"D:work\comet\a.md",
+            r"\\server\share\a.md",
+            r"D:\work\comet\a.md?x",
+            r"D:\work\comet\a.md:0",
+            r"D:\work\comet\a.md#L0",
+        ] {
+            assert!(
+                resolve_workspace_file_link(target, root).is_none(),
+                "{target}"
+            );
+        }
+    }
+
+    /// On a host that actually has the drive, an inline code span naming a
+    /// file links to it in the grammar's own spelling — and the target reads
+    /// back to the same workspace-relative path.
+    #[cfg(windows)]
+    #[test]
+    fn a_drive_code_span_links_to_the_file_it_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("checkout");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("top.md"), "x").unwrap();
+        let local = vec![FileLinkRoot {
+            chat: Some("chat".into()),
+            root: root.to_string_lossy().into_owned(),
+            local: true,
+        }];
+        let mut probes = PathProbes::default();
+        // A bare name resolves under the drive root.
+        let Some(InlineCodePath::File(target)) =
+            resolve_inline_code_path("top.md", &local, &[], &mut probes)
+        else {
+            panic!("a file span links")
+        };
+        assert!(target.ends_with("/top.md"), "{target}");
+        assert!(!target.contains('\\'), "{target}");
+        assert_eq!(
+            resolve_workspace_file_link(&target, &root.to_string_lossy()),
+            Some(link("top.md", None, None))
+        );
+        // The absolute drive spelling resolves too, anchor kept.
+        let absolute = format!(r"{}\top.md:12", root.to_string_lossy());
+        let Some(InlineCodePath::File(target)) =
+            resolve_inline_code_path(&absolute, &local, &[], &mut probes)
+        else {
+            panic!("an absolute drive span links")
+        };
+        assert_eq!(
+            resolve_workspace_file_link(&target, &root.to_string_lossy()),
+            Some(link("top.md", Some(12), None))
+        );
     }
 }

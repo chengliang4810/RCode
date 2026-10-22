@@ -59,9 +59,10 @@ use crate::surface_chrome::{
 
 /// A file document opened by absolute path beyond the workspace root — a
 /// link-opened host file. It has no tree entry and no watch, and the owning
-/// device serves it read-only.
+/// device serves it read-only. Absolute is the host's own notion: a POSIX
+/// root, or the drive path a Windows chat's link names.
 pub(super) fn path_is_outside(path: &str) -> bool {
-    path.starts_with('/')
+    rcode_proto::device_paths::is_host_absolute(path)
 }
 
 pub(super) fn toolbar_button(

@@ -625,3 +625,54 @@ fn pull_requests_from_a_chat_open_as_tabs_beside_the_focused_session(cx: &mut Te
         });
     });
 }
+
+/// A Windows chat writes its absolute links in its own spelling. Those open in
+/// the session's file panel exactly as POSIX ones do: the workspace-relative
+/// path for a file the chat's checkout owns, the drive path read-only for one
+/// it does not.
+#[gpui::test]
+fn drive_path_links_open_in_the_session_file_panel(cx: &mut TestAppContext) {
+    use crate::markdown::render::{LinkAction, LinkActivation, LinkOutcome, LinkTarget};
+    let (shell, cx) = setup(cx);
+    cx.update(|window, cx| {
+        shell.update(cx, |shell, cx| {
+            shell.state.update(cx, |state, _| {
+                for chat in &mut state.chats {
+                    if chat.id == "parent" {
+                        chat.cwd = Some(r"D:\projects\zeron".into());
+                    }
+                }
+            });
+            let link = |target: &str| LinkActivation {
+                target: LinkTarget::new("ARCHITECTURE.md", target),
+                action: LinkAction::Primary,
+                source_session: Some("parent".into()),
+            };
+            // The chat's own checkout owns the file, so the panel opens the
+            // workspace-relative path the engine reads.
+            assert_eq!(
+                shell.activate_session_link(
+                    &link(r"D:\projects\zeron\ARCHITECTURE.md"),
+                    window,
+                    cx
+                ),
+                LinkOutcome::Internal
+            );
+            let inside = shell.file_surface_seq;
+            assert_eq!(shell.file_surface_paths[&inside], "ARCHITECTURE.md");
+            assert!(shell.right_pane_open(cx));
+
+            // A drive path outside every checkout still opens: by its own
+            // absolute spelling, which the panel serves read-only.
+            assert_eq!(
+                shell.activate_session_link(&link(r"D:\elsewhere\team\NOTES.md"), window, cx),
+                LinkOutcome::Internal
+            );
+            let outside = shell.file_surface_seq;
+            assert_ne!(outside, inside);
+            let path = &shell.file_surface_paths[&outside];
+            assert_eq!(path, "D:/elsewhere/team/NOTES.md");
+            assert!(crate::files::path_is_outside(path));
+        });
+    });
+}

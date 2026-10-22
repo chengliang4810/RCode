@@ -264,8 +264,8 @@ impl WorkspaceFilesClient {
         use base64::Engine as _;
         use rcode_proto::{MAX_WORKSPACE_IMAGE_BYTES, WORKSPACE_IMAGE_CHUNK_BYTES};
         // Outside files carry no checkout identity — the device resolves
-        // them by absolute path.
-        if checkout_id.is_empty() && !path.starts_with('/') {
+        // them by absolute path, in the host's own spelling.
+        if checkout_id.is_empty() && !rcode_proto::device_paths::is_host_absolute(&path) {
             return Err(FilesClientError::Application(
                 WorkspaceFailure::CheckoutUnavailable,
             ));

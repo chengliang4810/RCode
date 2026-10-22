@@ -437,7 +437,8 @@ mod tests {
         out
     }
 
-    // File links are POSIX paths; Windows spans keep their code look.
+    // These fixtures spell their paths the POSIX way; a drive path goes
+    // through the same grammar and the same probe (see `workspace_links`).
     #[cfg(unix)]
     #[test]
     fn a_context_directory_resolves_bare_names_that_follow_it() {
