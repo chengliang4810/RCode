@@ -45,6 +45,7 @@ class SessionController extends ChangeNotifier {
   StreamSubscription<dynamic>? _transcript;
   final Map<String, JsonMap> _echoes = {};
   final Map<String, JsonMap> _attempts = {};
+  final Map<String, JsonMap> _queueAttempts = {};
   final Map<String, Completer<JsonMap>> _commandWaiters = {};
   Timer? _cacheDebounce;
 
@@ -79,6 +80,7 @@ class SessionController extends ChangeNotifier {
       workspace.rpc.watch('WatchQueue', {'chatId': chatId}).listen((value) {
         if (disposed || generation != _generation) return;
         queue = jsonMaps(jsonMap(value)['items']);
+        _adoptEchoes();
         notifyListeners();
       }, onError: _streamError),
     );
@@ -188,11 +190,15 @@ class SessionController extends ChangeNotifier {
   }
 
   void _adoptEchoes() {
-    final adopted = messages.map((entry) => entry['id']).toSet();
+    final adopted = {
+      ...messages.map((entry) => entry['id']),
+      ...queue.map((entry) => entry['id']),
+    };
     _echoes.removeWhere((id, _) => adopted.contains(id));
     _attempts.removeWhere(
       (_, entry) => adopted.contains(jsonMap(entry['payload'])['messageId']),
     );
+    _queueAttempts.removeWhere((id, _) => adopted.contains(id));
   }
 
   void _restoreCommandEchoes() {
@@ -286,13 +292,25 @@ class SessionController extends ChangeNotifier {
       final messageId = const Uuid().v4();
       final body = text.trim().isEmpty ? 'See the attached file(s).' : text;
       if (queue || (working && !steer)) {
-        await call('QueueMessage', {
+        final request = <String, dynamic>{
           'id': messageId,
           'issuedBy': workspace.clientDeviceId,
           'text': body,
           'attachments': paths,
           'holdForTurnEnd': true,
-        });
+        };
+        _queueAttempts[messageId] = request;
+        _echoes[messageId] = _pendingEcho(messageId, body, paths, attachments);
+        notifyListeners();
+        try {
+          await call('QueueMessage', request);
+          _echoes[messageId]?['deliveryStatus'] = 'pending';
+        } catch (_) {
+          _echoes[messageId]?['deliveryStatus'] = 'unconfirmed';
+          // A queue or transcript update can confirm acceptance before a
+          // dropped unary acknowledgement. Otherwise keep an explicit retry.
+          if (_queueAttempts.containsKey(messageId)) rethrow;
+        }
         return messageId;
       }
       final currentConfig = jsonMap(currentChat['config']);
@@ -318,24 +336,7 @@ class SessionController extends ChangeNotifier {
               },
             };
       final entry = _command(payload);
-      _echoes[messageId] = {
-        'id': messageId,
-        'role': 'user',
-        'parts': [
-          {'id': 'pending-text', 'kind': 'text', 'text': body},
-          for (var i = 0; i < paths.length; i++)
-            {
-              'id': 'pending-image-$i',
-              'kind': 'image',
-              'path': paths[i],
-              'name': attachments[i].name,
-              'mimeType': attachments[i].mimeType,
-            },
-        ],
-        'createdAt': DateTime.now().millisecondsSinceEpoch,
-        'deviceId': workspace.clientDeviceId,
-        'deliveryStatus': 'sending',
-      };
+      _echoes[messageId] = _pendingEcho(messageId, body, paths, attachments);
       _attempts[messageId] = entry;
       notifyListeners();
       try {
@@ -365,6 +366,30 @@ class SessionController extends ChangeNotifier {
     }
   }
 
+  JsonMap _pendingEcho(
+    String id,
+    String text,
+    List<String> paths,
+    List<UploadAttachment> attachments,
+  ) => {
+    'id': id,
+    'role': 'user',
+    'parts': [
+      {'id': 'pending-text', 'kind': 'text', 'text': text},
+      for (var i = 0; i < paths.length; i++)
+        {
+          'id': 'pending-image-$i',
+          'kind': 'image',
+          'path': paths[i],
+          'name': attachments[i].name,
+          'mimeType': attachments[i].mimeType,
+        },
+    ],
+    'createdAt': DateTime.now().millisecondsSinceEpoch,
+    'deviceId': workspace.clientDeviceId,
+    'deliveryStatus': 'sending',
+  };
+
   JsonMap _command(JsonMap payload) => {
     'id': const Uuid().v4(),
     'payload': payload,
@@ -377,6 +402,23 @@ class SessionController extends ChangeNotifier {
   };
 
   Future<void> retryPending(String messageId) async {
+    final queued = _queueAttempts[messageId];
+    if (queued != null) {
+      error = null;
+      _echoes[messageId]?['deliveryStatus'] = 'sending';
+      notifyListeners();
+      try {
+        await call('QueueMessage', queued);
+        _echoes[messageId]?['deliveryStatus'] = 'pending';
+      } catch (failure) {
+        error = failure;
+        _echoes[messageId]?['deliveryStatus'] = 'unconfirmed';
+        if (_queueAttempts.containsKey(messageId)) rethrow;
+      } finally {
+        if (!disposed) notifyListeners();
+      }
+      return;
+    }
     final previous = _attempts[messageId];
     if (previous == null) return;
     final settled = commands

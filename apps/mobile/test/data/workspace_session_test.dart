@@ -50,12 +50,15 @@ class EngineFixture {
   List<JsonMap> sessions = [];
   final Map<String, BytesBuilder> uploads = {};
   int relayCalls = 0;
+  int queueCalls = 0;
   bool loseReply = false;
+  bool loseQueueReply = false, dropQueueBeforeAccepting = false;
   bool slowIdentity = false;
   final identityRead = Completer<void>();
   final identityRelease = Completer<void>();
   JsonMap? lastCommand;
   JsonMap? lastLease;
+  JsonMap? lastQueued;
   String get url => 'ws://127.0.0.1:${http.port}';
 
   Future<void> start() async {
@@ -141,7 +144,24 @@ class EngineFixture {
               }
               result = {'status': 'executed'};
             case 'QueueMessage':
-              queue.add({...params, 'issuedAt': 1});
+              queueCalls++;
+              lastQueued = params;
+              if (dropQueueBeforeAccepting) {
+                dropQueueBeforeAccepting = false;
+                closing.add(socket);
+                await socket.close(1011);
+                return;
+              }
+              if (!queue.any((entry) => entry['id'] == params['id']) &&
+                  !messages.any((entry) => entry['id'] == params['id'])) {
+                queue.add({...params, 'issuedAt': 1});
+              }
+              if (loseQueueReply) {
+                loseQueueReply = false;
+                closing.add(socket);
+                await socket.close(1011);
+                return;
+              }
               publish('WatchQueue');
               result = {'id': params['id']};
             case 'BeginQueuedMessageEdit':
@@ -388,6 +408,60 @@ void main() {
     );
     expect(session.contextUsage, {'tokens': 12, 'window': 1000});
   });
+
+  for (final accepted in [false, true]) {
+    test(
+      'queue delivery ${accepted ? 'recovers a lost acknowledgement' : 'retries explicitly'} with the same identity',
+      () async {
+        final server = EngineFixture('server');
+        await server.start();
+        final model = workspace(MemoryStore());
+        addTearDown(() async {
+          model.dispose();
+          await server.close();
+        });
+        await model.connect(server.url, 'FixtureKey12');
+        await model.call('Mutate', {'op': 'createChat', 'chatId': 'chat'});
+        final session = model.retainSession('chat');
+        await until(() => session.hydrated);
+        server.loseQueueReply = accepted;
+        server.dropQueueBeforeAccepting = !accepted;
+        await expectLater(
+          session.send('queue once', queue: true),
+          throwsA(isA<RpcException>()),
+        );
+        final identity = server.lastQueued!['id'];
+        expect(session.pendingMessages.single['id'], identity);
+        expect(session.pendingMessages.single['deliveryStatus'], 'unconfirmed');
+        await until(
+          () =>
+              session.connected && (accepted ? session.queue.isNotEmpty : true),
+        );
+        expect(
+          server.queueCalls,
+          1,
+          reason: 'reconnect never replays a queue mutation',
+        );
+        if (!accepted) {
+          expect(session.queue, isEmpty);
+          expect(session.pendingMessages.single['id'], identity);
+          await session.retryPending('$identity');
+          await until(() => session.queue.isNotEmpty);
+          expect(server.queueCalls, 2);
+          expect(server.lastQueued!['id'], identity);
+        }
+        expect(server.queue.single['id'], identity);
+        expect(session.pendingMessages, isEmpty);
+        await session.retryPending('$identity');
+        expect(
+          server.queueCalls,
+          accepted ? 1 : 2,
+          reason: 'an adopted echo has no retry',
+        );
+        model.releaseSession(session);
+      },
+    );
+  }
 
   test('reopened views recover only their own undelivered commands and explicitly retry failures', () async {
     final server = EngineFixture('server');
