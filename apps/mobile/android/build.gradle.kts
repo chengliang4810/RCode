@@ -1,3 +1,5 @@
+import com.android.build.api.variant.LibraryAndroidComponentsExtension
+
 allprojects {
     repositories {
         google()
@@ -17,8 +19,14 @@ subprojects {
 }
 subprojects {
     project.evaluationDependsOn(":app")
+    plugins.withId("com.android.library") {
+        extensions.configure<LibraryAndroidComponentsExtension> {
+            // JNI plugins share the same installed, 16 KiB capable toolchain.
+            finalizeDsl { library -> library.ndkVersion = "27.0.12077973" }
+        }
+    }
 }
-
 tasks.register<Delete>("clean") {
     delete(rootProject.layout.buildDirectory)
 }
+
