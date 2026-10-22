@@ -65,6 +65,7 @@ class WorkspaceController extends ChangeNotifier {
   int _generation = 0;
   final List<StreamSubscription<dynamic>> _subscriptions = [];
   final Map<String, SessionController> _sessionControllers = {};
+  final Map<String, int> _sessionViews = {};
   Timer? _cacheDebounce;
   Future<void> _credentialWrites = Future.value();
 
@@ -125,6 +126,7 @@ class WorkspaceController extends ChangeNotifier {
       session.dispose();
     }
     _sessionControllers.clear();
+    _sessionViews.clear();
     _clearWorkspace();
     _paired = restoring;
     host = normalized;
@@ -235,6 +237,7 @@ class WorkspaceController extends ChangeNotifier {
       session.dispose();
     }
     _sessionControllers.clear();
+    _sessionViews.clear();
     await rpc.disconnect();
     if (_disposed || generation != _generation) return;
     _clearWorkspace();
@@ -272,7 +275,26 @@ class WorkspaceController extends ChangeNotifier {
     if (existing != null && !existing.disposed) return existing;
     final controller = SessionController(this, chatId);
     _sessionControllers[chatId] = controller;
+    _sessionViews.remove(chatId);
     return controller;
+  }
+
+  SessionController retainSession(String chatId) {
+    final controller = session(chatId);
+    _sessionViews.update(chatId, (count) => count + 1, ifAbsent: () => 1);
+    return controller;
+  }
+
+  void releaseSession(SessionController controller) {
+    if (!identical(_sessionControllers[controller.chatId], controller)) return;
+    final count = _sessionViews[controller.chatId] ?? 0;
+    if (count > 1) {
+      _sessionViews[controller.chatId] = count - 1;
+    } else {
+      _sessionViews.remove(controller.chatId);
+      _sessionControllers.remove(controller.chatId);
+      controller.dispose();
+    }
   }
 
   JsonMap? chat(String id) => chats.where((row) => row['id'] == id).firstOrNull;
@@ -391,6 +413,7 @@ class WorkspaceController extends ChangeNotifier {
       session.dispose();
     }
     _sessionControllers.clear();
+    _sessionViews.clear();
     rpc.dispose();
     super.dispose();
   }

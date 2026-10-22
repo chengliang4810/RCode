@@ -530,4 +530,36 @@ void main() {
     );
     expect(session.messages.length, 1);
   });
+
+  test('the last view releases its reads and an obsolete view cannot release a replacement', () async {
+    final server = EngineFixture('server');
+    await server.start();
+    final model = workspace(MemoryStore());
+    addTearDown(() async {
+      model.dispose();
+      await server.close();
+    });
+    await model.connect(server.url, 'FixtureKey12');
+    final first = model.retainSession('chat');
+    final second = model.retainSession('chat');
+    expect(identical(first, second), isTrue);
+    int reads() => server.watchers.values
+        .expand((watches) => watches.values)
+        .where((watch) => jsonMap(watch['params'])['chatId'] == 'chat')
+        .length;
+    await until(() => reads() == 3);
+    model.releaseSession(first);
+    expect(first.disposed, isFalse);
+    expect(reads(), 3);
+    model.releaseSession(second);
+    await until(() => reads() == 0);
+    expect(first.disposed, isTrue);
+    final replacement = model.retainSession('chat');
+    await until(() => reads() == 3);
+    model.releaseSession(first);
+    expect(replacement.disposed, isFalse);
+    expect(identical(model.session('chat'), replacement), isTrue);
+    model.releaseSession(replacement);
+    await until(() => reads() == 0);
+  });
 }
