@@ -218,6 +218,30 @@ async fn memory_desktop_routes_remote_creates_commands_and_catalogs_without_repl
         .call("RemoveRemoteHost", json!({"id":host["id"]}))
         .await
         .unwrap();
+    let local_loads = local.doc_host.sync_resources()["documentLoads"].clone();
+    // A tab may send again before the removed host disappears from its UI.
+    // Its old ownership must reject the request, never claim a local chat/doc.
+    let error = local_client
+        .call(
+            methods::RELAY_COMMAND,
+            json!({"chatId":"remote-chat","entry":entry}),
+        )
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("removed"));
+    for chat_id in ["remote-chat", "remote-chat--sub--tool"] {
+        assert!(
+            local_client
+                .subscribe_checked(methods::WATCH_DOC_MESSAGES, json!({"chatId":chat_id}))
+                .await
+                .is_err()
+        );
+    }
+    assert!(local.workspace.chat("remote-chat").unwrap().is_none());
+    assert_eq!(
+        local.doc_host.sync_resources()["documentLoads"],
+        local_loads
+    );
     let rows = catalog(&local_client, methods::WATCH_DEVICES, |rows| {
         !rows
             .as_array()

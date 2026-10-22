@@ -85,6 +85,12 @@ struct HostState {
     spaces: HashSet<String>,
 }
 
+#[derive(Default)]
+struct RetiredOwnership {
+    chats: HashSet<String>,
+    spaces: HashSet<String>,
+}
+
 impl HostState {
     fn new(record: HostRecord) -> Self {
         Self {
@@ -119,6 +125,9 @@ pub struct RemoteHosts {
     path: PathBuf,
     local_device_id: String,
     state: Mutex<BTreeMap<String, HostState>>,
+    // A stale tab may outlive host removal or an identity change. Keep its
+    // ownership for this process so it fails remotely instead of running here.
+    retired: Mutex<BTreeMap<String, RetiredOwnership>>,
     tasks: Mutex<HashMap<String, tokio::task::JoinHandle<()>>>,
     persistence: Mutex<()>,
     edits: tokio::sync::Mutex<()>,
@@ -164,6 +173,7 @@ impl RemoteHosts {
             path,
             local_device_id: local_device_id.into(),
             state: Mutex::new(state),
+            retired: Mutex::new(BTreeMap::new()),
             tasks: Mutex::new(HashMap::new()),
             persistence: Mutex::new(()),
             edits: tokio::sync::Mutex::new(()),
@@ -325,7 +335,11 @@ impl RemoteHosts {
                 .map(|host| host.record.clone())
                 .collect();
             write_config(&self.path, records)?;
-            state.remove(id).and_then(|host| host.client)
+            let previous = state.remove(id);
+            if let Some(host) = &previous {
+                self.retire(host);
+            }
+            previous.and_then(|host| host.client)
         };
         if let Some(client) = previous {
             client.close();
@@ -339,7 +353,14 @@ impl RemoteHosts {
         let state = lock(&self.state);
         let host = state.values().find(|host| {
             host.record.device_id.as_deref() == Some(target) || host.record.id == target
-        })?;
+        });
+        let Some(host) = host else {
+            return lock(&self.retired).contains_key(target).then(|| {
+                Err(RpcError::Failed(
+                    "remote device was removed or replaced".into(),
+                ))
+            });
+        };
         Some(match &host.client {
             Some(client) if host.record.enabled && client.is_connected() => Ok(client.clone()),
             _ => Err(RpcError::Failed("remote device is disconnected".into())),
@@ -414,6 +435,14 @@ impl RemoteHosts {
                             host.spaces.remove(id);
                         }
                     }
+                    for previous in lock(&self.retired).values_mut() {
+                        if let Some(id) = params["chatId"].as_str() {
+                            previous.chats.remove(id);
+                        }
+                        if let Some(id) = params["spaceId"].as_str() {
+                            previous.spaces.remove(id);
+                        }
+                    }
                 }
                 return None;
             }
@@ -435,8 +464,12 @@ impl RemoteHosts {
                 }
                 return Some(target.into());
             }
+            if lock(&self.retired).contains_key(target) {
+                return Some(target.into());
+            }
         }
         target_from_fields(&state, params, 0)
+            .or_else(|| target_from_retired(&lock(&self.retired), params, 0))
     }
 
     pub async fn shutdown(&self) {
@@ -503,6 +536,18 @@ impl RemoteHosts {
         }
     }
 
+    // Call while holding state: every routing lookup takes state first too,
+    // making removal/replacement and the rejection route one atomic change.
+    fn retire(&self, host: &HostState) {
+        let Some(device) = &host.record.device_id else {
+            return;
+        };
+        let mut retired = lock(&self.retired);
+        let previous = retired.entry(device.clone()).or_default();
+        previous.chats.extend(host.chats.iter().cloned());
+        previous.spaces.extend(host.spaces.iter().cloned());
+    }
+
     fn attach(
         &self,
         id: &str,
@@ -540,11 +585,20 @@ impl RemoteHosts {
                 .collect();
             write_config(&self.path, records)?;
         }
+        if host.record.device_id.as_deref() != Some(device) {
+            self.retire(host);
+        }
         let host = state.get_mut(id).unwrap();
         if host.record.device_id.as_deref() != Some(device) {
             host.catalogs.clear();
             host.chats.clear();
             host.spaces.clear();
+        }
+        if let Some(previous) = lock(&self.retired).get(device) {
+            // A verified re-add owns its old IDs immediately, before the new
+            // catalog arrives, and outranks other retired ownership hints.
+            host.chats.extend(previous.chats.iter().cloned());
+            host.spaces.extend(previous.spaces.iter().cloned());
         }
         host.record.device_id = Some(device.into());
         host.client = Some(client);
@@ -626,29 +680,7 @@ fn target_from_fields(
         let Some(device) = host.record.device_id.as_ref() else {
             continue;
         };
-        if ["targetDeviceId", "deviceId"]
-            .iter()
-            .any(|field| params[*field].as_str() == Some(device))
-        {
-            return Some(device.clone());
-        }
-        if ["chatId", "sourceChatId", "targetChatId"]
-            .iter()
-            .any(|field| {
-                params[*field].as_str().is_some_and(|id| {
-                    host.chats.contains(id)
-                        || id
-                            .split_once("--sub--")
-                            .is_some_and(|(root, _)| host.chats.contains(root))
-                })
-            })
-        {
-            return Some(device.clone());
-        }
-        if params["spaceId"]
-            .as_str()
-            .is_some_and(|id| host.spaces.contains(id))
-        {
+        if fields_match_owner(device, &host.chats, &host.spaces, params) {
             return Some(device.clone());
         }
     }
@@ -660,6 +692,53 @@ fn target_from_fields(
         }
     }
     None
+}
+
+fn target_from_retired(
+    retired: &BTreeMap<String, RetiredOwnership>,
+    params: &Value,
+    depth: usize,
+) -> Option<String> {
+    if depth > 3 {
+        return None;
+    }
+    for (device, previous) in retired {
+        if fields_match_owner(device, &previous.chats, &previous.spaces, params) {
+            return Some(device.clone());
+        }
+    }
+    for field in ["target", "request"] {
+        if params[field].is_object()
+            && let Some(device) = target_from_retired(retired, &params[field], depth + 1)
+        {
+            return Some(device);
+        }
+    }
+    None
+}
+
+fn fields_match_owner(
+    device: &str,
+    chats: &HashSet<String>,
+    spaces: &HashSet<String>,
+    params: &Value,
+) -> bool {
+    ["targetDeviceId", "deviceId"]
+        .iter()
+        .any(|field| params[*field].as_str() == Some(device))
+        || ["chatId", "sourceChatId", "targetChatId"]
+            .iter()
+            .any(|field| {
+                params[*field].as_str().is_some_and(|id| {
+                    chats.contains(id)
+                        || id
+                            .split_once("--sub--")
+                            .is_some_and(|(root, _)| chats.contains(root))
+                })
+            })
+        || params["spaceId"]
+            .as_str()
+            .is_some_and(|id| spaces.contains(id))
 }
 
 async fn identify(client: &RpcClient) -> Result<String, RpcError> {
@@ -1130,11 +1209,173 @@ mod tests {
                 .is_none()
         );
         manager.remove(&host.id).await.unwrap();
-        assert!(
+        assert_eq!(
             manager
                 .target_for("ReadFile", &json!({"chatId":"peer-chat"}))
+                .as_deref(),
+            Some("peer")
+        );
+        assert!(manager.client("peer").unwrap().is_err());
+    }
+
+    #[tokio::test]
+    async fn removed_ownership_rejects_stale_tabs_and_is_not_persisted() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = RemoteHosts::open(dir.path(), "local").unwrap();
+        let host = manager
+            .save(edit("Remote", "server.example", false))
+            .await
+            .unwrap();
+        lock(&manager.state)
+            .get_mut(&host.id)
+            .unwrap()
+            .record
+            .device_id = Some("peer".into());
+        manager.cache(
+            &host.id,
+            1,
+            "peer",
+            methods::WATCH_CHATS,
+            json!([{"id":"peer-chat", "deviceId":"peer"}]),
+        );
+        manager.cache(
+            &host.id,
+            1,
+            "peer",
+            methods::WATCH_SPACES,
+            json!([{"id":"peer-space", "deviceId":"peer"}]),
+        );
+        manager.target_for(
+            methods::MUTATE,
+            &json!({"op":"createChat","chatId":"not-yet-published","deviceId":"peer"}),
+        );
+        manager.remove(&host.id).await.unwrap();
+        assert!(manager.list().is_empty());
+        assert!(manager.api_key(&host.id).is_err());
+        assert_eq!(manager.merge(methods::WATCH_CHATS, json!([])), json!([]));
+        for params in [
+            json!({"chatId":"peer-chat"}),
+            json!({"chatId":"peer-chat--sub--tool"}),
+            json!({"sourceChatId":"not-yet-published"}),
+            json!({"target":{"spaceId":"peer-space"}}),
+            json!({"request":{"target":{"spaceId":"peer-space"}}}),
+            json!({"targetDeviceId":"peer"}),
+            json!({"request":{"deviceId":"peer"}}),
+        ] {
+            assert_eq!(
+                manager
+                    .target_for(methods::RELAY_COMMAND, &params)
+                    .as_deref(),
+                Some("peer")
+            );
+            assert!(manager.client("peer").unwrap().is_err());
+        }
+        assert!(
+            manager
+                .target_for(methods::RELAY_COMMAND, &json!({"chatId":"local-chat"}))
                 .is_none()
         );
+        assert!(manager.client("unknown").is_none());
+        let reopened = RemoteHosts::open(dir.path(), "local").unwrap();
+        assert!(
+            reopened.client("peer").is_none(),
+            "retired ownership is process-local"
+        );
+        manager.target_for(
+            methods::MUTATE,
+            &json!({"op":"createChat","chatId":"peer-chat","deviceId":"local"}),
+        );
+        assert!(
+            manager
+                .target_for(methods::RELAY_COMMAND, &json!({"chatId":"peer-chat"}))
+                .is_none()
+        );
+        manager.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn replaced_identity_keeps_old_rejection_routes_and_current_ownership_wins() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = RemoteHosts::open(dir.path(), "local").unwrap();
+        let host = manager
+            .save(edit("Remote", "server.example", false))
+            .await
+            .unwrap();
+        lock(&manager.state)
+            .get_mut(&host.id)
+            .unwrap()
+            .record
+            .device_id = Some("old-peer".into());
+        manager.cache(
+            &host.id,
+            1,
+            "old-peer",
+            methods::WATCH_CHATS,
+            json!([{"id":"old-chat", "deviceId":"old-peer"}]),
+        );
+        manager.cache(
+            &host.id,
+            1,
+            "old-peer",
+            methods::WATCH_SPACES,
+            json!([{"id":"old-space", "deviceId":"old-peer"}]),
+        );
+        let client = Arc::new(rcode_rpc::memory_client(Arc::new(Peer)));
+        manager.attach(&host.id, 1, "new-peer", client).unwrap();
+        assert_eq!(
+            manager
+                .target_for(methods::RELAY_COMMAND, &json!({"chatId":"old-chat"}))
+                .as_deref(),
+            Some("old-peer")
+        );
+        assert_eq!(
+            manager
+                .target_for("ReadFile", &json!({"spaceId":"old-space"}))
+                .as_deref(),
+            Some("old-peer")
+        );
+        assert!(manager.client("old-peer").unwrap().is_err());
+        manager.cache(
+            &host.id,
+            1,
+            "new-peer",
+            methods::WATCH_CHATS,
+            json!([{"id":"old-chat", "deviceId":"new-peer"}]),
+        );
+        assert_eq!(
+            manager
+                .target_for(methods::RELAY_COMMAND, &json!({"chatId":"old-chat"}))
+                .as_deref(),
+            Some("new-peer")
+        );
+        manager.remove(&host.id).await.unwrap();
+        let restored = manager
+            .save(edit("Restored", "other.example", false))
+            .await
+            .unwrap();
+        let restored_client = Arc::new(rcode_rpc::memory_client(Arc::new(Peer)));
+        manager
+            .attach(&restored.id, 1, "old-peer", restored_client.clone())
+            .unwrap();
+        lock(&manager.state)
+            .get_mut(&restored.id)
+            .unwrap()
+            .record
+            .enabled = true;
+        assert!(
+            Arc::ptr_eq(
+                &manager.client("old-peer").unwrap().unwrap(),
+                &restored_client
+            ),
+            "a current verified identity overrides the retired rejection"
+        );
+        assert_eq!(
+            manager
+                .target_for(methods::RELAY_COMMAND, &json!({"chatId":"old-chat"}))
+                .as_deref(),
+            Some("old-peer")
+        );
+        manager.shutdown().await;
     }
 
     struct Peer;
