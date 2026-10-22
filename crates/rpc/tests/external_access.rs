@@ -252,3 +252,51 @@ async fn dropping_a_reconnecting_client_releases_server_subscriptions() {
     );
     wait_for(|| server.service.active_watches.load(Ordering::SeqCst) == 0).await;
 }
+
+#[tokio::test]
+async fn explicit_close_releases_subscriptions_even_while_clients_are_retained() {
+    let server = server().await;
+    let client = Arc::new(
+        connect_ws_authenticated(&server.url, FIRST_KEY)
+            .await
+            .unwrap(),
+    );
+    let retained = client.clone();
+    let mut watching = retained.subscribe_scoped("Watch", json!({})).await.unwrap();
+    watching.recv().await.unwrap();
+    client.close();
+    assert!(!retained.is_connected());
+    assert!(
+        tokio::time::timeout(Duration::from_secs(2), watching.recv())
+            .await
+            .unwrap()
+            .is_none()
+    );
+    wait_for(|| server.service.active_watches.load(Ordering::SeqCst) == 0).await;
+    assert!(matches!(
+        retained.call("Echo", json!({})).await,
+        Err(RpcError::Closed)
+    ));
+}
+
+#[tokio::test]
+async fn foreground_reconnect_ends_old_subscriptions_and_restores_the_client() {
+    let server = server().await;
+    let client = connect_ws_authenticated(&server.url, FIRST_KEY)
+        .await
+        .unwrap();
+    let mut watching = client.subscribe_scoped("Watch", json!({})).await.unwrap();
+    watching.recv().await.unwrap();
+    client.reconnect_now();
+    assert!(!client.is_connected());
+    assert!(
+        tokio::time::timeout(Duration::from_secs(2), watching.recv())
+            .await
+            .unwrap()
+            .is_none()
+    );
+    wait_for(|| client.is_connected()).await;
+    echo(&client).await;
+    let mut resumed = client.subscribe_scoped("Watch", json!({})).await.unwrap();
+    resumed.recv().await.unwrap();
+}

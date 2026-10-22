@@ -61,6 +61,7 @@ pub struct RpcClient {
     next_id: AtomicU64,
     reader: tokio::task::JoinHandle<()>,
     transport: Option<tokio::task::JoinHandle<()>>,
+    reconnect: Option<mpsc::Sender<()>>,
 }
 
 /// Owned stream receiver whose drop immediately cancels the server task.
@@ -138,6 +139,7 @@ impl RpcClient {
             next_id: AtomicU64::new(1),
             reader,
             transport: None,
+            reconnect: None,
         }
     }
 
@@ -145,6 +147,26 @@ impl RpcClient {
     /// keeps its identity while each connection's subscriptions end on loss.
     pub fn is_connected(&self) -> bool {
         self.shared.connected.load(Ordering::Acquire)
+    }
+
+    /// Permanently close this client, including when outstanding operations
+    /// still retain an `Arc`. Reconfiguration/removal must stop reconnecting.
+    pub fn close(&self) {
+        if let Some(transport) = &self.transport {
+            transport.abort();
+        }
+        self.reader.abort();
+        self.shared.disconnected();
+    }
+
+    /// Replace the current socket immediately, for example after a mobile
+    /// app resumes. Existing operations fail; no mutation is replayed.
+    /// In-memory clients have no external transport to reconnect.
+    pub fn reconnect_now(&self) {
+        if let Some(reconnect) = &self.reconnect {
+            self.shared.disconnected();
+            let _ = reconnect.try_send(());
+        }
     }
 
     /// Unary request.
@@ -281,11 +303,7 @@ impl RpcClient {
 
 impl Drop for RpcClient {
     fn drop(&mut self) {
-        if let Some(transport) = self.transport.take() {
-            transport.abort();
-        }
-        self.reader.abort();
-        self.shared.disconnected();
+        self.close();
     }
 }
 
@@ -457,7 +475,9 @@ async fn connect_reconnecting(url: &str, api_key: Option<String>) -> Result<RpcC
     let socket = dial(url, api_key.as_deref()).await?;
     let (out_tx, mut out_rx) = mpsc::channel::<String>(256);
     let (in_tx, in_rx) = mpsc::channel::<String>(256);
+    let (reconnect_tx, mut reconnect_rx) = mpsc::channel(1);
     let mut client = RpcClient::new(out_tx, in_rx);
+    client.reconnect = Some(reconnect_tx);
     let shared = client.shared.clone();
     let url = url.to_owned();
     client.transport = Some(tokio::spawn(async move {
@@ -470,7 +490,10 @@ async fn connect_reconnecting(url: &str, api_key: Option<String>) -> Result<RpcC
                     // No queued frame may cross a connection boundary. Pending
                     // IDs were failed below; late frames are filtered too.
                     while out_rx.try_recv().is_ok() {}
-                    tokio::time::sleep(retry).await;
+                    tokio::select! {
+                        _ = tokio::time::sleep(retry) => {},
+                        request = reconnect_rx.recv() => { if request.is_none() { return; } },
+                    }
                     match dial(&url, api_key.as_deref()).await {
                         Ok(socket) => socket,
                         Err(_) => {
@@ -486,8 +509,14 @@ async fn connect_reconnecting(url: &str, api_key: Option<String>) -> Result<RpcC
             let mut heartbeat = tokio::time::interval(std::time::Duration::from_secs(15));
             heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             let mut received = tokio::time::Instant::now();
+            let mut immediate = false;
             loop {
                 tokio::select! {
+                    request = reconnect_rx.recv() => {
+                        if request.is_none() { return; }
+                        immediate = true;
+                        break;
+                    },
                     frame = out_rx.recv() => match frame {
                         Some(text) => {
                             // Requests may finish queueing after disconnect.
@@ -522,6 +551,9 @@ async fn connect_reconnecting(url: &str, api_key: Option<String>) -> Result<RpcC
             }
             shared.disconnected();
             while out_rx.try_recv().is_ok() {}
+            if immediate {
+                next_socket = dial(&url, api_key.as_deref()).await.ok();
+            }
         }
     }));
     Ok(client)
