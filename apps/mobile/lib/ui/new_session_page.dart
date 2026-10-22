@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../data/workspace_controller.dart';
 import '../l10n.dart';
@@ -20,12 +21,16 @@ class NewSessionPage extends StatefulWidget {
     this.onCreated,
     this.embedded = false,
     this.initialText,
+    this.focusNode,
+    this.autofocus = false,
   });
   final WorkspaceController workspace;
   final AppPreferences preferences;
   final ValueChanged<String>? onCreated;
   final bool embedded;
   final String? initialText;
+  final FocusNode? focusNode;
+  final bool autofocus;
 
   @override
   State<NewSessionPage> createState() => _NewSessionPageState();
@@ -72,6 +77,15 @@ class _NewSessionPageState extends State<NewSessionPage> {
       .whereType<String>()
       .toList();
   bool get _locked => _sending || _pendingChatId != null;
+  bool get _controlShortcuts =>
+      Theme.of(context).platform != TargetPlatform.iOS &&
+      Theme.of(context).platform != TargetPlatform.macOS;
+  bool get _canCreate =>
+      !_created &&
+      !_sending &&
+      !_recoveringImages &&
+      widget.workspace.connected &&
+      (_pendingChatId != null || (!_loadingModels && _chosenModel != null));
 
   @override
   void initState() {
@@ -528,9 +542,7 @@ class _NewSessionPageState extends State<NewSessionPage> {
   }
 
   Future<void> _create() async {
-    if (_sending ||
-        _recoveringImages ||
-        (_text.text.trim().isEmpty && _attachments.isEmpty)) {
+    if (!_canCreate || (_text.text.trim().isEmpty && _attachments.isEmpty)) {
       return;
     }
     final target = _target;
@@ -628,7 +640,31 @@ class _NewSessionPageState extends State<NewSessionPage> {
       );
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context) => CallbackShortcuts(
+    bindings: ModalRoute.of(context)?.isCurrent == false
+        ? const {}
+        : {
+            const SingleActivator(
+              LogicalKeyboardKey.enter,
+              meta: true,
+              includeRepeats: false,
+            ): _keyboardCreate,
+            if (_controlShortcuts)
+              const SingleActivator(
+                LogicalKeyboardKey.enter,
+                control: true,
+                includeRepeats: false,
+              ): _keyboardCreate,
+          },
+    child: _buildPage(context),
+  );
+
+  void _keyboardCreate() {
+    if (ModalRoute.of(context)?.isCurrent == false || !_canCreate) return;
+    unawaited(_create());
+  }
+
+  Widget _buildPage(BuildContext context) {
     final colors = context.colors;
     final project = _project;
     return Scaffold(
@@ -744,6 +780,8 @@ class _NewSessionPageState extends State<NewSessionPage> {
                             TextField(
                               key: const Key('new-message'),
                               controller: _text,
+                              focusNode: widget.focusNode,
+                              autofocus: widget.autofocus,
                               readOnly: _locked,
                               minLines: 3,
                               maxLines: 9,
@@ -803,15 +841,7 @@ class _NewSessionPageState extends State<NewSessionPage> {
                                     backgroundColor: colors.text,
                                     foregroundColor: colors.background,
                                   ),
-                                  onPressed:
-                                      _sending ||
-                                          _recoveringImages ||
-                                          !widget.workspace.connected ||
-                                          (_pendingChatId == null &&
-                                              (_loadingModels ||
-                                                  _chosenModel == null))
-                                      ? null
-                                      : _create,
+                                  onPressed: _canCreate ? _create : null,
                                   icon: Icon(
                                     _pendingChatId == null
                                         ? Icons.arrow_upward
