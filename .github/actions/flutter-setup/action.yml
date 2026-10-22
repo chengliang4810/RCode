@@ -1,0 +1,15 @@
+name: Flutter SDK
+description: Install the same pinned stable Flutter SDK used for mobile validation
+runs:
+  using: composite
+  steps:
+    - name: Install Flutter 3.47.7
+      shell: bash
+      run: |
+        set -euo pipefail
+        sdk="$RUNNER_TEMP/rcode-flutter-sdk"
+        git clone --depth 1 --branch 3.47.7 https://github.com/flutter/flutter.git "$sdk"
+        test "$(git -C "$sdk" rev-parse HEAD)" = abaf9c523780a608bd46686fd5e53740a07077f8
+        echo "$sdk/bin" >> "$GITHUB_PATH"
+        "$sdk/bin/flutter" config --no-analytics
+        "$sdk/bin/flutter" --version

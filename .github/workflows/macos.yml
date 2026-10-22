@@ -12,8 +12,9 @@ on:
       - 'scripts/ci/run-macos-fixture.sh'
       - 'scripts/fixtures/preview-server/**'
       - 'dist/macos/Info.plist'
-      - 'apps/ios/**'
+      - 'apps/mobile/**'
       - '.github/workflows/macos.yml'
+      - '.github/actions/flutter-setup/**'
   push:
     branches: [main]
     paths:
@@ -26,8 +27,9 @@ on:
       - 'scripts/ci/run-macos-fixture.sh'
       - 'scripts/fixtures/preview-server/**'
       - 'dist/macos/Info.plist'
-      - 'apps/ios/**'
+      - 'apps/mobile/**'
       - '.github/workflows/macos.yml'
+      - '.github/actions/flutter-setup/**'
   workflow_dispatch:
 
 permissions:
@@ -51,13 +53,13 @@ jobs:
     permissions:
       pull-requests: read
     outputs:
-      ios: ${{ steps.filter.outputs.result }}
+      mobile: ${{ steps.filter.outputs.result }}
     steps:
       - uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8.0.0
         id: filter
         with:
           script: |
-            // Preserve iOS coverage for main pushes and manual runs.
+            // Preserve mobile coverage for main pushes and manual runs.
             if (context.eventName !== 'pull_request') return true;
             const files = await github.paginate(github.rest.pulls.listFiles, {
               ...context.repo,
@@ -69,15 +71,17 @@ jobs:
             // The app links the Rust mobile core and everything it depends on.
             const mobileCore = ['crates/mobile/', 'crates/client/', 'crates/text/', 'crates/markdown/',
               'crates/doc/', 'crates/sync/', 'crates/proto/', 'crates/rpc/', 'crates/syntax/',
-              'scripts/ios/'];
-            const affectsIOS = path => path?.startsWith('apps/ios/')
+              'crates/visual/', 'crates/visual-gpu/', 'crates/canvas/', 'crates/scene/', 'crates/shader/',
+              'crates/engine/', 'crates/harness/', 'crates/model/', 'crates/agent/', 'crates/presentation/'];
+            const affectsMobile = path => path?.startsWith('apps/mobile/')
               || mobileCore.some(prefix => path?.startsWith(prefix))
               || path === 'Cargo.lock'
               || path === 'Cargo.toml'
               || path === 'rust-toolchain.toml'
-              || path === '.github/workflows/macos.yml';
-            return files.some(file => affectsIOS(file.filename)
-              || affectsIOS(file.previous_filename));
+              || path === '.github/workflows/macos.yml'
+              || path?.startsWith('.github/actions/flutter-setup/');
+            return files.some(file => affectsMobile(file.filename)
+              || affectsMobile(file.previous_filename));
 
   # Updater and preview tests, native UI regressions and the two native WebKit fixtures. Everything is
   # compiled once (one cargo invocation, so dependencies are built once) and then run.
@@ -119,7 +123,7 @@ jobs:
       - name: Updater, preview, CoreText and native UI regressions
         run: |
           # rcode-text's coretext tests are macOS-only (#![cfg(target_os = "macos")]); its other
-          # tests run on Linux in ios-core. The attachment filters cover file staging, chips and
+          # tests run on Linux in mobile-core. The attachment filters cover file staging, chips and
           # external Finder drops, whose paths and file metadata are platform-specific.
           cargo nextest run --no-fail-fast --locked \
             -p rcode-update -p rcode-preview -p rcode-ui -p rcode-text \
@@ -192,14 +196,11 @@ jobs:
         working-directory: frame-source-tests
         run: cargo test --locked -p gpui_macos --test frame_source_recovery
 
-  # The iOS checks that do not need Apple tooling run on Linux: Rust mobile core tests, and "the
-  # committed Swift bindings are current" (the UniFFI metadata is identical for any target, so the
-  # bindings are generated from the host build of the library).
-  ios-core:
+  mobile-core:
     needs: changes
-    if: needs.changes.outputs.ios == 'true'
+    if: needs.changes.outputs.mobile == 'true'
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 50
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Rust toolchain
@@ -208,86 +209,73 @@ jobs:
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
           cache-on-failure: true
-      - name: Rust mobile core tests
+      - uses: ./.github/actions/flutter-setup
+      - name: Rust mobile regressions
         run: cargo test --locked -p rcode-text -p rcode-markdown -p rcode-client -p rcode-mobile
-      - name: Generated Swift bindings are current
-        run: |
-          cargo build --locked -p rcode-mobile --lib
-          cargo build --locked -p rcode-mobile --bin uniffi-bindgen --features bindgen
-          target/debug/uniffi-bindgen generate --library target/debug/librcode_mobile.so \
-            --language swift --no-format --out-dir "$RUNNER_TEMP/gen" >/dev/null
-          diff -u apps/ios/RCode/Core/Generated/rcode_core.swift "$RUNNER_TEMP/gen/rcode_core.swift"
-          # The simulator job links these headers instead of regenerating them.
-          mkdir -p "$RUNNER_TEMP/ios-include"
-          cp "$RUNNER_TEMP/gen/rcode_coreFFI.h" "$RUNNER_TEMP/ios-include/rcode_coreFFI.h"
-          cp "$RUNNER_TEMP/gen/rcode_coreFFI.modulemap" "$RUNNER_TEMP/ios-include/module.modulemap"
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: ios-ffi-include
-          path: ${{ runner.temp }}/ios-include
-          retention-days: 1
+      - name: Resolve Flutter dependencies
+        working-directory: apps/mobile
+        run: flutter pub get --enforce-lockfile
+      - name: Analyze Flutter application
+        working-directory: apps/mobile
+        run: flutter analyze --no-pub
+      - name: Flutter unit and widget regressions
+        working-directory: apps/mobile
+        run: flutter test --no-pub --concurrency=1
+      - name: Dart controllers against a real authenticated engine
+        run: cargo test --locked -p rcode-engine --test flutter_direct -- --ignored --nocapture
 
-  # iOS unit tests in the simulator (only when iOS or the mobile core changed, see `changes`).
-  # Waiting for macos-frame-source keeps a run to two macOS runners at a time.
-  # Do not boot the simulator in the background: hundreds of launchd_sim daemons starve the 3-vCPU
-  # VM and slow every other step down by minutes. xcodebuild boots it when needed.
-  ios-tests:
-    needs: [changes, ios-core, macos-frame-source]
-    if: needs.changes.outputs.ios == 'true'
+  # The iOS build exercises Flutter plugins, the small Runner bridge and Rust
+  # visual linkage. Dart widget regressions run in mobile-core on Linux.
+  mobile-ios:
+    needs: [changes, mobile-core, macos-frame-source]
+    if: needs.changes.outputs.mobile == 'true'
     runs-on: macos-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - name: Select an available iPhone simulator
-        run: |
-          # The app targets iOS 26: use the newest Xcode 26 and the newest iOS runtime installed.
-          xcode=$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -1 || true)
-          if [ -n "$xcode" ]; then echo "DEVELOPER_DIR=$xcode/Contents/Developer" >> "$GITHUB_ENV"; fi
-          python3 - <<'PYTHON'
-          import json, os, subprocess
-          devices = json.loads(subprocess.check_output(["xcrun", "simctl", "list", "devices", "available", "--json"]))["devices"]
-          def version(runtime):
-              return [int(part) for part in runtime.split("iOS-")[-1].split("-") if part.isdigit()]
-          iphones = [device for runtime, group in sorted(devices.items(), key=lambda item: version(item[0]), reverse=True)
-                     if "iOS" in runtime for device in group if device["name"].startswith("iPhone")]
-          if not iphones:
-              raise SystemExit("No iPhone simulator is installed")
-          with open(os.environ["GITHUB_ENV"], "a") as env:
-              env.write("IOS_SIMULATOR_ID=" + iphones[0]["udid"] + "\n")
-          PYTHON
-      - name: Rust toolchain + iOS simulator target
+      - name: Rust toolchain and simulator targets
         run: |
           rustup update stable --no-self-update
           rustup show active-toolchain || rustup toolchain install
-          rustup target add aarch64-apple-ios-sim
+          rustup target add aarch64-apple-ios-sim x86_64-apple-ios
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
           cache-on-failure: true
-      - name: Build the Rust core for the simulator
-        run: |
-          # Same build as scripts/ios/build-core.sh iphonesimulator; the bindings came from ios-core.
-          IPHONEOS_DEPLOYMENT_TARGET=26.0 cargo build --locked -p rcode-mobile --lib --profile mobile --target aarch64-apple-ios-sim
-          mkdir -p target/ios-core/iphonesimulator
-          cp target/aarch64-apple-ios-sim/mobile/librcode_mobile.a target/ios-core/iphonesimulator/
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+      - uses: ./.github/actions/flutter-setup
+      - name: Xcode version
+        run: xcodebuild -version
+      - name: Resolve Flutter dependencies
+        working-directory: apps/mobile
+        run: flutter pub get --enforce-lockfile
+      - name: Build Flutter iOS simulator app
+        working-directory: apps/mobile
+        run: flutter build ios --debug --simulator --no-codesign --no-pub
+
+  mobile-android:
+    needs: [changes, mobile-core]
+    if: needs.changes.outputs.mobile == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Rust toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          name: ios-ffi-include
-          path: target/ios-core/iphonesimulator/include
-      - name: Run iOS unit tests
-        working-directory: apps/ios
-        env:
-          # Reuse the core built above instead of rebuilding it in the Xcode build phase.
-          RCODE_SKIP_CORE: 1
-        run: |
-          xcodebuild -project RCode.xcodeproj -scheme RCode \
-            -destination "platform=iOS Simulator,id=$IOS_SIMULATOR_ID" \
-            -resultBundlePath "$RUNNER_TEMP/ios-tests.xcresult" \
-            -only-testing:RCodeTests CODE_SIGNING_ALLOWED=NO test
-      - name: Upload iOS test results
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          cache-on-failure: true
+      - uses: ./.github/actions/flutter-setup
+      - name: Android NDK
+        run: sdkmanager 'ndk;27.0.12077973'
+      - name: Resolve Flutter dependencies
+        working-directory: apps/mobile
+        run: flutter pub get --enforce-lockfile
+      - name: Build Flutter Android APK
+        working-directory: apps/mobile
+        run: flutter build apk --debug --no-pub --target-platform android-arm64,android-x64
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: ios-test-results
-          path: ${{ runner.temp }}/ios-tests.xcresult
-          if-no-files-found: ignore
+          name: rcode-mobile-debug-apk
+          path: apps/mobile/build/app/outputs/flutter-apk/app-debug.apk
+
