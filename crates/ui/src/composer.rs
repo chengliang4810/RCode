@@ -8353,7 +8353,7 @@ impl Composer {
             _ if no_content => {}
             _ if self.send_blocked(cx) => {}
             SendButtonMode::Send => self.send(text, false, cx),
-            // Busy: keep the message queued until the current turn ends.
+            // Busy: the persisted preference chooses step- or turn-end delivery.
             SendButtonMode::Queue => self.send(text, true, cx),
         }
     }
@@ -8527,6 +8527,7 @@ impl Composer {
         // Existing busy chats always queue; compatibility was checked before
         // taking the draft, attachments, or review comments.
         let queue = queue && !is_new;
+        let hold_for_turn_end = crate::settings::active_turn_send_behavior(cx).hold_for_turn_end();
         let clean_queue_attachment_text = staged.is_empty()
             || (engine
                 .engine_info()
@@ -8994,7 +8995,7 @@ impl Composer {
                         "chatId": chat_id,
                         "text": queue_text,
                         "attachments": attachment_paths,
-                        "holdForTurnEnd": true,
+                        "holdForTurnEnd": hold_for_turn_end,
                     });
                     let reply = engine
                         .client()
@@ -9629,13 +9630,21 @@ impl Composer {
                 // Share the submission guard with Enter, including pending
                 // edits and the new-session runnable-agent check.
                 let blocked = self.send_blocked(cx);
+                let steers = !crate::settings::active_turn_send_behavior(cx).hold_for_turn_end()
+                    && self.staged().is_empty()
+                    && self.staged_appshots().is_empty()
+                    && self.pickers.read(cx).steers_mid_turn(cx);
                 send_circle("composer-send", blocked, theme)
                     .when(!blocked, |el| {
                         el.on_click(cx.listener(|this, _, _, cx| this.on_submit(cx)))
                     })
                     .tooltip(crate::settings::widgets::text_tooltip(
                         crate::l10n::localizer().text(if mode == SendButtonMode::Queue {
-                            rcode_presentation::TextKey::ConversationQueueMessage
+                            if steers {
+                                rcode_presentation::TextKey::ConversationQueueSteer
+                            } else {
+                                rcode_presentation::TextKey::ConversationQueueMessage
+                            }
                         } else {
                             rcode_presentation::TextKey::ConversationSendMessage
                         }),

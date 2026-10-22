@@ -579,3 +579,6 @@ audit-settings-models-jump = Jump to { $name }
 audit-settings-models-fast-on = Fast mode on · Turn off
 audit-settings-models-fast-off = Fast mode off · Turn on
 audit-settings-update-release-unavailable = The release feed no longer offers a newer version.
+settings-active-turn-send-behavior = Send while running
+settings-active-turn-steer = Steer
+settings-active-turn-queue = Queue

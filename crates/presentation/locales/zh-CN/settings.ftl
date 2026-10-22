@@ -568,3 +568,6 @@ audit-settings-models-jump = 跳转到 { $name }
 audit-settings-models-fast-on = 快速模式已开启 · 点击关闭
 audit-settings-models-fast-off = 快速模式已关闭 · 点击开启
 audit-settings-update-release-unavailable = 更新源已不再提供更高版本。
+settings-active-turn-send-behavior = 运行中发送
+settings-active-turn-steer = 纠正
+settings-active-turn-queue = 队列

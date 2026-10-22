@@ -536,6 +536,12 @@ pub fn compact_model_picker(cx: &App) -> bool {
         .is_some_and(|store| store.current.compact_model_picker)
 }
 
+pub fn active_turn_send_behavior(cx: &App) -> ActiveTurnSendBehavior {
+    cx.try_global::<SettingsStore>()
+        .map(|store| store.current.active_turn_send_behavior)
+        .unwrap_or_default()
+}
+
 pub fn effort_theme(cx: &App) -> crate::effort_theme::EffortTheme {
     cx.try_global::<SettingsStore>()
         .map(|store| store.current.effort_theme)
@@ -859,6 +865,31 @@ pub enum ComposerSendBehavior {
     ModEnter,
 }
 
+/// Whether a busy conversation consumes new input at a step or turn boundary.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ActiveTurnSendBehavior {
+    Queue,
+    #[default]
+    #[serde(other)]
+    Steer,
+}
+
+impl ActiveTurnSendBehavior {
+    pub const ALL: [Self; 2] = [Self::Steer, Self::Queue];
+
+    pub fn label(self) -> String {
+        crate::l10n::localizer().text(match self {
+            Self::Steer => TextKey::SettingsActiveTurnSteer,
+            Self::Queue => TextKey::SettingsActiveTurnQueue,
+        })
+    }
+
+    pub fn hold_for_turn_end(self) -> bool {
+        self == Self::Queue
+    }
+}
+
 /// Persist the latest revision. Safe to call at shutdown.
 pub fn flush(cx: &mut App) {
     if !cx.has_global::<SettingsStore>() {
@@ -1041,6 +1072,7 @@ pub struct UiSettings {
     pub window_geometry: Option<WindowGeometry>,
     /// Submit using Enter or the platform modifier plus Enter.
     pub composer_send_behavior: ComposerSendBehavior,
+    pub active_turn_send_behavior: ActiveTurnSendBehavior,
     /// Legacy global opt-in; per-harness preferences take precedence.
     pub skills_in_slash_menu: bool,
     pub skill_completion_by_harness:
@@ -1285,6 +1317,7 @@ impl Default for UiSettings {
             escape_stops_active_agent: false,
             settings_section: crate::shell::SettingsSection::default(),
             composer_send_behavior: ComposerSendBehavior::default(),
+            active_turn_send_behavior: ActiveTurnSendBehavior::default(),
             skills_in_slash_menu: false,
             skill_completion_by_harness: Default::default(),
             compact_model_picker: true,
@@ -1887,6 +1920,7 @@ impl UiSettings {
             window_geometry,
             language,
             composer_send_behavior,
+            active_turn_send_behavior,
             skills_in_slash_menu,
             skill_completion_by_harness,
             compact_model_picker,
@@ -2905,19 +2939,32 @@ mod tests {
     }
 
     #[test]
-    fn obsolete_steering_preference_does_not_reset_other_settings() {
+    fn active_turn_preference_defaults_to_steer_and_preserves_other_settings() {
+        assert_eq!(
+            UiSettings::default().active_turn_send_behavior,
+            ActiveTurnSendBehavior::Steer
+        );
+        for raw in ["{}", r#"{"activeTurnSendBehavior":"future"}"#] {
+            let loaded: UiSettings = serde_json::from_str(raw).unwrap();
+            assert_eq!(loaded.active_turn_send_behavior, ActiveTurnSendBehavior::Steer);
+        }
         let loaded: UiSettings = serde_json::from_str(
             r#"{"activeTurnSendBehavior":"steer","sidebarWidth":300,"soundEnabled":false}"#,
         )
         .unwrap();
         assert_eq!(loaded.sidebar_width, 300.0);
         assert!(!loaded.sound_enabled);
-        assert!(
-            serde_json::to_value(&loaded)
-                .unwrap()
-                .get("activeTurnSendBehavior")
-                .is_none()
+        assert_eq!(
+            serde_json::to_value(&loaded).unwrap()["activeTurnSendBehavior"],
+            "steer"
         );
+        let queued: UiSettings =
+            serde_json::from_str(r#"{"activeTurnSendBehavior":"queue"}"#).unwrap();
+        assert!(queued.active_turn_send_behavior.hold_for_turn_end());
+        assert!(!loaded.active_turn_send_behavior.hold_for_turn_end());
+        let restored: UiSettings =
+            serde_json::from_value(serde_json::to_value(&queued).unwrap()).unwrap();
+        assert_eq!(restored.active_turn_send_behavior, ActiveTurnSendBehavior::Queue);
     }
 
     #[test]
@@ -2980,6 +3027,7 @@ mod tests {
             escape_stops_active_agent: true,
             settings_section: crate::shell::SettingsSection::Shortcuts,
             composer_send_behavior: ComposerSendBehavior::ModEnter,
+            active_turn_send_behavior: ActiveTurnSendBehavior::Queue,
             skills_in_slash_menu: true,
             skill_completion_by_harness: Default::default(),
             compact_model_picker: true,
@@ -4285,10 +4333,12 @@ mod language_tests {
         let edited = base.clone();
         let current = UiSettings {
             language: LanguagePreference::ZhCn,
+            active_turn_send_behavior: ActiveTurnSendBehavior::Queue,
             ..UiSettings::default()
         };
 
         let merged = UiSettings::merge_changes(&base, &edited, current);
+        assert_eq!(merged.active_turn_send_behavior, ActiveTurnSendBehavior::Queue);
         assert_eq!(
             merged.language,
             LanguagePreference::ZhCn,

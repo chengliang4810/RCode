@@ -89,6 +89,7 @@ pub struct ShortcutsPage {
     appshot_destination: AppshotDestination,
     appshot_capabilities: AppshotCapabilities,
     send_select: widgets::SelectState,
+    active_turn_select: widgets::SelectState,
     language_select: widgets::SelectState,
     /// The preference this page shows, which the shell owns and persists.
     language: rcode_presentation::LanguagePreference,
@@ -152,6 +153,7 @@ impl ShortcutsPage {
             appshot_destination,
             appshot_capabilities: crate::appshots::capabilities(),
             send_select: widgets::SelectState::default(),
+            active_turn_select: widgets::SelectState::default(),
             language_select: widgets::SelectState::default(),
             language,
             language_restart_confirm: false,
@@ -956,6 +958,37 @@ impl Render for ShortcutsPage {
         .render(&self.send_select, cx);
 
         let languages = rcode_presentation::LanguagePreference::ALL;
+        let active_turn_behavior = super::active_turn_send_behavior(cx);
+        let active_turn_behaviors = super::ActiveTurnSendBehavior::ALL;
+        let active_turn_control = widgets::select(
+            "active-turn-send-behavior",
+            localizer.text(TextKey::SettingsActiveTurnSendBehavior),
+            &theme,
+            |page: &mut Self| &mut page.active_turn_select,
+        )
+        .options(
+            active_turn_behaviors
+                .iter()
+                .map(|behavior| widgets::SelectOption::new(behavior.label())),
+            active_turn_behaviors
+                .iter()
+                .position(|behavior| *behavior == active_turn_behavior)
+                .unwrap_or_default(),
+        )
+        .width(128.0)
+        .on_select(move |_, ix, _, cx| {
+            super::update(SavePolicy::Debounced, cx, |settings| {
+                settings.active_turn_send_behavior = active_turn_behaviors[ix];
+            });
+            cx.refresh_windows();
+        })
+        .render(&self.active_turn_select, cx);
+        let active_turn_row = widgets::card_row(&theme, false)
+            .child(div().flex_1().min_w_0().child(widgets::row_title(
+                &theme,
+                localizer.text(TextKey::SettingsActiveTurnSendBehavior),
+            )))
+            .child(active_turn_control);
         let language_labels: Vec<String> = languages
             .iter()
             .map(|preference| {
@@ -1212,6 +1245,7 @@ impl Render for ShortcutsPage {
                                         widgets::section_card(&theme)
                                             .child(language_row)
                                             .child(send_behavior_row)
+                                            .child(active_turn_row)
                                             .child(compact_mode_row)
                                             .child(compact_model_picker_row)
                                             .child(escape_behavior_row),
@@ -1508,6 +1542,39 @@ mod tests {
             cx.debug_bounds("escape-stops-active-agent-toggle")
                 .is_none()
         );
+    }
+
+    #[gpui::test]
+    fn active_turn_behavior_changes_immediately_and_survives_reload(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::settings::init(Default::default(), dir.path(), cx);
+            assert_eq!(super::super::active_turn_send_behavior(cx), super::super::ActiveTurnSendBehavior::Steer);
+        });
+        let (page, cx) = cx.add_window_view(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            let mut page = ShortcutsPage::new(
+                state, KeymapConfig::default(), false, ComposerSendBehavior::Enter,
+                false, false, AppshotDestination::Automatic,
+                rcode_presentation::LanguagePreference::default(), DataRoots::same(dir.path()), cx,
+            );
+            page.show_section(false, true);
+            page
+        });
+        cx.update(|window, cx| window.draw(cx).clear());
+        let select = cx.debug_bounds("active-turn-send-behavior").unwrap();
+        cx.simulate_click(select.center(), gpui::Modifiers::default());
+        cx.update(|window, cx| window.draw(cx).clear());
+        let option = cx.debug_bounds("active-turn-send-behavior-option-1").unwrap();
+        cx.simulate_click(option.center(), gpui::Modifiers::default());
+        page.update(cx, |_, cx| {
+            assert_eq!(super::super::active_turn_send_behavior(cx), super::super::ActiveTurnSendBehavior::Queue);
+            super::super::flush(cx);
+        });
+        let restored = super::super::UiSettings::load(dir.path());
+        assert_eq!(restored.active_turn_send_behavior, super::super::ActiveTurnSendBehavior::Queue);
     }
 
     #[gpui::test]
