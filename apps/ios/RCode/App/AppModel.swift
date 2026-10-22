@@ -1,4 +1,5 @@
 import Network
+import CryptoKit
 import Security
 import UIKit
 
@@ -105,6 +106,11 @@ final class AppModel {
         if args.contains("-signedout") {
             Credentials.clearStored()
         }
+        if let i = args.firstIndex(of: "-connect"), i + 2 < args.count {
+            Self.storeHost(args[i + 1])
+            start(.direct(apiKey: args[i + 2]))
+            return
+        }
         if let i = args.firstIndex(of: "-pair"), i + 3 < args.count {
             Self.storeHost(args[i + 1])
             start(.paired(userId: args[i + 2], orgId: args[i + 3]))
@@ -141,6 +147,10 @@ final class AppModel {
         let owner: String
         switch credentials {
         case let .paired(userId, orgId): owner = "\(userId)/\(orgId)"
+        case .direct:
+            // Cache identity belongs to the host, never to its secret. Rotating
+            // a key keeps the same server's cached conversations.
+            owner = "direct/" + SHA256.hash(data: Data(host.utf8)).map { String(format: "%02x", $0) }.joined()
         case .demo: return
         }
         let marker = coreDir.appendingPathComponent(".owner")
@@ -208,6 +218,14 @@ final class AppModel {
     func pair(host: String, userId: String, orgId: String) -> Bool {
         Self.storeHost(host)
         let started = start(.paired(userId: userId, orgId: orgId))
+        if started { onSignedIn?() }
+        return started
+    }
+
+    @MainActor
+    func connect(host: String, apiKey: String) -> Bool {
+        Self.storeHost(host)
+        let started = start(.direct(apiKey: apiKey))
         if started { onSignedIn?() }
         return started
     }
@@ -552,10 +570,16 @@ final class AppModel {
     /// The account label under the settings rows. There is no account to ask:
     /// what identifies this device is the pair it was given.
     private func backfillProfile() {
-        guard case let .paired(userId, orgId)? = Credentials.stored() else { return }
+        guard let credentials = Credentials.stored() else { return }
+        let name: String
+        switch credentials {
+        case let .paired(userId, orgId): name = "\(userId)@\(orgId)"
+        case .direct: name = URL(string: Self.host)?.host ?? L10n.text("Server")
+        case .demo: return
+        }
         Task { @MainActor [weak self] in
             var p = AccountProfile.load()
-            p.orgName = "\(userId)@\(orgId)"
+            p.orgName = name
             p.email = nil
             p.save()
             self?.observers.values.forEach { $0() }
@@ -674,6 +698,9 @@ extension Credentials {
         guard let data = Keychain.load(service: service, account: account),
               let dict = try? JSONSerialization.jsonObject(with: data) as? [String: String]
         else { return nil }
+        if dict["kind"] == "direct", let apiKey = dict["apiKey"] {
+            return .direct(apiKey: apiKey)
+        }
         guard dict["kind"] == "paired", let u = dict["userId"], let o = dict["orgId"] else { return nil }
         return .paired(userId: u, orgId: o)
     }
@@ -681,6 +708,8 @@ extension Credentials {
     static func store(_ c: Credentials) {
         let dict: [String: String]
         switch c {
+        case let .direct(apiKey):
+            dict = ["kind": "direct", "apiKey": apiKey]
         case let .paired(userId, orgId):
             dict = ["kind": "paired", "userId": userId, "orgId": orgId]
         case .demo:

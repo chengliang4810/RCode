@@ -27,14 +27,7 @@ final class PairingViewController: UIViewController {
         title.text = "RCode"
         title.font = Fonts.ui(.sansSemibold, 34)
         title.textColor = Palette.text
-        let tagline = UILabel()
-        tagline.text = L10n.text("Your coding agents, from anywhere.")
-        tagline.font = Fonts.ui(.sans, 17)
-        tagline.textColor = Palette.secondary
-
-        // The host is an address the user's own tunnel exposes; the token is
-        // the one the desktop app shows for pairing.
-        hostField.placeholder = L10n.text("Host, e.g. https://laptop.tailnet.ts.net:27655")
+        hostField.placeholder = L10n.text("Server, e.g. wss://host.example:27655")
         hostField.accessibilityIdentifier = "pair-host"
         hostField.borderStyle = .roundedRect
         hostField.autocapitalizationType = .none
@@ -43,14 +36,17 @@ final class PairingViewController: UIViewController {
         hostField.textContentType = .URL
         hostField.text = Self.lastHost
 
-        tokenField.placeholder = L10n.text("Pairing token")
+        tokenField.placeholder = L10n.text("API Key")
+        tokenField.accessibilityLabel = L10n.text("API Key")
         tokenField.accessibilityIdentifier = "pair-token"
         tokenField.borderStyle = .roundedRect
         tokenField.autocapitalizationType = .none
         tokenField.autocorrectionType = .no
+        tokenField.isSecureTextEntry = true
+        tokenField.textContentType = .password
 
         var primary = UIButton.Configuration.filled()
-        primary.title = L10n.text("Pair")
+        primary.title = L10n.text("Connect")
         primary.baseBackgroundColor = Palette.text
         primary.baseForegroundColor = Palette.background
         primary.cornerStyle = .capsule
@@ -70,7 +66,7 @@ final class PairingViewController: UIViewController {
         status.numberOfLines = 0
         status.textAlignment = .center
 
-        let top = UIStackView(arrangedSubviews: [mark, title, tagline])
+        let top = UIStackView(arrangedSubviews: [mark, title])
         top.axis = .vertical
         top.alignment = .center
         top.spacing = 12
@@ -98,22 +94,23 @@ final class PairingViewController: UIViewController {
 
     private func attemptPair() {
         let host = (hostField.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        // The token is `user@org`: that is the bearer the desktop host expects,
-        // and its two halves also name the store this device caches into.
         let token = (tokenField.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let url = URL(string: host), url.scheme == "http" || url.scheme == "https", url.host != nil else {
+        guard let url = URL(string: host), let scheme = url.scheme,
+              ["http", "https", "ws", "wss"].contains(scheme), url.host != nil,
+              url.user == nil, url.password == nil, url.query == nil, url.fragment == nil else {
             status.text = L10n.text("That host is not a URL.")
             return
         }
-        let parts = token.split(separator: "@", maxSplits: 1, omittingEmptySubsequences: false)
-        guard parts.count == 2, !parts[0].isEmpty, !parts[1].isEmpty else {
-            status.text = L10n.text("The token looks like `user@org`.")
+        guard token.range(of: "^[A-Za-z0-9]{8,}$", options: .regularExpression) != nil,
+              token.range(of: "[A-Za-z]", options: .regularExpression) != nil,
+              token.range(of: "[0-9]", options: .regularExpression) != nil else {
+            status.text = L10n.text("Use at least 8 characters, including letters and numbers.")
             return
         }
         status.text = nil
         pair.configuration?.showsActivityIndicator = true
         Task { @MainActor in
-            let started = app.pair(host: host, userId: String(parts[0]), orgId: String(parts[1]))
+            let started = app.connect(host: host, apiKey: token)
             pair.configuration?.showsActivityIndicator = false
             if !started {
                 status.text = L10n.text("Could not reach that host with that token.")

@@ -207,17 +207,31 @@ impl From<DemoOptions> for zc::DemoOptions {
 }
 
 /// How the client authenticates against the host it was pointed at.
-#[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
+#[derive(Clone, PartialEq, Eq, uniffi::Enum)]
 pub enum Credentials {
     /// The bearer is `userId@orgId`.
     Paired { user_id: String, org_id: String },
     /// Fully offline dataset with a simulated host.
     Demo { options: DemoOptions },
+    /// Connect directly to an engine with an opaque API key.
+    Direct { api_key: String },
+}
+
+impl std::fmt::Debug for Credentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Direct { .. } => f.write_str("Direct { api_key: <redacted> }"),
+            Self::Paired { user_id, org_id } => f.debug_struct("Paired")
+                .field("user_id", user_id).field("org_id", org_id).finish(),
+            Self::Demo { options } => f.debug_tuple("Demo").field(options).finish(),
+        }
+    }
 }
 
 impl From<Credentials> for zc::Credentials {
     fn from(c: Credentials) -> Self {
         match c {
+            Credentials::Direct { api_key } => zc::Credentials::Direct { api_key },
             Credentials::Paired { user_id, org_id } => zc::Credentials::Paired { user_id, org_id },
             Credentials::Demo { options } => zc::Credentials::Demo(options.into()),
         }

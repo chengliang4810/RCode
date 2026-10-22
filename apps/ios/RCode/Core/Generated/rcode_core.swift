@@ -10545,6 +10545,11 @@ public enum Credentials: Equatable, Hashable {
      */
     case demo(options: DemoOptions
     )
+    /**
+     * Connect directly to an engine with an opaque API key.
+     */
+    case direct(apiKey: String
+    )
 
 
 
@@ -10572,6 +10577,9 @@ public struct FfiConverterTypeCredentials: FfiConverterRustBuffer {
         case 2: return .demo(options: try FfiConverterTypeDemoOptions.read(from: &buf)
         )
         
+        case 3: return .direct(apiKey: try FfiConverterString.read(from: &buf)
+        )
+        
         default: throw UniffiInternalError.unexpectedEnumCase
         }
     }
@@ -10589,6 +10597,11 @@ public struct FfiConverterTypeCredentials: FfiConverterRustBuffer {
         case let .demo(options):
             writeInt(&buf, Int32(2))
             FfiConverterTypeDemoOptions.write(options, into: &buf)
+            
+        
+        case let .direct(apiKey):
+            writeInt(&buf, Int32(3))
+            FfiConverterString.write(apiKey, into: &buf)
             
         }
     }

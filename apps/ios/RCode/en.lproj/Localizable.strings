@@ -227,3 +227,13 @@
 "error.not-implemented" = "Unavailable feature: %@";
 "error.closed" = "Client is shut down";
 "error.internal" = "Operation failed: %@";
+
+"Server, e.g. wss://host.example:27655" = "Server, e.g. wss://host.example:27655";
+
+"API Key" = "API Key";
+
+"Connect" = "Connect";
+
+"Server" = "Server";
+
+"Use at least 8 characters, including letters and numbers." = "Use at least 8 characters, including letters and numbers.";

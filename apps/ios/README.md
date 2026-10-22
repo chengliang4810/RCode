@@ -82,6 +82,7 @@ RCode/
 | `-route chat:<id>` / `new` / `more` / `search` | Open a screen at launch |
 | `-signedout` | Clear stored credentials (Debug builds only) |
 | `-pair <host> <userId> <orgId>` | Pair with a supplied host and its `userId@orgId` bearer (Debug builds only) |
+| `-connect <host> <apiKey>` | Connect directly to an engine using its API key (Debug builds only) |
 | `-harness native` | Use RCode's in-process agent for new sessions |
 | `-bench` (with `-lab`) | Display-link fling benchmark; writes `Documents/bench.json` |
 | `-measureopen` | Session open latency; writes `Documents/open.json` |
@@ -100,17 +101,23 @@ xcodebuild … -only-testing:RCodeUITests/SessionFlowTests test
 xcodebuild … -only-testing:RCodeUITests/ScrollPerformanceTests test
 ```
 
-Online integration requires a separately provisioned, reachable host that
-implements the registry/session transport and a configured Native provider.
-A deployable registry/session service is not included in this repository.
-`rcode headless` serves the engine IPC interface. Pair in the app
-using the host address and token; the Debug hook is `-pair host userId orgId`.
+Direct integration uses a reachable RCode engine with external access enabled
+and a configured Native provider. Enter its `wss://` address and API key in the
+connection screen. Keys are stored in iOS Keychain; session caches are scoped
+to the host address. `http(s)://` addresses are also accepted and converted to
+`ws(s)://`. For local debugging, an SSH tunnel can expose the host on loopback.
+
+The Rust client subscribes directly to the engine's workspace RPCs and session
+replica stream. Commands retain their client-generated ids. Disconnecting or
+backgrounding the phone never stops host execution. Returning to the app
+reconnects and imports the current transcript and task state. The previous
+`-pair host userId orgId` hook remains available for legacy transport fixtures.
 
 The opt-in test in `RCodeUITests/LiveStackTests.swift` uses those same inputs:
 
 ```sh
-TEST_RUNNER_RCODE_LIVE_HOST=https://your-host.example \
-TEST_RUNNER_RCODE_LIVE_PAIR_TOKEN="$PAIR_TOKEN" \
+TEST_RUNNER_RCODE_LIVE_HOST=wss://your-host.example \
+TEST_RUNNER_RCODE_LIVE_API_KEY="$CONNECTION_KEY" \
   xcodebuild … -only-testing:RCodeUITests/LiveStackTests test
 ```
 

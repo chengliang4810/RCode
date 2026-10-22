@@ -227,3 +227,13 @@
 "error.not-implemented" = "功能暂不可用：%@";
 "error.closed" = "客户端已关闭";
 "error.internal" = "操作失败：%@";
+
+"Server, e.g. wss://host.example:27655" = "服务器，如 wss://host.example:27655";
+
+"API Key" = "API Key";
+
+"Connect" = "连接";
+
+"Server" = "服务器";
+
+"Use at least 8 characters, including letters and numbers." = "至少 8 位，需同时包含字母和数字。";
