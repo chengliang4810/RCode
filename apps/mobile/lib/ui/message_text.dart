@@ -14,8 +14,9 @@ String visiblePrompt(String text) {
   final attachments = text.indexOf('\n\n$attachmentMarker');
   if (attachments >= 0) text = text.substring(0, attachments);
   if (text == 'See the attached image(s).' ||
-      text == 'See the attached file(s).')
+      text == 'See the attached file(s).') {
     return '';
+  }
   return text.trim();
 }
 
@@ -36,11 +37,27 @@ List<String> promptImages(String raw) {
 String replaceVisiblePrompt(String raw, String visible, String edited) {
   if (edited.trim().isEmpty || raw == visible) return edited;
   final body = raw.trimLeft();
-  if (body.startsWith(visible) && visible.isNotEmpty)
+  if (body.startsWith(visible) && visible.isNotEmpty) {
     return edited + body.substring(visible.length);
+  }
   final cut = [
     raw.indexOf('\n\n$attachmentMarker'),
     raw.indexOf(appshotMarker),
   ].where((i) => i >= 0).toList()..sort();
   return cut.isEmpty ? edited : edited + raw.substring(cut.first);
+}
+
+/// Queue rows from older clients can carry an inline attachment trailer.
+/// Replace that trailer as well as the separate attachment list when editing.
+String editedQueuedPrompt(String raw, String edited, List<String> attachments) {
+  final appshot = raw.indexOf(appshotMarker);
+  final context = appshot < 0 ? '' : raw.substring(appshot);
+  final body = edited.trim().isEmpty && attachments.isNotEmpty
+      ? 'See the attached image(s).'
+      : edited;
+  if (!raw.contains(attachmentMarker)) return body + context;
+  final trailer = attachments.isEmpty
+      ? ''
+      : '\n\n$attachmentMarker\n${attachments.map((path) => '- $path').join('\n')}';
+  return body + trailer + context;
 }
