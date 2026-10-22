@@ -76,6 +76,7 @@ mod file_mutations;
 mod files_panel;
 mod memory_panel;
 mod goal_panel;
+mod command_processes;
 mod navigation_focus;
 #[cfg(test)]
 mod navigation_tests;
@@ -1758,6 +1759,7 @@ fn relaunch_detached() {
 }
 
 pub struct Shell {
+    command_processes: Entity<command_processes::CommandProcesses>,
     state: Entity<AppState>,
     sidebar_pane: Entity<SidebarPane>,
     transcript: Entity<Transcript>,
@@ -2269,6 +2271,7 @@ impl Shell {
             _observation: cx.observe(&shell, |_, _, cx| cx.notify()),
         });
         Self {
+            command_processes: cx.new(|cx| command_processes::CommandProcesses::new(state.clone(), cx)),
             state,
             sidebar_pane,
             transcript,
@@ -8923,6 +8926,7 @@ impl Shell {
             // window above this column.)
             .child(filter_row)
             .child(sidebar_lists)
+            .child(self.command_processes.clone())
             // Global connection pill (durable-by-design UI truth): appears
             // whenever the edge posture is degraded; hidden while healthy —
             // appearing IS the signal.

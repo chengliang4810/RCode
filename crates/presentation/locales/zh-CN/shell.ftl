@@ -387,3 +387,7 @@ audit-update-restarting = 正在重启…
 audit-update-read-only = 请将 RCode 移至“应用程序”文件夹并重新打开，以启用更新。
 audit-update-not-writable = RCode 无权替换 { $path } 中的安装文件。
 audit-copy-codex-link = Codex 会话链接
+shell-processes-title = 后台进程
+shell-processes-stopping = 正在停止
+shell-processes-recovered = 已恢复
+shell-processes-stop-aria = 停止 { $command }

@@ -250,7 +250,7 @@ pub fn run_app(config: UiConfig) {
             app_update::install_on_quit(cx);
             let shutdown =
                 quit_state.read(cx).engine().cloned().map(|handle| {
-                    gpui_tokio::Tokio::spawn(cx, async move { handle.shutdown().await })
+                    gpui_tokio::Tokio::spawn(cx, async move { handle.shutdown_for_exit().await })
                 });
             async move {
                 if let Some(task) = shutdown {

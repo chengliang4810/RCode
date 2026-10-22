@@ -517,6 +517,20 @@ impl EngineHandle {
     pub async fn shutdown(&self) {
         self.inner.shutdown().await;
     }
+
+    /// A local daemon can outlive its desktop viewport, but command services
+    /// still follow the user's application-exit policy.
+    pub async fn shutdown_for_exit(&self) {
+        if matches!(self.mode(), EngineMode::Remote { .. }) {
+            match tokio::time::timeout(std::time::Duration::from_secs(5), self.client().call(
+                methods::STOP_ALL_COMMAND_PROCESSES, serde_json::json!({}),
+            )).await {
+                Ok(Ok(_)) => {},
+                result => tracing::warn!(?result, "could not stop daemon command processes on desktop exit"),
+            }
+        }
+        self.shutdown().await;
+    }
 }
 
 /// Query the current protocol first, with a conservative fallback for daemons

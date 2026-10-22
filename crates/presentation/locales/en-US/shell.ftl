@@ -414,3 +414,7 @@ audit-update-restarting = Restarting…
 audit-update-read-only = Move RCode to Applications and reopen it to enable updates.
 audit-update-not-writable = RCode cannot replace its installation in { $path }.
 audit-copy-codex-link = Codex conversation link
+shell-processes-title = Background processes
+shell-processes-stopping = Stopping
+shell-processes-recovered = Recovered
+shell-processes-stop-aria = Stop { $command }
