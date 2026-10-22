@@ -131,6 +131,8 @@ pub mod methods {
     pub const RETRY_DELIVERY: &str = "RetryDelivery";
     pub const FORK_SIDE_CHAT: &str = "ForkSideChat";
     pub const WATCH_DOC_MESSAGES: &str = "WatchDocMessages";
+    /// JSON command outcomes and metadata for viewers that do not import Loro.
+    pub const WATCH_SESSION_STATE: &str = "WatchSessionState";
     /// Explicit user navigation, `{chatId}`. Prioritizes this device's sync
     /// connection; automatic subscriptions and retries must not call it.
     pub const FOCUS_CHAT: &str = "FocusChat";

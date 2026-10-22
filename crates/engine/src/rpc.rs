@@ -1454,6 +1454,7 @@ fn forwardable(method: &str) -> bool {
             | methods::LIST_COMMANDS
             | methods::QUEUE_COMMAND
             | methods::WATCH_DOC_MESSAGES
+            | methods::WATCH_SESSION_STATE
             | methods::FETCH_TOOL_BLOB
             // The queue lives on the chat doc, and only its host may send from
             // it — same addressing as the command ledger next door.
@@ -1532,6 +1533,7 @@ fn is_stream_method(method: &str) -> bool {
     matches!(
         method,
         methods::WATCH_DOC_MESSAGES
+            | methods::WATCH_SESSION_STATE
             | methods::WATCH_QUEUE
             | methods::SUBSCRIBE_TERMINAL
             | methods::WATCH_CHECKOUT_DIFFS
@@ -2644,6 +2646,11 @@ impl RpcService for EngineRpc {
                 let p: ChatParams = parse_params(params)?;
                 let handle = self.doc_host.open(&p.chat_id).map_err(|error| RpcError::Failed(error.to_string()))?;
                 Ok(RpcReply::Stream(crate::session_replica::stream(handle)))
+            }
+            methods::WATCH_SESSION_STATE => {
+                let p: ChatParams = parse_params(params)?;
+                let handle = self.doc_host.open(&p.chat_id).map_err(|error| RpcError::Failed(error.to_string()))?;
+                Ok(RpcReply::Stream(crate::session_state::stream(handle)))
             }
             methods::WATCH_DOC_MESSAGES => {
                 // Opt-in: older viewports retain the full-reset contract.
@@ -4170,6 +4177,8 @@ mod tests {
         assert!(!forwardable(methods::ENGINE_INFO));
         assert!(!forwardable(methods::ENGINE_READY));
         assert!(forwardable(methods::QUEUE_COMMAND));
+        assert!(forwardable(methods::WATCH_SESSION_STATE));
+        assert!(is_stream_method(methods::WATCH_SESSION_STATE));
         assert!(forwardable(methods::FETCH_TOOL_BLOB));
         assert!(forwardable(methods::SEARCH_FILES));
         assert!(forwardable(methods::SEARCH_GIT_HISTORY));

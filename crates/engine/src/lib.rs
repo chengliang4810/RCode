@@ -39,6 +39,7 @@ pub mod rpc;
 pub mod run_journal;
 pub mod sessions;
 mod session_replica;
+mod session_state;
 mod goals;
 pub mod source_control;
 pub mod spaces;
