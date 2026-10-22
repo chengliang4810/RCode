@@ -8,6 +8,57 @@ import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'data/workspace_controller.dart';
 import 'preferences.dart';
 
+bool _requestingNotificationPermission = false;
+
+/// Ask after the first accepted new conversation, rather than at app launch.
+/// Permission failures must never make an already sent message look unsent.
+Future<void> requestNotificationsAfterFirstSession(
+  AppPreferences preferences, {
+  Future<bool?> Function()? requestPermission,
+}) async {
+  if (!preferences.notifications ||
+      _requestingNotificationPermission ||
+      preferences.getJson('notificationPermission')?['asked'] == true ||
+      (requestPermission == null && !Platform.isAndroid && !Platform.isIOS)) {
+    return;
+  }
+  _requestingNotificationPermission = true;
+  try {
+    await preferences.setJson('notificationPermission', {
+      'asked': true,
+    }, notify: false);
+    final allowed =
+        await (requestPermission ??
+            () {
+              final plugin = FlutterLocalNotificationsPlugin();
+              return Platform.isIOS
+                  ? plugin
+                        .resolvePlatformSpecificImplementation<
+                          IOSFlutterLocalNotificationsPlugin
+                        >()!
+                        .requestPermissions(
+                          alert: true,
+                          badge: true,
+                          sound: true,
+                        )
+                  : plugin
+                        .resolvePlatformSpecificImplementation<
+                          AndroidFlutterLocalNotificationsPlugin
+                        >()!
+                        .requestNotificationsPermission();
+            })();
+    if (allowed == false) await preferences.setValue('notifications', false);
+  } catch (_) {
+    try {
+      await preferences.setJson('notificationPermission', null, notify: false);
+    } catch (_) {
+      // A storage error must not escape after the conversation was accepted.
+    }
+  } finally {
+    _requestingNotificationPermission = false;
+  }
+}
+
 /// Converts live transitions into local notices. Initial/reconnect snapshots are quiet.
 class NotificationTracker {
   String? _scope;

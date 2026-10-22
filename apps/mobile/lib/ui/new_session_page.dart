@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 
 import '../data/workspace_controller.dart';
 import '../l10n.dart';
+import '../notifications.dart';
 import '../preferences.dart';
 import '../theme.dart';
 import '../wallpaper.dart';
@@ -597,6 +598,8 @@ class _NewSessionPageState extends State<NewSessionPage> {
         'worktree': _worktree,
         'text': '',
       }, notify: false);
+      if (!mounted) return;
+      await requestNotificationsAfterFirstSession(widget.preferences);
       if (!mounted) return;
       if (widget.onCreated != null) {
         widget.onCreated!(id);
