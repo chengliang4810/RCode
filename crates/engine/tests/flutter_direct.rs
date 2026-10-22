@@ -123,25 +123,32 @@ async fn flutter_controllers_keep_questions_queues_attachments_and_offline_resul
         listener, service, key,
     ));
 
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let mobile = repository.join("apps/mobile");
     #[cfg(windows)]
     let mut flutter = {
-        let mut command = tokio::process::Command::new("cmd.exe");
-        command.args(["/c", "flutter.bat"]);
+        let mut command = tokio::process::Command::new("powershell.exe");
+        command
+            .args(["-NoProfile", "-File"])
+            .arg(repository.join("scripts/mobile/test-windows.ps1"))
+            .args(["-TestFiles", "test/data/live_engine_test.dart"]);
         command
     };
     #[cfg(not(windows))]
-    let mut flutter = tokio::process::Command::new("flutter");
-    let mobile = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../apps/mobile");
+    let mut flutter = {
+        let mut command = tokio::process::Command::new("flutter");
+        command.args([
+            "test",
+            "test/data/live_engine_test.dart",
+            "--no-pub",
+            "--reporter",
+            "expanded",
+        ]);
+        command
+    };
     let output = tokio::time::timeout(
         Duration::from_secs(120),
         flutter
-            .args([
-                "test",
-                "test/data/live_engine_test.dart",
-                "--no-pub",
-                "--reporter",
-                "expanded",
-            ])
             .env("RCODE_FLUTTER_RPC_URL", &url)
             .env("RCODE_FLUTTER_PROJECT", project.path())
             .current_dir(mobile)
