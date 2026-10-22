@@ -1,15 +1,16 @@
 import 'dart:async';
-import 'dart:typed_data';
 
 import 'package:rcode_mobile/ui/new_session_page.dart';
 import 'package:rcode_mobile/ui/attachments.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:rcode_mobile/data/workspace_controller.dart';
 import 'package:rcode_mobile/preferences.dart';
 
 import 'support/page_workspace.dart';
+import 'support/keyboard.dart';
 
 class RetryWorkspace extends PageWorkspace {
   var failures = 1;
@@ -59,6 +60,142 @@ void main() {
   setUp(() {
     SharedPreferences.setMockInitialValues({});
     resetRecoveredImagesForTesting();
+  });
+
+  for (final control in [false, true]) {
+    testWidgets(
+      '${control ? 'Ctrl' : 'Cmd'} Enter follows availability and cannot repeat a first run',
+      (tester) async {
+        resetRecoveredImagesForTesting(retrieval: Future.value([]));
+        final workspace = PageWorkspace();
+        final models = Completer<List<JsonMap>>();
+        final sent = Completer<JsonMap>();
+        workspace.handler = (method, params) async {
+          if (method == 'ListHarnesses') {
+            return [
+              {'id': 'native', 'enabled': true, 'installed': true},
+            ];
+          }
+          if (method == 'ListModels') return models.future;
+          if (method == 'RelayCommand') return sent.future;
+          if (method == 'Mutate' && params['op'] == 'createChat') {
+            workspace.chats.add({
+              'id': params['chatId'],
+              'deviceId': params['deviceId'],
+              'config': params['config'],
+              'cwd': '/workspace',
+            });
+            workspace.notifyListeners();
+          }
+          return {'ok': true, 'disposition': 'executed'};
+        };
+        final preferences = await AppPreferences.load();
+        addTearDown(workspace.dispose);
+        addTearDown(preferences.dispose);
+        final created = <String>[];
+        await tester.pumpWidget(
+          app(
+            NewSessionPage(
+              workspace: workspace,
+              preferences: preferences,
+              onCreated: created.add,
+            ),
+          ),
+        );
+        await tester.pump();
+        await tester.enterText(find.byKey(const Key('new-message')), 'One run');
+        await pressShortcut(tester, LogicalKeyboardKey.enter);
+        await tester.pump();
+        expect(
+          workspace.calls.where((call) => call.method == 'Mutate'),
+          isEmpty,
+        );
+        models.complete([
+          {
+            'id': 'native-model',
+            'label': 'Fixture Model',
+            'reasoningLevels': ['medium'],
+          },
+        ]);
+        await tester.pumpAndSettle();
+        await pressShortcut(tester, LogicalKeyboardKey.enter, control: control);
+        await tester.pump();
+        await pressShortcut(
+          tester,
+          LogicalKeyboardKey.enter,
+          control: !control,
+        );
+        await tester.pump();
+        expect(
+          workspace.calls.where(
+            (call) =>
+                call.method == 'Mutate' && call.params['op'] == 'createChat',
+          ),
+          hasLength(1),
+        );
+        expect(
+          workspace.calls.where((call) => call.method == 'RelayCommand'),
+          hasLength(1),
+        );
+        sent.complete({'ok': true, 'disposition': 'executed'});
+        await tester.pumpAndSettle();
+        expect(created, hasLength(1));
+        await pressShortcut(tester, LogicalKeyboardKey.enter, control: control);
+        await tester.pump();
+        expect(
+          workspace.calls.where((call) => call.method == 'RelayCommand'),
+          hasLength(1),
+        );
+        expect(tester.takeException(), null);
+        await tester.pumpWidget(const SizedBox());
+        await tester.pump(const Duration(milliseconds: 300));
+      },
+      variant: TargetPlatformVariant.only(
+        control ? TargetPlatform.android : TargetPlatform.iOS,
+      ),
+    );
+  }
+
+  testWidgets('a dialog focus cannot send the new conversation underneath it', (
+    tester,
+  ) async {
+    resetRecoveredImagesForTesting(retrieval: Future.value([]));
+    final workspace = PageWorkspace();
+    final preferences = await AppPreferences.load();
+    addTearDown(workspace.dispose);
+    addTearDown(preferences.dispose);
+    await tester.pumpWidget(
+      app(
+        NewSessionPage(
+          workspace: workspace,
+          preferences: preferences,
+          onCreated: (_) {},
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.enterText(
+      find.byKey(const Key('new-message')),
+      'Keep this draft',
+    );
+    final context = tester.element(find.byType(NewSessionPage));
+    unawaited(
+      showDialog<void>(
+        context: context,
+        builder: (_) => const AlertDialog(content: TextField(autofocus: true)),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await pressShortcut(tester, LogicalKeyboardKey.enter);
+    await pressShortcut(tester, LogicalKeyboardKey.enter, control: true);
+    await tester.pump();
+    expect(workspace.calls.where((call) => call.method == 'Mutate'), isEmpty);
+    expect(find.byType(AlertDialog), findsOneWidget);
+    Navigator.of(context).pop();
+    await tester.pumpAndSettle();
+    expect(find.text('Keep this draft'), findsOneWidget);
+    await tester.pumpWidget(const SizedBox());
+    await tester.pump(const Duration(milliseconds: 300));
   });
 
   testWidgets(
