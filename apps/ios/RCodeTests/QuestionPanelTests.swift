@@ -6,7 +6,7 @@ final class QuestionPanelTests: XCTestCase {
     @MainActor
     private func control<T: UIView>(_ type: T.Type, id: String, in view: UIView) -> T? {
         if view.accessibilityIdentifier == id, let match = view as? T { return match }
-        return view.subviews.lazy.compactMap { control(type, id: id, in: $0) }.first
+        return view.subviews.lazy.compactMap { self.control(type, id: id, in: $0) }.first
     }
 
     @MainActor
