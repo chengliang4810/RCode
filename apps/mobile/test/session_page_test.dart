@@ -295,6 +295,9 @@ void main() {
       expect(tester.takeException(), isNull);
       await tester.pumpWidget(const SizedBox());
       await tester.pump();
+      expect(session.disposed, isFalse);
+      expect(identical(workspace.session('chat'), session), isTrue);
+      workspace.dispose();
       expect(session.disposed, isTrue);
     },
   );

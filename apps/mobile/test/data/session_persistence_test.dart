@@ -31,6 +31,97 @@ WorkspaceController _workspace(fixture.MemoryStore store, SessionCache cache) =>
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
+  test('closing a running view keeps its final reply available after an offline restart', () async {
+    SharedPreferences.setMockInitialValues({});
+    final directory = await Directory.systemTemp.createTemp(
+      'rcode-warm-session-',
+    );
+    final cache = FileSessionCache(directoryProvider: () async => directory);
+    final server = fixture.EngineFixture('warm-server');
+    await server.start();
+    final store = fixture.MemoryStore();
+    final model = _workspace(store, cache);
+    WorkspaceController? restored;
+    addTearDown(() async {
+      model.dispose();
+      restored?.dispose();
+      await server.close();
+      await cache.open('barrier', 'barrier').read();
+      expect(
+        directory.absolute.path,
+        startsWith(Directory.systemTemp.absolute.path),
+      );
+      await directory.delete(recursive: true);
+    });
+    await model.connect(server.url, 'FixtureKey12');
+    await model.call('Mutate', {'op': 'createChat', 'chatId': 'chat'});
+    final running = model.retainSession('chat');
+    await fixture.until(() => running.hydrated);
+    await running.send('slow');
+    server.messages.add({
+      'id': 'reply',
+      'role': 'assistant',
+      'status': 'streaming',
+      'parts': [
+        {'id': 'text', 'kind': 'text', 'text': 'Partial'},
+      ],
+    });
+    server.sessions = [
+      {'chatId': 'chat', 'status': 'working'},
+    ];
+    server.publish('WatchDocMessages');
+    server.publish('WatchSessions');
+    await fixture.until(() => running.working);
+    model.releaseSession(running);
+    expect(running.disposed, isFalse);
+    // Fill the detached quiet budget; the streaming session remains protected.
+    for (var i = 0; i < 8; i++) {
+      final quiet = model.retainSession('quiet-$i');
+      model.releaseSession(quiet);
+    }
+    await Future<void>.delayed(const Duration(milliseconds: 30));
+    expect(running.disposed, isFalse);
+    server.messages = [
+      ...server.messages.take(1),
+      {
+        'id': 'reply',
+        'role': 'assistant',
+        'status': 'complete',
+        'parts': [
+          {
+            'id': 'text',
+            'kind': 'text',
+            'text': 'Final reply received after closing',
+          },
+        ],
+      },
+    ];
+    server.sessions = [
+      {'chatId': 'chat', 'status': 'idle'},
+    ];
+    server.publish('WatchDocMessages');
+    server.publish('WatchSessions');
+    await fixture.until(() => running.messages.last['status'] == 'complete');
+    // Completion can now evict the old quiet view, but its final state is flushed.
+    await fixture.until(() => running.disposed);
+    await model.flushCaches();
+    final scope = model.cacheScope;
+    await cache.open(scope, 'chat').read();
+    model.dispose();
+    server.rejectConnections = true;
+    restored = _workspace(store, cache);
+    await restored.initialize();
+    final offline = restored.retainSession('chat');
+    await fixture.until(() => offline.hydrated);
+    expect(offline.messages.last['status'], 'complete');
+    expect(
+      jsonMaps(offline.messages.last['parts']).single['text'],
+      'Final reply received after closing',
+    );
+    expect(server.relayCalls, 1);
+    expect(server.queueCalls, 0);
+  });
+
   test('full sessions reopen offline with queue, ledger and metadata, then authoritative snapshots replace them', () async {
     SharedPreferences.setMockInitialValues({});
     final directory = await Directory.systemTemp.createTemp(

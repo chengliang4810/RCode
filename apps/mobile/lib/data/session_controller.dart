@@ -69,6 +69,14 @@ class SessionController extends ChangeNotifier {
       live?['status'] == 'working' ||
       messages.lastOrNull?['status'] == 'streaming';
   bool get canInterrupt => working || openInput != null;
+  bool get needsWarmSubscription =>
+      sending ||
+      working ||
+      live?['status'] == 'awaitingInput' ||
+      openInput != null ||
+      _echoes.isNotEmpty ||
+      _commandWaiters.isNotEmpty ||
+      commands.any((command) => command['status'] == 'pending');
   List<JsonMap> get pendingMessages => _echoes.values.toList();
   List<JsonMap> get entries => [...messages, ..._echoes.values];
 

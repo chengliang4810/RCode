@@ -684,7 +684,7 @@ void main() {
     expect(session.messages.length, 1);
   });
 
-  test('the last view releases its reads and an obsolete view cannot release a replacement', () async {
+  test('detached views stay warm within the quiet LRU and obsolete views cannot release replacements', () async {
     final server = EngineFixture('server');
     await server.start();
     final model = workspace(MemoryStore());
@@ -705,14 +705,33 @@ void main() {
     expect(first.disposed, isFalse);
     expect(reads(), 3);
     model.releaseSession(second);
-    await until(() => reads() == 0);
-    expect(first.disposed, isTrue);
+    await Future<void>.delayed(const Duration(milliseconds: 20));
+    expect(first.disposed, isFalse);
+    expect(reads(), 3);
+    expect(identical(model.retainSession('chat'), first), isTrue);
+    for (var i = 0; i < 7; i++) {
+      final quiet = model.retainSession('quiet-$i');
+      model.releaseSession(quiet);
+    }
+    await until(
+      () =>
+          server.watchers.values
+              .expand((w) => w.values)
+              .where((watch) => jsonMap(watch['params'])['chatId'] != null)
+              .length ==
+          21,
+    );
+    expect(first.disposed, isFalse, reason: 'a retained view is never evicted');
+    model.releaseSession(first);
+    await until(() => first.disposed && reads() == 0);
     final replacement = model.retainSession('chat');
     await until(() => reads() == 3);
     model.releaseSession(first);
     expect(replacement.disposed, isFalse);
     expect(identical(model.session('chat'), replacement), isTrue);
     model.releaseSession(replacement);
+    await model.disconnect();
     await until(() => reads() == 0);
+    expect(replacement.disposed, isTrue);
   });
 }
