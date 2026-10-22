@@ -40,6 +40,7 @@ class _NewSessionPageState extends State<NewSessionPage> {
   String? _branch;
   bool _worktree = false;
   bool _loadingModels = false;
+  bool _recoveringImages = true;
   bool _sending = false;
   bool _created = false;
   String? _pendingChatId;
@@ -49,7 +50,7 @@ class _NewSessionPageState extends State<NewSessionPage> {
   Map<String, dynamic>? _pendingWorktree;
   String? _pendingText;
   List<UploadAttachment>? _pendingAttachments;
-  String? _error;
+  Object? _error;
   int _modelGeneration = 0;
   Timer? _draftTimer;
   List<Map<String, dynamic>> _models = [];
@@ -87,6 +88,22 @@ class _NewSessionPageState extends State<NewSessionPage> {
     );
     _text.addListener(_remember);
     _loadModels();
+    WidgetsBinding.instance.addPostFrameCallback((_) => _restoreImages());
+  }
+
+  Future<void> _restoreImages() async {
+    try {
+      final images = await takeRecoveredImages(context);
+      if (!mounted) return;
+      if (images.isNotEmpty) {
+        setState(() => _attachments.addAll(images));
+        _remember();
+      }
+    } catch (error) {
+      if (mounted) setState(() => _error = error);
+    } finally {
+      if (mounted) setState(() => _recoveringImages = false);
+    }
   }
 
   void _remember() {
@@ -178,7 +195,7 @@ class _NewSessionPageState extends State<NewSessionPage> {
       _remember();
     } catch (error) {
       if (mounted && generation == _modelGeneration) {
-        setState(() => _error = error.toString());
+        setState(() => _error = error);
       }
     } finally {
       if (mounted && generation == _modelGeneration) {
@@ -470,7 +487,7 @@ class _NewSessionPageState extends State<NewSessionPage> {
       items: [
         for (final effort in _efforts)
           ListTile(
-            title: Text(effort),
+            title: Text(context.effortLabel(effort)),
             trailing: effort == _reasoning ? const Icon(Icons.check) : null,
             onTap: () => Navigator.pop(context, effort),
           ),
@@ -491,7 +508,11 @@ class _NewSessionPageState extends State<NewSessionPage> {
   }
 
   Future<void> _create() async {
-    if (_sending || (_text.text.trim().isEmpty && _attachments.isEmpty)) return;
+    if (_sending ||
+        _recoveringImages ||
+        (_text.text.trim().isEmpty && _attachments.isEmpty)) {
+      return;
+    }
     final target = _target;
     if (_pendingChatId == null && (target == null || _chosenModel == null)) {
       setState(
@@ -567,7 +588,7 @@ class _NewSessionPageState extends State<NewSessionPage> {
     } catch (error) {
       _pendingMessageId ??=
           _pendingSession?.pendingMessages.lastOrNull?['id'] as String?;
-      if (mounted) setState(() => _error = error.toString());
+      if (mounted) setState(() => _error = error);
     } finally {
       if (mounted) setState(() => _sending = false);
     }
@@ -690,7 +711,7 @@ class _NewSessionPageState extends State<NewSessionPage> {
                                 if (_efforts.isNotEmpty)
                                   _chip(
                                     Icons.speed_outlined,
-                                    _reasoning ?? '',
+                                    context.effortLabel(_reasoning ?? ''),
                                     _pickEffort,
                                     'effort',
                                   ),
@@ -762,6 +783,7 @@ class _NewSessionPageState extends State<NewSessionPage> {
                                   ),
                                   onPressed:
                                       _sending ||
+                                          _recoveringImages ||
                                           !widget.workspace.connected ||
                                           (_pendingChatId == null &&
                                               (_loadingModels ||
@@ -783,7 +805,7 @@ class _NewSessionPageState extends State<NewSessionPage> {
                         Padding(
                           padding: const EdgeInsets.all(12),
                           child: Text(
-                            _error!,
+                            context.errorText(_error),
                             style: TextStyle(color: colors.danger),
                             textAlign: TextAlign.center,
                           ),

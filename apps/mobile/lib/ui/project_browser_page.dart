@@ -59,11 +59,13 @@ class _ProjectBrowserPageState extends State<ProjectBrowserPage> {
   String? _listingDevice;
   bool _loading = true;
   bool _saving = false;
-  String? _error;
+  Object? _error;
   int _generation = 0;
 
   List<Map<String, dynamic>> get _devices => widget.workspace.devices
-      .where((device) => !['ios', 'android'].contains(device['platform']))
+      .where(
+        (device) => !['ios', 'ipados', 'android'].contains(device['platform']),
+      )
       .toList();
 
   @override
@@ -106,7 +108,7 @@ class _ProjectBrowserPageState extends State<ProjectBrowserPage> {
       });
     } catch (error) {
       if (mounted && generation == _generation) {
-        setState(() => _error = error.toString());
+        setState(() => _error = error);
       }
     } finally {
       if (mounted && generation == _generation) {
@@ -116,7 +118,10 @@ class _ProjectBrowserPageState extends State<ProjectBrowserPage> {
   }
 
   Future<void> _useFolder() async {
-    if (_loading || _saving || _listing == null || _listingDevice != _deviceId) {
+    if (_loading ||
+        _saving ||
+        _listing == null ||
+        _listingDevice != _deviceId) {
       return;
     }
     final device = _deviceId!;
@@ -141,7 +146,7 @@ class _ProjectBrowserPageState extends State<ProjectBrowserPage> {
       });
       if (mounted) Navigator.of(context).pop(id);
     } catch (error) {
-      if (mounted) setState(() => _error = error.toString());
+      if (mounted) setState(() => _error = error);
     } finally {
       if (mounted) setState(() => _saving = false);
     }
@@ -206,7 +211,7 @@ class _ProjectBrowserPageState extends State<ProjectBrowserPage> {
                 children: [
                   Expanded(
                     child: Text(
-                      _error!,
+                      context.errorText(_error),
                       style: TextStyle(color: colors.danger),
                     ),
                   ),

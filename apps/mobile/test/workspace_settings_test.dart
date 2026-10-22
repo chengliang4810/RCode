@@ -2,15 +2,64 @@ import 'package:rcode_mobile/ui/settings_page.dart';
 import 'package:rcode_mobile/ui/workspace_shell.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:rcode_mobile/data/workspace_controller.dart';
 import 'package:rcode_mobile/preferences.dart';
+import 'package:rcode_mobile/theme.dart';
 
 import 'support/page_workspace.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
   setUp(() => SharedPreferences.setMockInitialValues({}));
+
+  testWidgets(
+    'language selection rebuilds the actual locale from Chinese to English',
+    (tester) async {
+      final workspace = PageWorkspace();
+      final preferences = await AppPreferences.load();
+      addTearDown(workspace.dispose);
+      addTearDown(preferences.dispose);
+      await preferences.setValue('language', 'zh');
+      await tester.pumpWidget(
+        ListenableBuilder(
+          listenable: preferences,
+          builder: (context, _) => MaterialApp(
+            theme: rcodeTheme(Brightness.light),
+            locale: Locale(preferences.language),
+            supportedLocales: const [Locale('zh'), Locale('en')],
+            localizationsDelegates: GlobalMaterialLocalizations.delegates,
+            home: SettingsPage(
+              workspace: workspace,
+              preferences: preferences,
+              onOpen: (_) {},
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('设置'), findsOneWidget);
+      expect(find.text('连接'), findsOneWidget);
+      expect(find.text('Linux'), findsOneWidget);
+      expect(find.text('linux'), findsNothing);
+      await tester.scrollUntilVisible(
+        find.byKey(const Key('settings-language')),
+        250,
+      );
+      await tester.ensureVisible(find.byKey(const Key('settings-language')));
+      await tester.pumpAndSettle();
+      expect(find.text('语言'), findsOneWidget);
+      await tester.tap(find.byKey(const Key('settings-language')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('English').last);
+      await tester.pumpAndSettle();
+      expect(preferences.language, 'en');
+      expect(find.text('Settings'), findsOneWidget);
+      expect(find.text('Language'), findsOneWidget);
+      expect(find.text('设置'), findsNothing);
+      expect(tester.takeException(), null);
+    },
+  );
 
   testWidgets(
     'settings appearance and grouping persist instead of decorative toggles',

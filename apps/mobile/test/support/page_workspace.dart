@@ -48,11 +48,12 @@ class PageWorkspace extends WorkspaceController {
   Future<dynamic> call(String method, [JsonMap params = const {}]) async {
     calls.add((method: method, params: Map.from(params)));
     if (handler != null) return handler!(method, params);
-    if (method == 'ListHarnesses')
+    if (method == 'ListHarnesses') {
       return [
         {'id': 'native', 'name': 'Native', 'installed': true, 'enabled': true},
       ];
-    if (method == 'ListModels')
+    }
+    if (method == 'ListModels') {
       return [
         {
           'id': 'native-model',
@@ -60,6 +61,7 @@ class PageWorkspace extends WorkspaceController {
           'reasoningLevels': ['low', 'medium', 'high'],
         },
       ];
+    }
     if (method == 'ListFolders') return {'path': '/workspace', 'entries': []};
     if (method == 'Mutate' && params['op'] == 'createChat') {
       chats.add({

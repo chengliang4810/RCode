@@ -194,7 +194,7 @@ class SettingsPage extends StatelessWidget {
       final effects = {
         'none': context.tr('无', 'None'),
         'dither': context.tr('抖色', 'Dither'),
-        'ascii': 'ASCII',
+        'ascii': context.tr('字符画', 'ASCII'),
         'halftone': context.tr('半色调', 'Halftone'),
         'scanlines': context.tr('扫描线', 'Scanlines'),
       };
@@ -203,6 +203,7 @@ class SettingsPage extends StatelessWidget {
         appBar: AppBar(
           title: Text(context.tr('设置', 'Settings')),
           titleTextStyle: TextStyle(
+            fontFamily: 'Geist',
             fontSize: embedded ? 24 : 30,
             fontWeight: FontWeight.w600,
             color: colors.text,
@@ -242,7 +243,9 @@ class SettingsPage extends StatelessWidget {
                   title: Text(
                     device['name'] as String? ?? device['id'] as String,
                   ),
-                  subtitle: Text(device['platform'] as String? ?? ''),
+                  subtitle: Text(
+                    context.platformLabel(device['platform'] as String? ?? ''),
+                  ),
                   trailing: Icon(
                     Icons.circle,
                     size: 8,
@@ -315,6 +318,7 @@ class SettingsPage extends StatelessWidget {
                 leading: const Icon(Icons.language),
                 title: Text(context.tr('语言', 'Language')),
                 trailing: DropdownButton<String>(
+                  key: const Key('settings-language'),
                   value: preferences.language,
                   underline: const SizedBox(),
                   items: [

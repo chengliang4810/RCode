@@ -195,7 +195,7 @@ Future<void> performUiAction(
   } catch (error) {
     if (context.mounted) {
       ScaffoldMessenger.of(context)
-          .showSnackBar(SnackBar(content: Text(error.toString())));
+          .showSnackBar(SnackBar(content: Text(context.errorText(error))));
     }
   }
 }
@@ -812,6 +812,7 @@ class _SessionsPageState extends State<SessionsPage> {
                     : context.tr('会话', 'Sessions')),
           ),
           titleTextStyle: TextStyle(
+            fontFamily: 'Geist',
             fontSize: widget.embedded ? 24 : 30,
             fontWeight: FontWeight.w600,
             color: colors.text,

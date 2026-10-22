@@ -20,7 +20,7 @@ class _ConnectionPageState extends State<ConnectionPage> {
   final _form = GlobalKey<FormState>();
   bool _visible = false;
   bool _busy = false;
-  String? _error;
+  Object? _error;
 
   @override
   void initState() {
@@ -47,7 +47,7 @@ class _ConnectionPageState extends State<ConnectionPage> {
       if (mounted) _key.clear();
     } catch (error) {
       if (mounted) {
-        setState(() => _error = error.toString());
+        setState(() => _error = error);
       }
     } finally {
       if (mounted) setState(() => _busy = false);
@@ -101,7 +101,7 @@ class _ConnectionPageState extends State<ConnectionPage> {
                             children: [
                               if (_error != null) ...[
                                 Text(
-                                  _error!,
+                                  context.errorText(_error),
                                   key: const Key('connection-error'),
                                   textAlign: TextAlign.center,
                                   style: TextStyle(color: colors.danger),
@@ -156,7 +156,7 @@ class _ConnectionPageState extends State<ConnectionPage> {
                                 textInputAction: TextInputAction.done,
                                 onFieldSubmitted: (_) => _connect(),
                                 decoration: InputDecoration(
-                                  labelText: 'API Key',
+                                  labelText: context.tr('API 密钥', 'API Key'),
                                   suffixIcon: IconButton(
                                     tooltip: _visible
                                         ? context.tr('隐藏密钥', 'Hide key')

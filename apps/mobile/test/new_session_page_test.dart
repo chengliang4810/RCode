@@ -1,4 +1,8 @@
+import 'dart:async';
+import 'dart:typed_data';
+
 import 'package:rcode_mobile/ui/new_session_page.dart';
+import 'package:rcode_mobile/ui/attachments.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -30,11 +34,15 @@ class EmptyHostWorkspace extends PageWorkspace {
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
-  setUp(() => SharedPreferences.setMockInitialValues({}));
+  setUp(() {
+    SharedPreferences.setMockInitialValues({});
+    resetRecoveredImagesForTesting();
+  });
 
   testWidgets(
     'new-session catalog and reasoning determine the actual first run',
     (tester) async {
+      resetRecoveredImagesForTesting(retrieval: Future.value([]));
       final workspace = PageWorkspace();
       final preferences = await AppPreferences.load();
       addTearDown(workspace.dispose);
@@ -51,7 +59,11 @@ void main() {
       );
       await tester.pumpAndSettle();
       expect(find.text('Fixture Model'), findsOneWidget);
-      expect(find.text('medium'), findsOneWidget);
+      expect(find.byKey(const ValueKey('new-effort')), findsOneWidget);
+      expect(
+        tester.widget<IconButton>(find.byKey(const Key('new-send'))).onPressed,
+        isNotNull,
+      );
       await tester.enterText(
         find.byKey(const Key('new-message')),
         'Run the actual selected model',
@@ -82,6 +94,7 @@ void main() {
   testWidgets(
     'first-send retry reuses the chat command and message identities',
     (tester) async {
+      resetRecoveredImagesForTesting(retrieval: Future.value([]));
       final workspace = RetryWorkspace();
       final preferences = await AppPreferences.load();
       addTearDown(workspace.dispose);
@@ -130,6 +143,7 @@ void main() {
   testWidgets(
     'switching to a host with no models cannot send the previous host model',
     (tester) async {
+      resetRecoveredImagesForTesting(retrieval: Future.value([]));
       final workspace = EmptyHostWorkspace();
       final preferences = await AppPreferences.load();
       addTearDown(workspace.dispose);
@@ -159,4 +173,42 @@ void main() {
       await tester.pump(const Duration(milliseconds: 300));
     },
   );
+
+  testWidgets('lost picker images restore into the draft without being sent', (
+    tester,
+  ) async {
+    final recovered = Completer<List<UploadAttachment>>();
+    resetRecoveredImagesForTesting(retrieval: recovered.future);
+    final workspace = PageWorkspace();
+    final preferences = await AppPreferences.load();
+    addTearDown(workspace.dispose);
+    addTearDown(preferences.dispose);
+    await tester.pumpWidget(
+      app(NewSessionPage(workspace: workspace, preferences: preferences)),
+    );
+    await tester.pumpAndSettle();
+    await tester.enterText(
+      find.byKey(const Key('new-message')),
+      'Restored draft',
+    );
+    expect(
+      tester.widget<IconButton>(find.byKey(const Key('new-send'))).onPressed,
+      null,
+    );
+    recovered.complete([
+      UploadAttachment(name: 'Recovered.jpg', bytes: Uint8List(1)),
+    ]);
+    await tester.pumpAndSettle();
+    expect(find.text('Recovered.jpg'), findsOneWidget);
+    expect(
+      workspace.calls.where(
+        (call) =>
+            call.params['op'] == 'createChat' || call.method == 'RelayCommand',
+      ),
+      isEmpty,
+    );
+    await tester.pumpWidget(const SizedBox());
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(tester.takeException(), null);
+  });
 }

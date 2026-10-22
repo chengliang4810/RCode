@@ -6,7 +6,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:rcode_mobile/data/workspace_controller.dart';
-import 'package:rcode_mobile/preferences.dart';
 
 import 'support/page_workspace.dart';
 
@@ -74,8 +73,9 @@ void main() {
       final alpha = Completer<JsonMap>();
       final beta = Completer<JsonMap>();
       workspace.handler = (method, params) async {
-        if (method == 'ListFolders')
+        if (method == 'ListFolders') {
           return params['targetDeviceId'] == 'a' ? alpha.future : beta.future;
+        }
         return {'ok': true};
       };
       await tester.pumpWidget(
