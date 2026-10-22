@@ -44,22 +44,39 @@ Download the latest release for your platform from [GitHub Releases](https://git
 
 No RCode account is required. Model access and updates use the network; sessions are stored locally. The app updates itself.
 
-## Headless (CLI)
+## Headless service and remote connections
 
-For servers and other machines without a display, such as a VPS that keeps agents running after you close your laptop. Linux only:
+A Linux server can run the engine without a display. Desktop clients connect with its address and API key. Set a key before the first installation:
 
 ```bash
+read -r -s -p 'API Key: ' RCODE_API_KEY
+printf '\n'
+export RCODE_API_KEY
 curl -fsSL https://github.com/chengliang4810/RCode/releases/latest/download/install.sh | sh
 rcode status
 ```
 
-The installer starts the engine as a background service that survives reboots.
+Keys must have at least 8 characters, use only ASCII letters and digits, and include both a letter and a digit. The external port defaults to `27655`; set `RCODE_REMOTE_PORT` before installation to change it. When a systemd user service is available, the installer configures the background service and attempts to keep it running after logout. Follow its output if the service cannot start.
+
+With an existing binary, run the engine directly. `--api-key` or `RCODE_API_KEY` is required; `--port` selects a different port:
 
 ```bash
+rcode headless --api-key '<your-api-key>'
+rcode headless --api-key '<your-api-key>' --port 27656
+```
+
+With those environment variables set, install and manage a persistent service:
+
+```bash
+rcode daemon install
 rcode status      # engine status
 rcode update      # update to the latest release
 rcode daemon start|stop|restart|status
 ```
+
+In the desktop app, open **Settings → Devices**, add a host, and enter `ws://server-address:27655` and the same API key. A desktop can also enable **External access** there: the first enable generates and activates a random 12-character alphanumeric key. You can replace it with a custom key that meets the rules above and save it.
+
+A network disconnect or a remote client closing does not stop runs already accepted by the remote engine. Quitting the desktop that hosts the engine stops that machine's engine; use the headless service for a persistent server. Mobile clients can use the same direct WebSocket protocol. The iOS app has a direct mode, but compilation and execution on a physical iOS device have not been verified.
 
 ---
 

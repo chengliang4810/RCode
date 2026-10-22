@@ -44,22 +44,39 @@
 
 无需 RCode 账号。模型访问和应用更新需要联网，会话保存在本机。应用支持自动更新。
 
-## 无界面运行（CLI）
+## 无界面服务与远程连接
 
-适用于服务器等没有显示器的机器，比如在你合上笔记本之后继续跑 agent 的 VPS。仅支持 Linux：
+Linux 服务器可以运行无界面的引擎，桌面端通过服务器地址和 API Key 连接。首次安装前设置密钥：
 
 ```bash
+read -r -s -p 'API Key: ' RCODE_API_KEY
+printf '\n'
+export RCODE_API_KEY
 curl -fsSL https://github.com/chengliang4810/RCode/releases/latest/download/install.sh | sh
 rcode status
 ```
 
-安装脚本会把引擎作为后台服务拉起来，重启之后也会自己回来。
+密钥至少 8 位，只能包含 ASCII 字母和数字，且两类都必须包含。默认对外端口为 `27655`；安装前设置 `RCODE_REMOTE_PORT` 可以更换端口。安装脚本在 systemd 用户服务可用时配置后台服务，并尝试启用退出登录后继续运行；未能启动服务时按脚本提示处理。
+
+已有二进制可以直接运行；必须提供 `--api-key` 或环境变量 `RCODE_API_KEY`，端口可用 `--port` 指定：
 
 ```bash
+rcode headless --api-key '<你的密钥>'
+rcode headless --api-key '<你的密钥>' --port 27656
+```
+
+也可以在设置好上述环境变量后安装和管理常驻服务：
+
+```bash
+rcode daemon install
 rcode status      # 查看引擎状态
 rcode update      # 更新到最新版本
 rcode daemon start|stop|restart|status
 ```
+
+在桌面端的「设置 → 设备」中添加主机，填写 `ws://服务器地址:27655` 和同一个 API Key。另一台桌面也可在此启用「外部访问」：首次启用会立即生成并启用 12 位随机字母数字密钥，也可修改为符合上述规则的自定义密钥并保存。
+
+网络断开或远程客户端退出，不会停止远端引擎已经接收的运行；退出承载引擎的桌面应用会停止该机器上的引擎，服务器常驻应使用无界面服务。移动客户端可使用同一套直连 WebSocket 协议；iOS 已接入直连模式，实机编译与运行尚未验证。
 
 ---
 

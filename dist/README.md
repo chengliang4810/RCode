@@ -9,7 +9,8 @@ PROFILE=debug scripts/package-linux.sh   # fast smoke package
 
 Produces `target/package/rcode-<version>-linux-<arch>.tar.gz` containing:
 
-- `rcode` — the binary (headed by default; `rcode headless` runs the engine alone)
+- `rcode` — the binary (headed by default; `rcode headless --api-key <key>`
+  runs the authenticated engine without a UI)
 - `rcode.desktop` — XDG desktop entry template (`Exec=rcode` for packagers;
   the installers rewrite `Exec`, `TryExec`, and `Icon` to absolute paths under
   `~/.rcode/app/current`, since `~/.local/bin` is often not on a desktop
@@ -23,6 +24,31 @@ Produces `target/package/rcode-<version>-linux-<arch>.tar.gz` containing:
 
 The release profile in the root `Cargo.toml` sets `lto = "thin"` and
 `strip = "symbols"` for distribution builds.
+
+### Headless service configuration
+
+`rcode headless` requires `--api-key` or `RCODE_API_KEY`. Keys have at least
+8 characters, use only ASCII letters and digits, and include both. The external
+WebSocket listener defaults to port `27655`; change it with `--port` or
+`RCODE_REMOTE_PORT`:
+
+```sh
+rcode headless --api-key '<your-api-key>' --port 27656
+```
+
+For `dist/install.sh`, export `RCODE_API_KEY` first; `RCODE_REMOTE_PORT` is
+optional. To install a service from an existing binary, set the same environment
+variables and run `rcode daemon install`. By default, the Linux service reads
+its saved credentials from the private `~/.rcode/env` file. A systemd user service and
+linger are needed to keep it running without an active login session.
+
+Desktop clients add `ws://server-address:27655` and the key in **Settings →
+Devices**. That page also enables a desktop's external listener and generates a
+12-character key on first enable. Custom keys follow the rules above. Remote
+client disconnects do not stop accepted runs; quitting the desktop that hosts
+the engine does stop its engine. Use the headless service for a persistent host.
+The direct WebSocket protocol is also available to mobile clients; physical iOS
+device compilation and execution have not been verified.
 
 ## macOS
 
