@@ -58,8 +58,6 @@ use rcode_proto::{
     ToolCall,
 };
 
-use tokio::sync::OnceCell;
-
 use crate::{CancellationToken, Harness, HarnessError, RunControls};
 
 /// RCode's own agent, behind the [`Harness`] trait.
@@ -97,14 +95,9 @@ pub struct NativeHarness {
     /// Every live subagent of every run, so a stop can name one tool call.
     active_subagents: Arc<crate::native_subagents::ActiveSubagents>,
     agent_task_stores: Arc<std::sync::Mutex<std::collections::HashMap<String, Arc<rcode_agent::agent_tasks::AgentTaskStore>>>>,
-    /// Configured MCP servers, connected on first use.
-    ///
-    /// Connected once and reused: starting `npx` or dialing an HTTP endpoint
-    /// per run would pay the handshake per message and lose whatever state a
-    /// server keeps between them. `None` means "not attempted yet" — the first
-    /// run connects, and the result is kept either way so a broken config is
-    /// not re-read (or re-dialled) on every message.
-    mcp: Arc<OnceCell<Option<Arc<rcode_mcp::McpClient>>>>,
+    /// Healthy connections keyed by project and effective configuration.
+    /// Each run keeps its snapshot while later runs see settings changes.
+    mcp: Arc<rcode_mcp::McpClientPool>,
     prompt_sessions: Arc<crate::prompts::PromptSessions>,
 }
 
@@ -160,7 +153,7 @@ impl NativeHarness {
             )),
             active_subagents: Arc::new(crate::native_subagents::ActiveSubagents::default()),
             agent_task_stores: Arc::default(),
-            mcp: Arc::new(OnceCell::new()),
+            mcp: Arc::default(),
             prompt_sessions: Arc::default(),
         }
     }
@@ -208,20 +201,13 @@ impl NativeHarness {
         }
     }
 
-    /// The MCP client for this harness, connecting on first use.
-    ///
-    /// `cwd` names the project whose `.rcode/mcp.json` applies; the config
-    /// root holds the user-level file. The first run's project wins for the
-    /// life of the harness — a process-per-server connection is not something
-    /// to churn per conversation, and switching projects re-registers nothing.
+    /// Read the effective configuration per run and retain healthy connections
+    /// only for the same project/configuration snapshot.
     async fn mcp(&self, cwd: &std::path::Path) -> Option<Arc<rcode_mcp::McpClient>> {
         let Some(data_dir) = self.data_dir.as_deref() else {
             return None;
         };
-        self.mcp
-            .get_or_init(|| async { rcode_mcp::connect(cwd, data_dir).await })
-            .await
-            .clone()
+        self.mcp.client(cwd, data_dir).await
     }
 
     /// The store this harness shares with the engine, if any.
@@ -252,7 +238,7 @@ impl NativeHarness {
             )),
             active_subagents: Arc::new(crate::native_subagents::ActiveSubagents::default()),
             agent_task_stores: Arc::default(),
-            mcp: Arc::new(OnceCell::new()),
+            mcp: Arc::default(),
             prompt_sessions: Arc::default(),
         }
     }
@@ -277,7 +263,7 @@ impl NativeHarness {
             )),
             active_subagents: Arc::new(crate::native_subagents::ActiveSubagents::default()),
             agent_task_stores: Arc::default(),
-            mcp: Arc::new(OnceCell::new()),
+            mcp: Arc::default(),
             prompt_sessions: Arc::default(),
         }
     }
@@ -2251,6 +2237,10 @@ impl Drop for DropShutdown {
         self.cancel.cancel();
     }
 }
+
+#[cfg(test)]
+#[path = "native_mcp_tests.rs"]
+mod mcp_tests;
 
 #[cfg(test)]
 mod tests {

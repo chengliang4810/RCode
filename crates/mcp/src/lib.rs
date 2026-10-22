@@ -8,10 +8,12 @@
 
 mod client;
 pub mod config;
+mod pool;
 mod tool;
 
 pub use client::{McpClient, McpToolInfo, ServerReport, result_is_error, result_text, tool_counts};
 pub use config::{ConfigError, McpServer, McpSource, McpTransport, load};
+pub use pool::McpClientPool;
 pub use tool::McpTool;
 
 use std::path::Path;
@@ -35,7 +37,7 @@ pub async fn connect(cwd: &Path, config_root: &Path) -> Option<Arc<McpClient>> {
         return None;
     }
 
-    let client = Arc::new(McpClient::connect(servers).await);
+    let client = Arc::new(McpClient::connect_in(servers, Some(cwd.to_path_buf())).await);
     tracing::info!(servers = ?tool_counts(&client), "MCP servers connected");
     Some(client)
 }

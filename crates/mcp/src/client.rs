@@ -16,6 +16,7 @@
 //! recover without the user touching anything.
 
 use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use rmcp::ServiceExt;
@@ -62,12 +63,13 @@ enum Connection {
 
 /// Every configured server, and the tools each one advertises.
 pub struct McpClient {
-    servers: Vec<ServerState>,
+    servers: Vec<Arc<ServerState>>,
     tools: Vec<Arc<McpToolInfo>>,
 }
 
 struct ServerState {
     config: McpServer,
+    cwd: Option<PathBuf>,
     connection: Mutex<Connection>,
     /// The tools listed at startup, so a call can be routed without asking the
     /// server which endpoint it belongs to.
@@ -82,20 +84,40 @@ impl McpClient {
     /// Never fails: an unreachable server contributes no tools and a recorded
     /// reason. Startup must not depend on somebody else's process.
     pub async fn connect(servers: Vec<McpServer>) -> Self {
+        Self::connect_in(servers, None).await
+    }
+
+    pub(crate) async fn connect_in(servers: Vec<McpServer>, cwd: Option<PathBuf>) -> Self {
+        Self::connect_reusing(servers, cwd, None).await
+    }
+
+    pub(crate) async fn connect_reusing(
+        servers: Vec<McpServer>,
+        cwd: Option<PathBuf>,
+        previous: Option<Arc<Self>>,
+    ) -> Self {
         let mut states = Vec::with_capacity(servers.len());
         let mut tools = Vec::new();
 
         for config in servers {
+            if let Some(state) = previous.as_ref().and_then(|client| client.servers.iter().find(|state| {
+                state.config == config && state.cwd == cwd && state.problem.is_none()
+            })) {
+                tools.extend(state.tools.iter().cloned().map(Arc::new));
+                states.push(state.clone());
+                continue;
+            }
             if !config.enabled {
-                states.push(ServerState {
+                states.push(Arc::new(ServerState {
                     config,
+                    cwd: cwd.clone(),
                     connection: Mutex::new(Connection::Failed),
                     tools: Vec::new(),
                     problem: Some("switched off".to_owned()),
-                });
+                }));
                 continue;
             }
-            let (connection, listed, problem) = match open(&config).await {
+            let (connection, listed, problem) = match open(&config, cwd.as_deref()).await {
                 Ok((service, listed)) => (Connection::Live(Arc::new(service)), listed, None),
                 Err(error) => {
                     tracing::warn!(
@@ -109,12 +131,13 @@ impl McpClient {
             for tool in &listed {
                 tools.push(Arc::new(tool.clone()));
             }
-            states.push(ServerState {
+            states.push(Arc::new(ServerState {
                 config,
+                cwd: cwd.clone(),
                 connection: Mutex::new(connection),
                 tools: listed,
                 problem,
-            });
+            }));
         }
 
         Self {
@@ -126,6 +149,10 @@ impl McpClient {
     /// Every tool every server advertises, ready to register.
     pub fn tools(&self) -> &[Arc<McpToolInfo>] {
         &self.tools
+    }
+
+    pub(crate) fn has_startup_failures(&self) -> bool {
+        self.servers.iter().any(|state| state.config.enabled && state.problem.is_some())
     }
 
     /// Initialize instructions from currently connected servers. Read per run
@@ -164,9 +191,8 @@ impl McpClient {
 
     /// Call one tool. `wire_name` is [`McpToolInfo::wire_name`]'s spelling.
     ///
-    /// A server that has gone away is dialled again once: the common case is a
-    /// crashed local process, and making the user restart the app for it would
-    /// be the wrong default.
+    /// A failed connection is rebuilt before the next independent call. Once
+    /// a request has been sent, its outcome can be uncertain: never replay it.
     pub async fn call(
         &self,
         wire_name: &str,
@@ -177,41 +203,26 @@ impl McpClient {
             .ok_or_else(|| format!("no MCP tool named `{wire_name}`"))?;
 
         let state = &self.servers[server_index];
-        {
+        let service = {
             let mut connection = state.connection.lock().await;
-            match &*connection {
-                Connection::Live(service) => {
-                    match call_once(service, &tool.name, arguments.clone()).await {
-                        Ok(result) => return Ok(result),
-                        Err(error) => {
-                            // The connection is suspect; drop it so the retry
-                            // dials fresh instead of reusing a dead pipe.
-                            tracing::warn!(
-                                server = %state.config.name,
-                                tool = %tool.name,
-                                %error,
-                                "an MCP tool call failed; reconnecting"
-                            );
-                            *connection = Connection::Failed;
-                        }
-                    }
-                }
-                Connection::Failed => {}
+            if matches!(*connection, Connection::Failed) {
+                let (service, _) = open(&state.config, state.cwd.as_deref()).await?;
+                *connection = Connection::Live(Arc::new(service));
             }
-        }
-
-        // Reconnect, then retry once.
-        let mut connection = state.connection.lock().await;
-        match open(&state.config).await {
-            Ok((service, _)) => {
-                let service = Arc::new(service);
-                let result = call_once(&service, &tool.name, arguments).await;
-                *connection = Connection::Live(service);
-                result.map_err(|error| error.to_string())
-            }
+            let Connection::Live(service) = &*connection else { unreachable!() };
+            service.clone()
+        };
+        // A slow tool must not block other calls or a new run's instructions.
+        match call_once(&service, &tool.name, arguments).await {
+            Ok(result) => Ok(result),
             Err(error) => {
-                *connection = Connection::Failed;
-                Err(error)
+                let mut connection = state.connection.lock().await;
+                if matches!(&*connection, Connection::Live(current) if Arc::ptr_eq(current, &service)) {
+                    *connection = Connection::Failed;
+                }
+                Err(format!(
+                    "MCP tool `{wire_name}` failed; its outcome may be unknown and the call was not retried: {error}"
+                ))
             }
         }
     }
@@ -247,11 +258,16 @@ pub struct ServerReport {
 /// Start one server and list its tools.
 async fn open(
     server: &McpServer,
+    cwd: Option<&Path>,
 ) -> Result<(RunningService<RoleClient, ()>, Vec<McpToolInfo>), String> {
     let service = match &server.transport {
         McpTransport::Stdio { command, args, env } => {
             let mut cmd = tokio::process::Command::new(command);
             cmd.args(args);
+            cmd.kill_on_drop(true);
+            if let Some(cwd) = cwd {
+                cmd.current_dir(cwd);
+            }
             for (key, value) in env {
                 cmd.env(key, value);
             }
@@ -262,7 +278,10 @@ async fn open(
                 .map_err(|error| error.to_string())?
         }
         McpTransport::Http { url, headers } => {
-            let mut config = StreamableHttpClientTransportConfig::with_uri(url.clone());
+            // Session recovery may replay the original POST inside the SDK.
+            // An expired session must fail this call, not repeat its effect.
+            let mut config = StreamableHttpClientTransportConfig::with_uri(url.clone())
+                .reinit_on_expired_session(false);
             // A remote server usually authenticates with a bearer token; the
             // header map is the only place the user can put one.
             for (name, value) in headers {

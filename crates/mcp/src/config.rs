@@ -246,11 +246,12 @@ fn read_file(path: &Path, source: McpSource) -> Result<Vec<McpServer>, ConfigErr
 
     let mut servers = Vec::with_capacity(file.mcp_servers.len());
     for (name, entry) in file.mcp_servers {
+        let enabled = entry.enabled.unwrap_or(true);
         let transport = transport_for(&name, entry)?;
         servers.push(McpServer {
             name,
             transport,
-            enabled: true,
+            enabled,
             source,
         });
     }
