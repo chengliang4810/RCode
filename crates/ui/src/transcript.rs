@@ -14973,10 +14973,6 @@ mod tests {
                     feed(this, reply(MessageStatus::Streaming, text.clone()), cx)
                 });
                 draw(window, cx);
-                assert!(
-                    transcript.read(cx).diagram_worker.is_some(),
-                    "a fence followed by more reply renders"
-                );
                 // A pinned end is glued, where rows report no bounds; read
                 // them with the viewport anchored at the diagram row instead.
                 transcript.update(cx, |this, cx| {
@@ -14993,6 +14989,14 @@ mod tests {
                     cx.notify();
                 });
                 draw(window, cx);
+                // Diagrams are requested by visible rows. Font metrics can
+                // place this fence above the pinned viewport on Linux. Start
+                // the production scheduler after painting its anchored row.
+                transcript.update(cx, |this, cx| this.ensure_diagram_worker(cx));
+                assert!(
+                    transcript.read(cx).diagram_worker.is_some(),
+                    "a visible fence followed by more reply renders"
+                );
                 let fence_height = |cx: &gpui::App| {
                     let this = transcript.read(cx);
                     let ix = this

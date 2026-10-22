@@ -1129,7 +1129,11 @@ mod rendered_tests {
                     let offsets = offsets.unwrap();
                     assert_eq!(offsets.omissions.len(), 1);
                     assert!(layout.bounds().size.width <= px(width));
-                    assert!(layout.bounds().size.height <= px(23.));
+                    assert!(
+                        layout.bounds().size.height <= layout.line_height(),
+                        "truncated link must stay on one line: {:?}",
+                        layout.bounds()
+                    );
                     let shown_end = offsets.displayed(url.len());
                     let start =
                         layout.position_for_index(0).unwrap() + gpui::point(px(0.1), px(8.));
