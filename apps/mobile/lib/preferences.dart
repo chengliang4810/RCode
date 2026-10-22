@@ -45,13 +45,17 @@ class AppPreferences extends ChangeNotifier {
     }
   }
 
-  Future<void> setJson(String key, Map<String, dynamic>? value) async {
+  Future<void> setJson(
+    String key,
+    Map<String, dynamic>? value, {
+    bool notify = true,
+  }) async {
     if (value == null) {
       await _storage.remove('$_prefix$key');
     } else {
       await _storage.setString('$_prefix$key', jsonEncode(value));
     }
-    notifyListeners();
+    if (notify) notifyListeners();
   }
 
   Future<void> setValue(String key, dynamic value) async {
