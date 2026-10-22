@@ -168,6 +168,43 @@ async fn memory_desktop_routes_remote_creates_commands_and_catalogs_without_repl
             .any(|row| row["id"] == "remote-chat")
     })
     .await;
+    for change in [
+        json!({"action":"pin","sessionId":"remote-chat"}),
+        json!({"action":"section","change":{"action":"create","id":"remote-section","name":"Remote"}}),
+        json!({"action":"section","change":{"action":"assign","sessionId":"remote-chat","sectionId":"remote-section"}}),
+        json!({"action":"pin","sessionId":"remote-chat"}),
+    ] {
+        local_client
+            .call(
+                methods::MUTATE,
+                json!({"op":"changeSidebarPin","change":change}),
+            )
+            .await
+            .unwrap();
+    }
+    let preferences = catalog(&local_client, "WatchSidebarPreferences", |prefs| {
+        prefs["pinnedSessionIds"]
+            .as_array()
+            .is_some_and(|ids| ids.iter().any(|id| id == "remote-chat"))
+    })
+    .await;
+    assert_eq!(preferences["pinnedSessionIds"], json!(["remote-chat"]));
+    // Editing the address of the same host preserves its last verified ownership and pins.
+    local_client.call("SaveRemoteHost", json!({
+        "id":host["id"],"name":"Remote fixture","url":format!("ws://127.0.0.1:{port}/alternate")
+    })).await.unwrap();
+    let prefs = catalog(&local_client, "WatchSidebarPreferences", |_| true).await;
+    assert_eq!(prefs["pinnedSessionIds"], json!(["remote-chat"]));
+    catalog(&local_client, methods::WATCH_DEVICES, |rows| rows.as_array().unwrap().iter().any(|row| row["id"] == remote.device_id && !row["lastSeenAt"].is_null())).await;
+
+    assert!(local.workspace.chat("remote-chat").unwrap().is_none());
+    assert_eq!(
+        local.remote_hosts.target_for(
+            methods::WATCH_DOC_MESSAGES,
+            &json!({"chatId":"remote-chat--sub--tool"})
+        ),
+        Some(remote.device_id.clone())
+    );
     assert_eq!(
         remote
             .workspace
@@ -194,6 +231,21 @@ async fn memory_desktop_routes_remote_creates_commands_and_catalogs_without_repl
             .unwrap()
             .iter()
             .any(|row| row["id"] == local.device_id)
+    );
+    catalog(&local_client, "WatchSidebarPreferences", |prefs| {
+        prefs["pinnedSessionIds"]
+            .as_array()
+            .is_some_and(Vec::is_empty)
+    })
+    .await;
+    assert!(
+        local_client
+            .call(
+                methods::MUTATE,
+                json!({"op":"changeSidebarPin","change":{"action":"pin","sessionId":"remote-chat"}})
+            )
+            .await
+            .is_err()
     );
     local.shutdown().await;
     remote.shutdown().await;

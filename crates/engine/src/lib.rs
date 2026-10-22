@@ -298,6 +298,7 @@ impl EngineCore {
             .map_err(|error| EngineError::Other(error.to_string()))?;
         let remote_hosts = remote_hosts::RemoteHosts::open(config_root, &device_id)
             .map_err(|error| EngineError::Other(error.to_string()))?;
+        remote_hosts.bind_workspace(workspace.clone());
         Ok(Self {
             remote_access,
             remote_hosts,

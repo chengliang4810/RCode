@@ -375,7 +375,7 @@ impl RegistryDoc {
                 {
                     return Err(DocError::Schema("Section no longer exists".into()));
                 }
-                if self.overlay_row(KIND_CHATS, session_id).is_none() {
+                if !self.sidebar_chat_exists(session_id) {
                     return Err(DocError::Schema("Session no longer exists".into()));
                 }
                 // Keep legacy clients from displaying section members as pins.
@@ -411,7 +411,7 @@ impl RegistryDoc {
                     for id in &section.session_ids {
                         if self.overlay_row(LOCATIONS, id).is_none()
                             && !self.ordered_sidebar_pins().iter().any(|(pin, _)| pin == id)
-                            && self.overlay_row(KIND_CHATS, id).is_some()
+                            && self.sidebar_chat_exists(id)
                         {
                             // Appending one by one keeps the imported order.
                             self.write_sidebar_placement(id, &section.id, &None, &None)?;

@@ -2354,3 +2354,29 @@ fn attaching_an_edge_after_local_only_writes_reseeds_them() {
     doc.set_local_only(false);
     assert_eq!(doc.pending_len(), 0);
 }
+
+#[test]
+fn external_sidebar_references_survive_restart_without_creating_execution_rows() {
+    let mut doc = RegistryDoc::new("local");
+    doc.set_local_only(true);
+    doc.update_external_sidebar_chats(
+        &std::collections::HashSet::from(["remote".into()]),
+        &HashMap::from([("remote".into(), vec!["remote-chat".into()])]),
+    );
+    doc.change_sidebar_pin(&rcode_proto::SidebarPinChange::Pin {
+        session_id: "remote-chat".into(), after: None, before: None,
+    }).unwrap();
+    let mut restored = RegistryDoc::from_bytes(&doc.to_bytes().unwrap(), "local").unwrap();
+    restored.set_local_only(true);
+    restored.reconcile_sidebar_pins(true).unwrap();
+    assert_eq!(restored.sidebar_preferences().unwrap().pinned_session_ids, ["remote-chat"]);
+    assert!(restored.read_chats().unwrap().is_empty());
+    // A disconnected host has no new catalog yet: retain its references.
+    restored.update_external_sidebar_chats(&std::collections::HashSet::from(["remote".into()]), &HashMap::new());
+    restored.reconcile_sidebar_pins(true).unwrap();
+    assert_eq!(restored.sidebar_preferences().unwrap().pinned_session_ids, ["remote-chat"]);
+    // An authoritative empty catalog or removed host clears the pin.
+    restored.update_external_sidebar_chats(&std::collections::HashSet::from(["remote".into()]), &HashMap::from([("remote".into(), vec![])]));
+    restored.reconcile_sidebar_pins(true).unwrap();
+    assert!(restored.sidebar_preferences().unwrap().pinned_session_ids.is_empty());
+}

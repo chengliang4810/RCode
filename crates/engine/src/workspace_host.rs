@@ -724,6 +724,17 @@ impl WorkspaceHost {
         Ok(self.read(|doc| doc.read_sessions())?)
     }
 
+    pub(crate) fn update_external_sidebar_chats(
+        &self,
+        devices: &std::collections::HashSet<String>,
+        catalogs: &std::collections::HashMap<String, Vec<String>>,
+    ) -> Result<(), EngineError> {
+        self.mutate(|doc| {
+            doc.update_external_sidebar_chats(devices, catalogs);
+            Ok(())
+        })
+    }
+
     pub fn change_sidebar_pin(
         &self,
         change: &rcode_proto::SidebarPinChange,

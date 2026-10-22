@@ -454,6 +454,8 @@ struct PersistedState {
     local_writes: bool,
     rows: Vec<RegistryRow>,
     pending: Vec<PendingBatch>,
+    #[serde(default)]
+    external_sidebar_chats: HashMap<String, String>,
 }
 
 /// The local registry replica. Pure data — no I/O, no async; the transport
@@ -478,6 +480,8 @@ pub struct RegistryDoc {
     /// Bumped on every mutation (local or applied) — the engine host converts
     /// this into watch-channel publishes and snapshot debounces.
     generation: u64,
+    // Device-local references only: never enter the execution registry or edge rows.
+    external_sidebar_chats: HashMap<String, String>,
 }
 
 impl RegistryDoc {
@@ -492,6 +496,7 @@ impl RegistryDoc {
             local_only: false,
             local_writes: false,
             generation: 0,
+            external_sidebar_chats: HashMap::new(),
         }
     }
 
@@ -586,6 +591,7 @@ impl RegistryDoc {
             local_writes: self.local_writes,
             rows,
             pending: self.pending.clone(),
+            external_sidebar_chats: self.external_sidebar_chats.clone(),
         };
         Ok(serde_json::to_vec(&state)?)
     }
@@ -614,6 +620,7 @@ impl RegistryDoc {
         doc.clock = state.clock;
         doc.local_writes = state.local_writes;
         doc.pending = state.pending;
+        doc.external_sidebar_chats = state.external_sidebar_chats;
         for row in state.rows {
             doc.authoritative
                 .entry(row.kind.clone())
@@ -1569,6 +1576,30 @@ impl RegistryDoc {
         })
     }
 
+    /// Retain references across reconnect/restart without creating runnable chat rows.
+    pub fn update_external_sidebar_chats(
+        &mut self,
+        devices: &std::collections::HashSet<String>,
+        catalogs: &HashMap<String, Vec<String>>,
+    ) {
+        let previous = self.external_sidebar_chats.clone();
+        self.external_sidebar_chats
+            .retain(|_, device| devices.contains(device) && !catalogs.contains_key(device));
+        for (device, chats) in catalogs {
+            for chat in chats {
+                self.external_sidebar_chats
+                    .insert(chat.clone(), device.clone());
+            }
+        }
+        if self.external_sidebar_chats != previous {
+            self.generation += 1;
+        }
+    }
+
+    fn sidebar_chat_exists(&self, id: &str) -> bool {
+        self.overlay_row(KIND_CHATS, id).is_some() || self.external_sidebar_chats.contains_key(id)
+    }
+
     /// Initialize readiness and clean deleted pins from one authoritative snapshot.
     pub fn reconcile_sidebar_pins(&mut self, authoritative: bool) -> Result<bool, DocError> {
         if !authoritative {
@@ -1576,8 +1607,12 @@ impl RegistryDoc {
         }
         let initialized = self.sidebar_pins_initialized();
         self.initialize_sidebar_pins();
-        let known: std::collections::HashSet<_> =
-            self.read_chats()?.into_iter().map(|c| c.id).collect();
+        let known: std::collections::HashSet<_> = self
+            .read_chats()?
+            .into_iter()
+            .map(|c| c.id)
+            .chain(self.external_sidebar_chats.keys().cloned())
+            .collect();
         let removed: Vec<_> = self
             .ordered_sidebar_pins()
             .into_iter()

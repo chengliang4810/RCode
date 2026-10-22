@@ -58,9 +58,7 @@ impl RegistryDoc {
         {
             return Err(DocError::Schema("You can pin up to 200 sessions".into()));
         }
-        if matches!(change, SidebarPinChange::Pin { .. })
-            && self.overlay_row(KIND_CHATS, id).is_none()
-        {
+        if matches!(change, SidebarPinChange::Pin { .. }) && !self.sidebar_chat_exists(id) {
             return Err(DocError::Schema("Session no longer exists".into()));
         }
         self.initialize_sidebar_pins();

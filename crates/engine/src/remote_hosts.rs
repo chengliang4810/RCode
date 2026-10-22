@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{
-    Arc, Mutex, MutexGuard, Weak,
+    Arc, Mutex, MutexGuard, OnceLock, Weak,
     atomic::{AtomicBool, Ordering},
 };
 use std::time::Duration;
@@ -124,6 +124,7 @@ pub struct RemoteHosts {
     edits: tokio::sync::Mutex<()>,
     changes: watch::Sender<u64>,
     stopped: AtomicBool,
+    workspace: OnceLock<crate::workspace_host::WorkspaceHost>,
 }
 
 fn lock<T>(value: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -168,7 +169,41 @@ impl RemoteHosts {
             edits: tokio::sync::Mutex::new(()),
             changes,
             stopped: AtomicBool::new(false),
+            workspace: OnceLock::new(),
         }))
+    }
+
+    pub(crate) fn bind_workspace(&self, workspace: crate::workspace_host::WorkspaceHost) {
+        let _ = self.workspace.set(workspace);
+        self.sync_sidebar_references();
+    }
+
+    fn sync_sidebar_references(&self) {
+        let Some(workspace) = self.workspace.get() else {
+            return;
+        };
+        // Serialize this snapshot with edits/catalog updates to avoid restoring stale refs.
+        let state = lock(&self.state);
+        let devices = state
+            .values()
+            .filter_map(|host| host.record.device_id.clone())
+            .collect();
+        let catalogs = state
+            .values()
+            .filter_map(|host| {
+                let device = host.record.device_id.clone()?;
+                let rows = host.catalogs.get(methods::WATCH_CHATS)?;
+                Some((
+                    device,
+                    rows.iter()
+                        .filter_map(|row| row["id"].as_str().map(str::to_owned))
+                        .collect(),
+                ))
+            })
+            .collect();
+        if let Err(error) = workspace.update_external_sidebar_chats(&devices, &catalogs) {
+            tracing::warn!(%error, "could not refresh remote sidebar references");
+        }
     }
 
     pub fn start(self: &Arc<Self>) {
@@ -228,7 +263,6 @@ impl RemoteHosts {
                     "remote host address is already configured".into(),
                 ));
             }
-            let same_address = previous.is_some_and(|host| host.record.url == url);
             let record = HostRecord {
                 id: id.clone(),
                 name: edit.name.trim().into(),
@@ -237,9 +271,9 @@ impl RemoteHosts {
                 enabled: edit
                     .enabled
                     .unwrap_or_else(|| previous.is_none_or(|host| host.record.enabled)),
-                device_id: previous
-                    .filter(|_| same_address)
-                    .and_then(|host| host.record.device_id.clone()),
+                // Preserve the last verified identity while an address edit reconnects.
+                // attach() replaces it and clears catalogs only after identifying a new host.
+                device_id: previous.and_then(|host| host.record.device_id.clone()),
             };
             let generation = previous.map_or(1, |host| host.generation.wrapping_add(1));
             let mut records: Vec<_> = state
@@ -252,7 +286,7 @@ impl RemoteHosts {
             let mut replacement = HostState::new(record.clone());
             replacement.generation = generation;
             let previous = state.remove(&id);
-            if same_address && let Some(previous) = &previous {
+            if let Some(previous) = &previous {
                 replacement.catalogs = previous.catalogs.clone();
                 replacement.chats = previous.chats.clone();
                 replacement.spaces = previous.spaces.clone();
@@ -426,6 +460,7 @@ impl RemoteHosts {
     }
 
     fn bump(&self) {
+        self.sync_sidebar_references();
         self.changes
             .send_modify(|value| *value = value.wrapping_add(1));
     }
@@ -600,9 +635,12 @@ fn target_from_fields(
         if ["chatId", "sourceChatId", "targetChatId"]
             .iter()
             .any(|field| {
-                params[*field]
-                    .as_str()
-                    .is_some_and(|id| host.chats.contains(id))
+                params[*field].as_str().is_some_and(|id| {
+                    host.chats.contains(id)
+                        || id
+                            .split_once("--sub--")
+                            .is_some_and(|(root, _)| host.chats.contains(root))
+                })
             })
         {
             return Some(device.clone());
