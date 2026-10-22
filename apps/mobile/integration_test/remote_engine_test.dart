@@ -44,10 +44,10 @@ Future<void> _until(
   await tester.pump();
 }
 
-Iterable<VisualPainter> _paints(WidgetTester tester) => tester
+Iterable<VisualPainter> _paints(WidgetTester tester, {Finder? within}) => tester
     .widgetList<CustomPaint>(
       find.descendant(
-        of: find.byType(RCodeVisual),
+        of: within ?? find.byType(RCodeVisual),
         matching: find.byType(CustomPaint),
       ),
     )
@@ -95,6 +95,10 @@ void main() {
           await tester.pump();
           screenshotSurfaceReady = true;
         }
+        // State notifications and native display decoding can finish between
+        // frames. Capture the composed frame after the visible-content checks.
+        await tester.pump(const Duration(milliseconds: 100));
+        await tester.pump();
         await binding.takeScreenshot(name);
       }
 
@@ -367,6 +371,21 @@ void main() {
               ),
           'server-accepted slow turn',
         );
+        final acceptedText = find.textContaining(
+          'Mobile QA mock received: slow offline integration',
+          findRichText: true,
+        );
+        await _until(
+          tester,
+          () => acceptedText.evaluate().isNotEmpty,
+          'accepted slow turn in the transcript',
+        );
+        await tester.ensureVisible(acceptedText.last);
+        await _until(
+          tester,
+          () => acceptedText.hitTestable().evaluate().isNotEmpty,
+          'visible accepted slow turn',
+        );
         await screenshot('04-accepted-slow-turn');
         await workspace.flushCaches();
         await tester.pumpWidget(const SizedBox.shrink());
@@ -424,8 +443,59 @@ void main() {
           1,
         );
         expect(restored.pendingMessages, isEmpty);
+        final completedEntry = restored.messages.lastWhere(
+          (entry) => _text(entry).contains('Fixture response completed.'),
+        );
+        final completedRow = find.byKey(ValueKey('${completedEntry['id']}'));
+        final restoredVisual = find.descendant(
+          of: completedRow,
+          matching: find.byType(RCodeVisual),
+        );
+        await _until(
+          tester,
+          () => restoredVisual.evaluate().isNotEmpty,
+          'restored turn in the transcript',
+        );
+        await tester.ensureVisible(restoredVisual);
+        await _until(
+          tester,
+          () =>
+              _paints(tester, within: restoredVisual).any(
+                (paint) => '${paint.display['text'] ?? ''}'.contains('Count 0'),
+              ) &&
+              tester
+                      .widgetList<RawImage>(
+                        find.descendant(
+                          of: restoredVisual,
+                          matching: find.byType(RawImage),
+                        ),
+                      )
+                      .where((image) => image.image != null)
+                      .length ==
+                  2,
+          'restored native display, scene and shader',
+          timeout: const Duration(seconds: 60),
+        );
+        final completedText = find.descendant(
+          of: completedRow,
+          matching: find.textContaining(
+            'Fixture response completed.',
+            findRichText: true,
+          ),
+        );
+        await _until(
+          tester,
+          () => completedText.evaluate().isNotEmpty,
+          'restored completion text',
+        );
+        await tester.ensureVisible(completedText.last);
+        await _until(
+          tester,
+          () => completedText.hitTestable().evaluate().isNotEmpty,
+          'visible restored completion text',
+        );
         checks.add(
-          'accepted turn finishes with no app connection and restores once without resending',
+          'accepted turn finishes offline and restores visible text and native content once without resending',
         );
         await screenshot('05-restored-offline-turn');
         passed = true;
