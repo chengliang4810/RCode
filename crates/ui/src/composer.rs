@@ -484,12 +484,6 @@ pub fn flip_morph_step(
     Some(FlipMorph::collapse(last_height, now_ms))
 }
 
-/// Engines at or above this version understand `pending://` attachment refs
-/// and QueueCommand `transfers` (send-is-a-local-write attachments). Gated on
-/// BOTH the local engine (an IPC daemon may be older than this UI) and, for
-/// remotely-hosted chats, the host device's stamped registry version.
-const QUEUED_ATTACHMENTS_MIN: (u64, u64, u64) = (0, 2, 12);
-
 /// What the send button is right now.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SendButtonMode {
@@ -8563,11 +8557,11 @@ impl Composer {
             let state = self.state.read(cx);
             let local_ok = local_device_id
                 .as_deref()
-                .is_some_and(|id| state.device_version_at_least(id, QUEUED_ATTACHMENTS_MIN));
+                .is_some_and(|id| state.device_supports_pending_attachments(id));
             let host_ok = !host_is_remote
                 || host_device_id
                     .as_deref()
-                    .is_some_and(|id| state.device_version_at_least(id, QUEUED_ATTACHMENTS_MIN));
+                    .is_some_and(|id| state.device_supports_pending_attachments(id));
             local_ok && host_ok
         };
         // Upload identities minted NOW: in the queued flow the `pending://`

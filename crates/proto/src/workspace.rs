@@ -35,6 +35,15 @@ pub mod capabilities {
     pub fn current() -> Vec<String> {
         CURRENT.iter().map(|value| (*value).to_string()).collect()
     }
+
+    /// Explicit support survives a product version reset. Older hosts that
+    /// predate capability advertisements retain the original version fallback.
+    pub fn supports_pending_attachments(advertised: bool, version: Option<&str>) -> bool {
+        advertised
+            || version
+                .and_then(crate::version_triple)
+                .is_some_and(|version| version >= (0, 2, 12))
+    }
 }
 
 /// Stable information about the engine runtime reached by a client.
@@ -59,6 +68,17 @@ impl EngineInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pending_attachments_follow_capabilities_after_a_product_version_reset() {
+        for version in [Some("0.0.1-beta"), Some("invalid"), None] {
+            assert!(capabilities::supports_pending_attachments(true, version));
+            assert!(!capabilities::supports_pending_attachments(false, version));
+        }
+        assert!(capabilities::supports_pending_attachments(false, Some("0.2.12")));
+        assert!(capabilities::supports_pending_attachments(false, Some("0.3.0")));
+        assert!(!capabilities::supports_pending_attachments(false, Some("0.2.11")));
+    }
 
     #[test]
     fn engine_info_uses_camel_case_fields() {

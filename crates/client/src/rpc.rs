@@ -29,10 +29,6 @@ pub mod capability {
     ];
 }
 
-/// Queued-attachment version gate (composer.rs QUEUED_ATTACHMENTS_MIN): the
-/// host must defer commands carrying `pending://` refs until the bytes land.
-pub const QUEUED_ATTACHMENTS_MIN: (u64, u64, u64) = (0, 2, 12);
-
 /// Upload progress callback: fraction in `0.0..=1.0` of the file's bytes the
 /// host has committed.
 pub type ProgressFn = Arc<dyn Fn(f64) + Send + Sync>;

@@ -1476,6 +1476,19 @@ impl AppState {
             .is_some_and(|chat| self.device_supports(&chat.device_id, capability))
     }
 
+    pub fn device_supports_pending_attachments(&self, device_id: &str) -> bool {
+        rcode_proto::capabilities::supports_pending_attachments(
+            self.device_supports(
+                device_id,
+                rcode_proto::capabilities::MESSAGE_QUEUE_ATTACHMENTS_V1,
+            ),
+            self.devices
+                .iter()
+                .find(|device| device.id == device_id)
+                .and_then(|device| device.version.as_deref()),
+        )
+    }
+
     /// First project on the composer's picked device (falling back through
     /// the local device, then any project at all — better a cross-device
     /// project than a surprise project-less canvas). Display order.
