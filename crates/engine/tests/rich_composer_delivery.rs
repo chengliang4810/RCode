@@ -18,11 +18,12 @@ use rcode_proto::invocation::Invocation;
 use rcode_proto::{
     AgentEvent, DoneStatus, HarnessId, Model, ReasoningLevel, RunRequest, SteeringMode,
 };
-use rcode_rpc::RpcService;
 use tokio::sync::mpsc;
 
 const CHAT: &str = "rich-delivery";
-const HARNESSES: [HarnessId; 9] = [
+// Exercise Native and the compatibility identities retained by stored sessions.
+const HARNESSES: [HarnessId; 10] = [
+    HarnessId::Native,
     HarnessId::ClaudeCode,
     HarnessId::Codex,
     HarnessId::Cursor,
@@ -38,24 +39,10 @@ enum Delivery {
     Run(RunRequest),
     Steer(String, Vec<String>),
 }
-struct DiscoveryGate {
-    started: mpsc::UnboundedSender<std::path::PathBuf>,
-    release: tokio::sync::Notify,
-}
 struct RecordingHarness {
-    discovery_gate: std::sync::Mutex<Option<Arc<DiscoveryGate>>>,
     id: HarnessId,
     delivery: mpsc::UnboundedSender<Delivery>,
     fail_start: AtomicBool,
-}
-impl RecordingHarness {
-    async fn discovery(&self, cwd: &std::path::Path) {
-        let gate = self.discovery_gate.lock().unwrap().clone();
-        if let Some(gate) = gate {
-            gate.started.send(cwd.to_owned()).unwrap();
-            gate.release.notified().await;
-        }
-    }
 }
 #[async_trait]
 impl Harness for RecordingHarness {
@@ -81,7 +68,6 @@ impl Harness for RecordingHarness {
         &self,
         cwd: &std::path::Path,
     ) -> Result<Vec<rcode_proto::SlashCommand>, HarnessError> {
-        self.discovery(cwd).await;
         Ok(vec![rcode_proto::SlashCommand {
             name: "probe".into(),
             description: cwd.to_string_lossy().into_owned(),
@@ -92,7 +78,6 @@ impl Harness for RecordingHarness {
         &self,
         cwd: &std::path::Path,
     ) -> Result<Option<Vec<rcode_proto::invocation::Skill>>, HarnessError> {
-        self.discovery(cwd).await;
         Ok(Some(vec![rcode_proto::invocation::Skill {
             name: "probe".into(),
             path: cwd.join("SKILL.md").to_string_lossy().into_owned(),
@@ -223,7 +208,6 @@ async fn setup(
     let tmp = tempfile::tempdir().unwrap();
     let (delivery, rx) = mpsc::unbounded_channel();
     let harness = Arc::new(RecordingHarness {
-        discovery_gate: Default::default(),
         id,
         delivery,
         fail_start: AtomicBool::new(false),
@@ -431,20 +415,20 @@ async fn queue_edits_preserve_reselected_skills_until_delivery_for_every_harness
 
 #[tokio::test]
 async fn projectless_catalogs_use_the_session_directory_and_reject_unknown_targets() {
-    let (tmp, core, _harness, _rx) = setup(HarnessId::Codex).await;
+    let (tmp, core, _harness, _rx) = setup(HarnessId::Native).await;
     let client = rcode_rpc::memory_client(core.rpc_service());
     for method in [
         rcode_rpc::methods::LIST_COMMANDS,
         rcode_rpc::methods::LIST_SKILLS,
     ] {
         let new_chat = client
-            .call(method, serde_json::json!({"harness":"codex"}))
+            .call(method, serde_json::json!({"harness":"native"}))
             .await
             .unwrap();
         let existing_chat = client
             .call(
                 method,
-                serde_json::json!({"harness":"codex", "chatId":CHAT}),
+                serde_json::json!({"harness":"native", "chatId":CHAT}),
             )
             .await
             .unwrap();
@@ -452,11 +436,11 @@ async fn projectless_catalogs_use_the_session_directory_and_reject_unknown_targe
         // runs, and lists, from its own scratch folder.
         assert_eq!(
             new_chat[0]["description"],
-            std::env::var("HOME").unwrap(),
+            std::env::var(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).unwrap(),
             "{method}"
         );
         let chat_cwd = core.workspace.chat(CHAT).unwrap().unwrap().cwd.unwrap();
-        let name = chat_cwd.rsplit('/').next().unwrap();
+        let name = std::path::Path::new(&chat_cwd).file_name().unwrap();
         let scratch = tmp.path().join("data").join("scratch").join(name);
         assert_eq!(
             existing_chat[0]["description"],
@@ -467,7 +451,7 @@ async fn projectless_catalogs_use_the_session_directory_and_reject_unknown_targe
             client
                 .call(
                     method,
-                    serde_json::json!({"harness":"codex", "chatId":"missing-chat"})
+                    serde_json::json!({"harness":"native", "chatId":"missing-chat"})
                 )
                 .await
                 .is_err()
@@ -476,7 +460,7 @@ async fn projectless_catalogs_use_the_session_directory_and_reject_unknown_targe
             client
                 .call(
                     method,
-                    serde_json::json!({"harness":"codex", "chatId":CHAT, "path":"/tmp"})
+                    serde_json::json!({"harness":"native", "chatId":CHAT, "path":"/tmp"})
                 )
                 .await
                 .is_err()
@@ -494,77 +478,10 @@ async fn projectless_catalogs_use_the_session_directory_and_reject_unknown_targe
         let result = client
             .call(
                 method,
-                serde_json::json!({"harness":"codex", "chatId":CHAT}),
+                serde_json::json!({"harness":"native", "chatId":CHAT}),
             )
             .await
             .unwrap();
         assert_eq!(result[0]["description"], cwd.to_str().unwrap(), "{method}");
-    }
-}
-
-#[tokio::test]
-async fn project_catalog_rpcs_hold_update_leases_through_cancelled_discovery_cleanup() {
-    for method in [
-        rcode_rpc::methods::LIST_COMMANDS,
-        rcode_rpc::methods::LIST_SKILLS,
-    ] {
-        let (tmp, core, harness, _rx) = setup(HarnessId::Codex).await;
-        let root = tmp.path().join("project-catalog");
-        std::fs::create_dir(&root).unwrap();
-        let root = root.canonicalize().unwrap();
-        core.workspace
-            .set_chat_cwd(CHAT, root.to_str().unwrap())
-            .unwrap();
-        let (started, mut starts) = mpsc::unbounded_channel();
-        let gate = Arc::new(DiscoveryGate {
-            started,
-            release: tokio::sync::Notify::new(),
-        });
-        *harness.discovery_gate.lock().unwrap() = Some(gate.clone());
-        core.registry.begin_update(HarnessId::Codex);
-        let installation = core.registry.update_lease(HarnessId::Codex).await;
-        let service = core.rpc_service();
-        let caller = tokio::spawn(async move {
-            service
-                .handle(
-                    method,
-                    serde_json::json!({"harness":"codex", "chatId":CHAT}),
-                )
-                .await
-        });
-        assert!(
-            tokio::time::timeout(Duration::from_millis(30), starts.recv())
-                .await
-                .is_err(),
-            "{method} bypassed installation"
-        );
-        drop(installation);
-        core.registry.end_update(HarnessId::Codex);
-        let discovered_root = tokio::time::timeout(Duration::from_secs(2), starts.recv())
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(discovered_root, root, "{method} lost project context");
-        caller.abort();
-        assert!(matches!(caller.await, Err(error) if error.is_cancelled()));
-        core.registry.begin_update(HarnessId::Codex);
-        let registry = core.registry.clone();
-        let mut next_installation =
-            tokio::spawn(async move { registry.update_lease(HarnessId::Codex).await });
-        assert!(
-            tokio::time::timeout(Duration::from_millis(30), &mut next_installation)
-                .await
-                .is_err(),
-            "{method} released its lease before cleanup"
-        );
-        gate.release.notify_one();
-        drop(
-            tokio::time::timeout(Duration::from_secs(2), next_installation)
-                .await
-                .unwrap()
-                .unwrap(),
-        );
-        core.registry.end_update(HarnessId::Codex);
-        core.shutdown().await;
     }
 }

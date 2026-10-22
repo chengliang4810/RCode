@@ -247,7 +247,7 @@ fn main() -> anyhow::Result<()> {
                 edge_url: edge_url_from_env(),
                 edge_token,
                 org_id: std::env::var("RCODE_ORG_ID").ok(),
-                default_harness: harness_from_env(),
+                default_harness: rcode_engine::HarnessId::Native,
                 initial_url: cli.open_url,
             });
             Ok(())
@@ -313,18 +313,10 @@ fn engine_config_from_env() -> rcode_engine::EngineConfig {
             .ok()
             .and_then(|p| p.parse().ok())
             .unwrap_or(27654),
-        default_harness: harness_from_env(),
+        default_harness: rcode_engine::HarnessId::Native,
         // RCODE_ORG_ID (dev default "dev-org") scopes the workspace room.
         org_id: std::env::var("RCODE_ORG_ID").ok(),
         edge_token,
-    }
-}
-
-/// 桌面和无界面入口共用原生 agent 默认值，避免选择已删除的 CLI 驱动。
-fn harness_from_env() -> rcode_engine::HarnessId {
-    match std::env::var("RCODE_HARNESS").as_deref().map(str::trim) {
-        Ok("mock") => rcode_engine::HarnessId::Mock,
-        _ => rcode_engine::HarnessId::Native,
     }
 }
 

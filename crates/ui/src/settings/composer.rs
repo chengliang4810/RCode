@@ -69,7 +69,10 @@ impl ComposerDefaults {
     pub fn load(data_dir: &Path) -> Self {
         match std::fs::read_to_string(Self::path(data_dir)) {
             Ok(text) => match serde_json::from_str::<ComposerDefaults>(&text) {
-                Ok(defaults) => defaults,
+                Ok(mut defaults) => {
+                    defaults.retire_external_harness_defaults();
+                    defaults
+                }
                 Err(err) => {
                     tracing::warn!(error = %err, "composer-defaults corrupt; using defaults");
                     Self::default()
@@ -108,6 +111,20 @@ impl ComposerDefaults {
 
     pub fn path(data_dir: &Path) -> PathBuf {
         data_dir.join(FILE_NAME)
+    }
+
+    /// Retired CLI model ids cannot select a provider model in Native. Keep
+    /// existing Native picks and unrelated device/project preferences intact.
+    fn retire_external_harness_defaults(&mut self) {
+        if self.harness.is_some_and(|id| id != HarnessId::Native) {
+            self.harness = Some(HarnessId::Native);
+        }
+        self.model_by_harness
+            .retain(|id, _| *id == HarnessId::Native);
+        self.reasoning_by_model
+            .retain(|id, _| *id == HarnessId::Native);
+        self.model_options_by_model
+            .retain(|id, _| *id == HarnessId::Native);
     }
 
     /// The remembered model for a harness, if any.
@@ -189,24 +206,19 @@ mod tests {
     fn round_trip() {
         let dir = tempfile::tempdir().unwrap();
         let mut defaults = ComposerDefaults {
-            harness: Some(HarnessId::ClaudeCode),
+            harness: Some(HarnessId::Native),
             reasoning: Some(ReasoningLevel::XHigh),
             ..Default::default()
         };
-        defaults.remember_model(
-            HarnessId::ClaudeCode,
-            "claude-fable-5".into(),
-            "Fable 5".into(),
-        );
-        defaults.remember_model(HarnessId::Codex, "gpt-5.2-codex".into(), "GPT-5.2".into());
+        defaults.remember_model(HarnessId::Native, "claude-fable-5".into(), "Fable 5".into());
         defaults
-            .model_options_mut(HarnessId::ClaudeCode, "claude-fable-5")
+            .model_options_mut(HarnessId::Native, "claude-fable-5")
             .insert("contextWindow".into(), "1m".into());
         defaults.save(dir.path()).unwrap();
         let loaded = ComposerDefaults::load(dir.path());
         assert_eq!(loaded, defaults);
         assert_eq!(
-            loaded.model_for(HarnessId::ClaudeCode).map(|m| &*m.label),
+            loaded.model_for(HarnessId::Native).map(|m| &*m.label),
             Some("Fable 5")
         );
     }
@@ -254,7 +266,7 @@ mod tests {
     fn removed_favorites_do_not_discard_saved_model_preferences() {
         let dir = tempfile::tempdir().unwrap();
         let mut value = ComposerDefaults::default();
-        value.remember_model(HarnessId::Codex, "model".into(), "Model".into());
+        value.remember_model(HarnessId::Native, "model".into(), "Model".into());
         let mut legacy = serde_json::to_value(&value).unwrap();
         legacy["favorites"] = serde_json::json!([{"harness":"codex","model":"old"}]);
         std::fs::write(ComposerDefaults::path(dir.path()), legacy.to_string()).unwrap();
@@ -263,20 +275,69 @@ mod tests {
         loaded.save(dir.path()).unwrap();
         let saved: serde_json::Value = serde_json::from_str(
             &std::fs::read_to_string(ComposerDefaults::path(dir.path())).unwrap(),
-        ).unwrap();
+        )
+        .unwrap();
         assert!(saved.get("favorites").is_none());
     }
 
     #[test]
     fn remember_model_updates_harness_and_row() {
         let mut defaults = ComposerDefaults::default();
-        defaults.remember_model(HarnessId::Codex, "m1".into(), "One".into());
-        defaults.remember_model(HarnessId::Codex, "m2".into(), "Two".into());
-        assert_eq!(defaults.harness, Some(HarnessId::Codex));
+        defaults.remember_model(HarnessId::Native, "m1".into(), "One".into());
+        defaults.remember_model(HarnessId::Native, "m2".into(), "Two".into());
+        assert_eq!(defaults.harness, Some(HarnessId::Native));
         assert_eq!(
-            defaults.model_for(HarnessId::Codex).map(|m| &*m.id),
+            defaults.model_for(HarnessId::Native).map(|m| &*m.id),
             Some("m2")
         );
         assert!(defaults.model_for(HarnessId::ClaudeCode).is_none());
+    }
+
+    #[test]
+    fn retired_cli_defaults_preserve_native_models_and_project_choices() {
+        let dir = tempfile::tempdir().unwrap();
+        let legacy = serde_json::json!({
+            "harness": "codex",
+            "modelByHarness": {
+                "codex": {"id": "old-cli-model", "label": "Old"},
+                "native": {"id": "provider/model", "label": "Current"}
+            },
+            "reasoningByModel": {"codex": {"old-cli-model": "high"}, "native": {"provider/model": "low"}},
+            "modelOptionsByModel": {"codex": {"old-cli-model": {"old": true}}, "native": {"provider/model": {"option": "choice"}}},
+            "device": "local", "project": "project-1", "noProject": false
+        });
+        std::fs::write(ComposerDefaults::path(dir.path()), legacy.to_string()).unwrap();
+        let loaded = ComposerDefaults::load(dir.path());
+        assert_eq!(loaded.harness, Some(HarnessId::Native));
+        assert_eq!(
+            loaded.model_for(HarnessId::Native).unwrap().id,
+            "provider/model"
+        );
+        assert!(loaded.model_for(HarnessId::Codex).is_none());
+        assert_eq!(
+            loaded.reasoning_for(HarnessId::Native, Some("provider/model")),
+            Some(ReasoningLevel::Low)
+        );
+        assert_eq!(
+            loaded
+                .model_options_for(HarnessId::Native, "provider/model")
+                .unwrap()["option"],
+            "choice"
+        );
+        assert_eq!(loaded.device.as_deref(), Some("local"));
+        assert_eq!(loaded.project.as_deref(), Some("project-1"));
+        loaded.save(dir.path()).unwrap();
+        assert_eq!(ComposerDefaults::load(dir.path()), loaded);
+
+        let legacy_only = serde_json::json!({"harness":"claude-code", "modelByHarness":{"claude-code":{"id":"old-model","label":"Old"}}});
+        std::fs::write(ComposerDefaults::path(dir.path()), legacy_only.to_string()).unwrap();
+        let loaded = ComposerDefaults::load(dir.path());
+        assert_eq!(loaded.harness, Some(HarnessId::Native));
+        assert!(
+            loaded.model_by_harness.is_empty(),
+            "do not guess a Native provider id from a CLI model"
+        );
+        assert!(loaded.reasoning_by_model.is_empty());
+        assert!(loaded.model_options_by_model.is_empty());
     }
 }

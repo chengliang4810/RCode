@@ -998,7 +998,10 @@ impl SkillCompletionSettings {
     }
 }
 
-pub const SKILL_COMPLETION_HARNESSES: [(rcode_proto::HarnessId, &str); 9] = [
+// Legacy identities remain test fixtures for reading existing conversations.
+#[cfg(test)]
+pub const SKILL_COMPLETION_HARNESSES: [(rcode_proto::HarnessId, &str); 10] = [
+    (rcode_proto::HarnessId::Native, "RCode"),
     (rcode_proto::HarnessId::Antigravity, "Antigravity"),
     (rcode_proto::HarnessId::ClaudeCode, "Claude Code"),
     (rcode_proto::HarnessId::Codex, "Codex"),

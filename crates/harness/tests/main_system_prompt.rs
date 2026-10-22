@@ -106,7 +106,6 @@ async fn capture_turn_with_prompt(
         let controls = RunControls {
             conversation_id: None,
             goal: None,
-            execution_lease: None,
             request_input: Box::new(|_| panic!("fixture must not ask questions")),
             steering,
             interrupt: CancellationToken::new(),

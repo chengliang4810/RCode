@@ -15,9 +15,6 @@
 //! - `EngineInfo` → `{deviceId, workspaceScope}` — this runtime's fixed identity
 //!   and data boundary (never forwarded)
 //! - `LocalDevice` → `{deviceId}` — legacy engine identity (never forwarded)
-//! - AuthRpc (feature-inventory §2): `AuthStatus` (stream), `SignIn`/`SignInHeadless` →
-//!   `{url}`, `CompleteSignIn {code}`, `SignOut`, `ListOrgs`, `CreateOrg {name}`,
-//!   `SelectOrg {organizationId}`
 //! - Repos (§3.5): `ListRepos`, `AddRepo {path}`, `CloneRepo {url}`,
 //!   `CreateRepo {name}`, `ListBranches {repoPath}` (default branch first),
 //!   `ListFolders {path?}`, `CreateWorktree {repoPath, branch}`, `DeleteWorktree
@@ -30,9 +27,6 @@
 //!   `CloseTerminal`. M5 is single-user local: per-user owner checks land with
 //!   real multi-account auth in M6.
 //! - Sessions (§2 DataRpc): `WatchDocMessages`, `Mutate`, `QueueCommand`.
-//!   `{harness, accountId}` → snapshot, `StartAgentLogin {harness}` →
-//!   `{loginId, url, mode}`, `CompleteAgentLogin {loginId, code}` → snapshot,
-//!   `PollAgentLogin {loginId}`, `CancelAgentLogin {loginId}`.
 //! - Uploads (§3.7): `UploadChunk {uploadId, data, seq?}`,
 //!   `UploadCommit {uploadId, fileName}` → `{path}`,
 //!   `ReadAttachmentChunk {path, offset}` → `{name, mimeType, data, nextOffset,
@@ -91,8 +85,6 @@ struct ChatParams {
 #[serde(rename_all = "camelCase")]
 struct ListModelsParams {
     harness: HarnessId,
-    #[serde(default)]
-    force: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -4042,16 +4034,14 @@ mod tests {
         host.shutdown_workers().await;
     }
 
-    /// The UI's Switch/Forget calls send `{id, accountId, harness}` (+ optional
-    /// `targetDeviceId`); the extra fields must be tolerated, `accountId` wins.
     #[test]
-    fn list_models_force_is_optional_and_backward_compatible() {
+    fn list_models_tolerates_retired_force_flag() {
         let old: ListModelsParams =
-            serde_json::from_value(serde_json::json!({"harness":"codex"})).unwrap();
-        assert!(!old.force);
+            serde_json::from_value(serde_json::json!({"harness":"native"})).unwrap();
+        assert_eq!(old.harness, HarnessId::Native);
         let forced: ListModelsParams =
-            serde_json::from_value(serde_json::json!({"harness":"codex","force":true})).unwrap();
-        assert!(forced.force);
+            serde_json::from_value(serde_json::json!({"harness":"native","force":true})).unwrap();
+        assert_eq!(forced.harness, HarnessId::Native);
     }
 
     #[test]
@@ -4106,10 +4096,6 @@ mod tests {
         assert!(!is_stream_method(methods::WRITE_WORKSPACE_FILE));
         assert!(is_stream_method(methods::WATCH_WORKSPACE_FILES));
         assert!(is_stream_method(methods::WATCH_WORKSPACE_GIT_STATUS));
-        // 外部 CLI 更新监控已随适配器删除：这些方法不再可转发。
-        assert!(!forwardable(methods::WATCH_HARNESS_UPDATES));
-        assert!(!forwardable(methods::CHECK_HARNESS_UPDATES));
-        assert!(!forwardable(methods::APPLY_HARNESS_UPDATE));
         assert!(forwardable(methods::LIST_CHANGE_REQUEST_PAGE));
         assert!(!is_stream_method(methods::LIST_CHANGE_REQUEST_PAGE));
         assert!(forwardable(methods::GET_CHANGE_REQUEST_REPOSITORY));
@@ -4140,15 +4126,6 @@ mod tests {
         assert_eq!(
             forward_deadline(methods::CLONE_REPO),
             Duration::from_secs(15 * 60)
-        );
-        // 这两个方法曾走外部 CLI 更新，随适配器删除后回落到默认时限。
-        assert_eq!(
-            forward_deadline(methods::APPLY_HARNESS_UPDATE),
-            Duration::from_secs(30)
-        );
-        assert_eq!(
-            forward_deadline(methods::CHECK_HARNESS_UPDATES),
-            Duration::from_secs(30)
         );
         assert_eq!(
             forward_deadline(methods::LIST_BRANCHES),

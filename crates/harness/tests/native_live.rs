@@ -108,7 +108,6 @@ fn controls(allow: bool) -> (RunControls, mpsc::Sender<rcode_harness::SteerMessa
     let controls = RunControls {
         conversation_id: None,
         goal: None,
-        execution_lease: None,
         request_input,
         steering,
         interrupt: CancellationToken::new(),

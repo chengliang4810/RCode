@@ -115,17 +115,10 @@ pub fn same_model_options(
 pub struct RunControls {
     pub conversation_id: Option<String>,
     pub goal: Option<std::sync::Arc<dyn rcode_agent::goal::GoalStore>>,
-    /// Shared execution gate held until the harness has shut down and reaped
-    /// its subprocess, including when the host drops the event stream. Each
-    /// detached session task must retain this lease through its cleanup.
-    /// Standalone callers without an update coordinator can leave it unset.
-    pub execution_lease: Option<std::sync::Arc<tokio::sync::OwnedRwLockReadGuard<()>>>,
     /// The run asks the user and awaits the answer (blocks the agent).
     ///
-    /// Typed at both ends: a permission confirmation and a model-authored
-    /// question travel as the same request/response pair, so the host passes
-    /// them through rather than converting a permission into a look-alike
-    /// question and reading the decision back out of a button's text.
+    /// Questions and answers are typed so the host preserves option ids and
+    /// free-text answers while a run waits for user input.
     pub request_input: Box<
         dyn Fn(
                 rcode_proto::InteractionRequest,

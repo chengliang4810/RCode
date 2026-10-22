@@ -110,7 +110,6 @@ async fn native_object_questions_surface_once_wait_and_resume_with_selected_labe
     let controls = RunControls {
         conversation_id: None,
         goal: None,
-        execution_lease: None,
         request_input: Box::new(move |request| {
             let (answer_tx, answer_rx) = oneshot::channel();
             requests_tx.send((request, answer_tx)).unwrap();

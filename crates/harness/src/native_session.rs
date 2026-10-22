@@ -32,7 +32,6 @@ pub(super) async fn start(
     let RunControls {
         conversation_id,
         goal,
-        execution_lease,
         request_input,
         mut steering,
         interrupt,
@@ -63,7 +62,6 @@ pub(super) async fn start(
             RunControls {
                 conversation_id: conversation_id.clone(),
                 goal: goal.clone(),
-                execution_lease: None,
                 request_input: Box::new(move |request| input(request)),
                 steering: mpsc::channel(1).1,
                 interrupt: cancel,
@@ -84,7 +82,6 @@ pub(super) async fn start(
     let state_worker = state.clone();
     tokio::spawn(async move {
         let state = state_worker;
-        let _lease = execution_lease;
         let mut streams = SelectAll::new();
         streams.push(first);
         let mut active = true;
