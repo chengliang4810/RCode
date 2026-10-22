@@ -14,6 +14,11 @@ void main() {
     expect(mono.fontFamily, 'GeistMono');
     expect(mono.fontWeight, FontWeight.w600);
     expect(
+      visualTextStyle({'ligatures': false}).fontFeatures!
+          .map((feature) => feature.feature),
+      ['liga', 'clig'],
+    );
+    expect(
       visualTextStyle({'face': 'sansBoldItalic', 'size': 17}).fontStyle,
       FontStyle.italic,
     );

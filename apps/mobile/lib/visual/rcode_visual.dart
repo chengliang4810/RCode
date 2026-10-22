@@ -654,7 +654,7 @@ TextStyle visualTextStyle(Map<String, dynamic> style, {Color? color}) {
     fontSize: _number(style['size']),
     color: color,
     fontFeatures: style['ligatures'] == false
-        ? const [ui.FontFeature.disable('liga')]
+        ? const [ui.FontFeature.disable('liga'), ui.FontFeature.disable('clig')]
         : null,
   );
 }
