@@ -2572,6 +2572,11 @@ impl RpcService for EngineRpc {
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&serde_json::json!({}))
             }
+            "WatchSessionReplica" => {
+                let p: ChatParams = parse_params(params)?;
+                let handle = self.doc_host.open(&p.chat_id).map_err(|error| RpcError::Failed(error.to_string()))?;
+                Ok(RpcReply::Stream(crate::session_replica::stream(handle)))
+            }
             methods::WATCH_DOC_MESSAGES => {
                 // Opt-in: older viewports retain the full-reset contract.
                 let opening_tail = params
