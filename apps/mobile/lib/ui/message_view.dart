@@ -2,6 +2,7 @@ import 'dart:convert';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:share_plus/share_plus.dart';
 
 import '../data/workspace_controller.dart';
 import '../l10n.dart';
@@ -303,9 +304,12 @@ class RemoteImage extends StatefulWidget {
     required this.session,
     required this.path,
     this.name = '',
+    this.share,
   });
   final SessionController session;
   final String path, name;
+  @visibleForTesting
+  final Future<ShareResult> Function(ShareParams)? share;
   @override
   State<RemoteImage> createState() => _RemoteImageState();
 }
@@ -351,15 +355,11 @@ class _RemoteImageState extends State<RemoteImage> {
         child: InkWell(
           onTap: () => Navigator.of(context).push(
             MaterialPageRoute<void>(
-              builder: (_) => Scaffold(
-                appBar: AppBar(title: Text(widget.name)),
-                body: Center(
-                  child: InteractiveViewer(
-                    minScale: .5,
-                    maxScale: 8,
-                    child: Image.memory(snapshot.data!, fit: BoxFit.contain),
-                  ),
-                ),
+              builder: (_) => _ImagePreview(
+                bytes: snapshot.data!,
+                path: widget.path,
+                name: widget.name,
+                share: widget.share,
               ),
             ),
           ),
@@ -378,6 +378,117 @@ class _RemoteImageState extends State<RemoteImage> {
       );
     },
   );
+}
+
+class _ImagePreview extends StatefulWidget {
+  const _ImagePreview({
+    required this.bytes,
+    required this.path,
+    required this.name,
+    this.share,
+  });
+  final Uint8List bytes;
+  final String path, name;
+  final Future<ShareResult> Function(ShareParams)? share;
+  @override
+  State<_ImagePreview> createState() => _ImagePreviewState();
+}
+
+class _ImagePreviewState extends State<_ImagePreview> {
+  bool _sharing = false;
+
+  Future<void> _share(BuildContext buttonContext) async {
+    if (_sharing) return;
+    final box = buttonContext.findRenderObject() as RenderBox?;
+    if (box == null || !box.hasSize) return;
+    final origin = box.localToGlobal(Offset.zero) & box.size;
+    final format = _sharedImageFormat(widget.bytes);
+    final suggested = (widget.name.isEmpty ? widget.path : widget.name)
+        .replaceAll('\\', '/')
+        .split('/')
+        .last;
+    final stem = suggested.replaceFirst(RegExp(r'\.[^.]+$'), '');
+    final name = '${stem.isEmpty ? 'image' : stem}.${format.extension}';
+    setState(() => _sharing = true);
+    try {
+      final params = ShareParams(
+        files: [XFile.fromData(widget.bytes, mimeType: format.mimeType)],
+        fileNameOverrides: [name],
+        sharePositionOrigin: origin,
+      );
+      await (widget.share?.call(params) ?? SharePlus.instance.share(params));
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text(context.errorText(error))));
+      }
+    } finally {
+      if (mounted) setState(() => _sharing = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) => Scaffold(
+    appBar: AppBar(
+      title: Text(widget.name),
+      actions: [
+        Builder(
+          builder: (buttonContext) => IconButton(
+            key: const Key('image-share'),
+            tooltip: context.tr('分享图片', 'Share image'),
+            icon: const Icon(Icons.ios_share),
+            onPressed: _sharing ? null : () => _share(buttonContext),
+          ),
+        ),
+      ],
+    ),
+    body: Center(
+      child: InteractiveViewer(
+        minScale: .5,
+        maxScale: 8,
+        child: Image.memory(widget.bytes, fit: BoxFit.contain),
+      ),
+    ),
+  );
+}
+
+({String mimeType, String extension}) _sharedImageFormat(Uint8List bytes) {
+  bool starts(List<int> prefix) =>
+      bytes.length >= prefix.length &&
+      List.generate(
+        prefix.length,
+        (i) => bytes[i] == prefix[i],
+      ).every((same) => same);
+  if (starts([0x89, 0x50, 0x4e, 0x47])) {
+    return (mimeType: 'image/png', extension: 'png');
+  }
+  if (starts([0xff, 0xd8])) return (mimeType: 'image/jpeg', extension: 'jpg');
+  if (starts([0x47, 0x49, 0x46])) {
+    return (mimeType: 'image/gif', extension: 'gif');
+  }
+  if (starts([0x42, 0x4d])) return (mimeType: 'image/bmp', extension: 'bmp');
+  if (bytes.length >= 12 &&
+      ascii.decode(bytes.sublist(0, 4), allowInvalid: true) == 'RIFF' &&
+      ascii.decode(bytes.sublist(8, 12), allowInvalid: true) == 'WEBP') {
+    return (mimeType: 'image/webp', extension: 'webp');
+  }
+  if (starts([0x49, 0x49, 0x2a, 0]) || starts([0x4d, 0x4d, 0, 0x2a])) {
+    return (mimeType: 'image/tiff', extension: 'tiff');
+  }
+  if (bytes.length >= 12 &&
+      ascii.decode(bytes.sublist(4, 8), allowInvalid: true) == 'ftyp') {
+    final brand = ascii.decode(bytes.sublist(8, 12), allowInvalid: true);
+    if (brand == 'avif' || brand == 'avis') {
+      return (mimeType: 'image/avif', extension: 'avif');
+    }
+    if (['heic', 'heix', 'hevc', 'hevx'].contains(brand)) {
+      return (mimeType: 'image/heic', extension: 'heic');
+    }
+    if (brand == 'mif1' || brand == 'msf1') {
+      return (mimeType: 'image/heif', extension: 'heif');
+    }
+  }
+  return (mimeType: 'application/octet-stream', extension: 'bin');
 }
 
 class ToolPartView extends StatefulWidget {
