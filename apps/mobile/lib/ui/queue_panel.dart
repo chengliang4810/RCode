@@ -36,6 +36,20 @@ class QueuePanel extends StatelessWidget {
             session.queue.length - 1,
           ),
         });
+      } else if (action == 'SendQueuedMessageNow') {
+        final current = session.queue
+            .where((row) => row['id'] == id)
+            .firstOrNull;
+        if (current == null) return;
+        // Match the original mobile primary action: text enters the live turn
+        // (or its next boundary), while images require a fresh request.
+        final hasAttachments =
+            (current['attachments'] as List? ?? const []).isNotEmpty ||
+            promptImages('${current['text'] ?? ''}').isNotEmpty;
+        await session.queueAction(
+          hasAttachments ? 'SendQueuedMessageNow' : 'SteerQueuedMessageNow',
+          id,
+        );
       } else {
         await session.queueAction(action, id);
       }
@@ -89,7 +103,9 @@ class QueuePanel extends StatelessWidget {
                     enabled: item['deliveryGate'] == null,
                     child: Text(context.tr('立即发送', 'Send now')),
                   ),
-                  if (session.working)
+                  if (session.working &&
+                      (item['attachments'] as List? ?? const []).isEmpty &&
+                      promptImages('${item['text'] ?? ''}').isEmpty)
                     PopupMenuItem(
                       value: 'SteerQueuedMessageNow',
                       enabled: item['deliveryGate'] == null,
