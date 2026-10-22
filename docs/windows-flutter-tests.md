@@ -93,3 +93,18 @@ workaround on the pinned SDK. They do not prove the unsymbolized original
 crashes share the upstream profiler defect, or that the ordinary Windows
 runner has become reliable. Mac/iOS CI and Xcode builds were not run by this
 Windows verification.
+
+After the final fidelity fixes, source commit `1419b16` passed another complete
+isolated run: **80 passed, the same 5 expected skips, exit 0** (54.88 s including
+tool startup). This includes active-conversation transfer between compact and
+split layouts with a real composer draft, keeping a closed conversation closed
+after widening, 200% session-row geometry, highlighted code selection/scaling,
+warm session caching and forgotten-host draft invalidation. The original six
+session-page tests and 45-message fixture remain intact. The complete package's
+21 tester processes retained assertions and omitted the profiling argument;
+`flutter analyze --no-pub` reported no issues (exit 0, 8.4 s).
+
+The final source hash, derived JSON result, launch-argument checks and logs are
+saved under `apps/mobile/build/qa/final-mobile/`. The earlier 72-test run above
+is retained as the controlled three-session-run comparison, before those final
+regressions were added.

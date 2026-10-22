@@ -33,7 +33,7 @@ repository root for the [isolated tester workaround](../../docs/windows-flutter-
 It disables host CPU profiling without editing the installed SDK, application
 or test assertions. Linux CI uses the normal Flutter command above.
 The controlled Windows run passed the six session-page tests three times and
-the complete suite (72 passed, five documented gate skips); analysis was clean.
+the final complete suite (80 passed, five documented gate skips); analysis was clean.
 
 The Android build compiles the portable Rust visual/math library for arm64 and
 x86_64 through Gradle. See [native build details](native/README.md).
