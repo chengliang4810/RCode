@@ -34,7 +34,8 @@ use palette::Palette;
 // ---- FFI ----------------------------------------------------------------------
 
 /// sRGB, straight alpha, 0–1.
-#[derive(Debug, Clone, Copy, PartialEq, Default, uniffi::Record)]
+#[derive(Debug, Clone, Copy, PartialEq, Default, uniffi::Record, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Rgba {
     pub r: f32,
     pub g: f32,
@@ -43,7 +44,8 @@ pub struct Rgba {
 }
 
 /// `text[start..start+len]` (UTF-16) in `style`, its origin at (x, baseline).
-#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+#[derive(Debug, Clone, PartialEq, uniffi::Record, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct VisualRun {
     pub start: u32,
     pub len: u32,
@@ -54,7 +56,8 @@ pub struct VisualRun {
     pub color: Rgba,
 }
 
-#[derive(Debug, Clone, PartialEq, uniffi::Enum)]
+#[derive(Debug, Clone, PartialEq, uniffi::Enum, serde::Serialize)]
+#[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum VisualShape {
     Rect {
         x: f32,
@@ -77,7 +80,8 @@ pub enum VisualShape {
 }
 
 /// One layer of vector paint: shapes, then text over them.
-#[derive(Debug, Clone, PartialEq, Default, uniffi::Record)]
+#[derive(Debug, Clone, PartialEq, Default, uniffi::Record, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct VisualPaint {
     pub text: String,
     pub runs: Vec<VisualRun>,
@@ -85,7 +89,8 @@ pub struct VisualPaint {
 }
 
 /// How a surface takes touches.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub enum SurfaceGesture {
     /// Not interactive: drags scroll the transcript.
     None,
@@ -99,7 +104,8 @@ pub enum SurfaceGesture {
 }
 
 /// A region the worker redraws on its own (canvas, chart, scene, shader).
-#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+#[derive(Debug, Clone, PartialEq, uniffi::Record, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct VisualSurface {
     /// Stable across renders: frames and touches address it.
     pub id: u64,
@@ -110,7 +116,8 @@ pub struct VisualSurface {
     pub gesture: SurfaceGesture,
 }
 
-#[derive(Debug, Clone, PartialEq, uniffi::Enum)]
+#[derive(Debug, Clone, PartialEq, uniffi::Enum, serde::Serialize)]
+#[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum ControlKind {
     Button {
         primary: bool,
@@ -141,7 +148,8 @@ pub enum ControlKind {
 }
 
 /// A touch target over painted control art.
-#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+#[derive(Debug, Clone, PartialEq, uniffi::Record, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct VisualControl {
     /// Stable across renders.
     pub id: u64,
@@ -155,7 +163,8 @@ pub struct VisualControl {
 }
 
 /// A visual laid out at one width.
-#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+#[derive(Debug, Clone, PartialEq, uniffi::Record, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct VisualDisplay {
     pub revision: u64,
     pub width: f32,
@@ -170,7 +179,8 @@ pub struct VisualDisplay {
 
 /// Premultiplied BGRA8, top row first (CoreGraphics' native
 /// `byteOrder32Little | premultipliedFirst`).
-#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+#[derive(Debug, Clone, PartialEq, uniffi::Record, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct FrameImage {
     pub width: u32,
     pub height: u32,
@@ -179,7 +189,8 @@ pub struct FrameImage {
 
 /// A surface's latest picture: an image (scenes, shaders) under vector
 /// paint (canvas drawings, charts, scene labels), in surface coordinates.
-#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+#[derive(Debug, Clone, PartialEq, uniffi::Record, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SurfaceFrame {
     pub surface: u64,
     pub image: Option<FrameImage>,
@@ -187,7 +198,8 @@ pub struct SurfaceFrame {
     pub styles: Vec<StyleDesc>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub enum PointerPhase {
     Down,
     Move,
@@ -293,7 +305,6 @@ impl VisualHub {
         *self.source.lock().unwrap() = Some(Source { fetch, pixel_scale });
     }
 
-    #[cfg(test)]
     pub(crate) fn set_fetch(&self, fetch: Fetch, pixel_scale: f32) {
         *self.source.lock().unwrap() = Some(Source { fetch, pixel_scale });
     }

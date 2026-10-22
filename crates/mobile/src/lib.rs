@@ -7,6 +7,7 @@
 uniffi::setup_scaffolding!("rcode_core");
 
 mod client_ffi;
+mod flutter_visual;
 mod l10n;
 pub mod layout;
 pub mod visual;

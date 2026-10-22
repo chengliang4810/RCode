@@ -7616,11 +7616,13 @@ name = "rcode-mobile"
 version = "0.0.1-beta"
 dependencies = [
  "async-trait",
+ "base64 0.22.1",
  "rcode-client",
  "rcode-doc",
  "rcode-markdown",
  "rcode-presentation",
  "rcode-proto",
+ "rcode-rpc",
  "rcode-syntax",
  "rcode-text",
  "rcode-visual",

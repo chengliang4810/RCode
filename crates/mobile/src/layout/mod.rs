@@ -104,6 +104,12 @@ pub struct TextSystem {
     measurer: Option<Arc<dyn PlatformMeasurer>>,
 }
 
+impl TextSystem {
+    pub(crate) fn with_static_faces(faces: Vec<(FaceRole, &'static [u8])>, measurer: Option<Arc<dyn PlatformMeasurer>>) -> Arc<Self> {
+        Arc::new(Self { faces, measurer })
+    }
+}
+
 #[uniffi::export]
 impl TextSystem {
     #[uniffi::constructor]
