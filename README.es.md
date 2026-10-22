@@ -1,6 +1,6 @@
 # RCode
 
-Un agente de programación local: el agente se ejecuta dentro de este proceso y habla con el proveedor de modelos que configures. Las sesiones se quedan en este dispositivo: no hay cuenta y no se sube nada.
+Un agente de programación local: el agente se ejecuta dentro de este proceso y habla con el proveedor de modelos que configures. Las sesiones se guardan en este dispositivo. Las solicitudes al modelo se envían al proveedor configurado; no necesitas una cuenta de RCode.
 
 *[English](README.md) | [简体中文](README.zh-CN.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | Español*
 
@@ -14,7 +14,7 @@ Descarga la última versión para tu plataforma desde [GitHub Releases](https://
 - **Windows** — `rcode-windows-x86_64-setup.exe`
 - **Linux** — `rcode-linux-<arch>.tar.gz` y luego ejecuta el `install.sh` que incluye
 
-No necesitas cuenta ni conexión a internet; las sesiones se quedan en tu dispositivo. La app se actualiza sola.
+No necesitas una cuenta de RCode. El acceso al modelo y las actualizaciones usan la red; las sesiones se guardan localmente. La app se actualiza sola.
 
 ## Modo headless (CLI)
 
