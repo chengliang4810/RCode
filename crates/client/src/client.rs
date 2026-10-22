@@ -1,5 +1,9 @@
 //! [`Client`] — the account-scoped root object.
 
+#[cfg(test)]
+#[path = "direct_tests.rs"]
+mod direct_tests;
+
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
@@ -61,6 +65,7 @@ pub struct NewSession {
 pub(crate) enum Backend {
     Demo(Arc<DemoHost>),
     Live(Box<LiveBackend>),
+    Direct(Box<crate::direct::DirectBackend>),
 }
 
 pub(crate) struct ClientInner {
@@ -77,7 +82,7 @@ pub(crate) struct ClientInner {
     connectivity: RwLock<Connectivity>,
     path_online: AtomicBool,
     foreground: AtomicBool,
-    synced: AtomicBool,
+    pub(crate) synced: AtomicBool,
     harness_catalogs: Mutex<HashMap<String, Vec<HarnessInfo>>>,
 }
 
@@ -96,7 +101,7 @@ impl ClientInner {
     pub(crate) fn demo(&self) -> Option<&Arc<DemoHost>> {
         match self.backend() {
             Backend::Demo(demo) => Some(demo),
-            Backend::Live(_) => None,
+            Backend::Live(_) | Backend::Direct(_) => None,
         }
     }
 
@@ -107,7 +112,14 @@ impl ClientInner {
     pub(crate) fn live(&self) -> Option<&LiveBackend> {
         match self.backend.get()? {
             Backend::Live(live) => Some(live),
-            Backend::Demo(_) => None,
+            Backend::Demo(_) | Backend::Direct(_) => None,
+        }
+    }
+
+    pub(crate) fn direct(&self) -> Option<&crate::direct::DirectBackend> {
+        match self.backend.get()? {
+            Backend::Direct(direct) => Some(direct),
+            _ => None,
         }
     }
 
@@ -259,7 +271,23 @@ impl ClientInner {
         self: &Arc<Self>,
         f: impl FnOnce(&mut RegistryDoc) -> std::result::Result<R, rcode_doc::DocError>,
     ) -> Result<R> {
-        let result = self.workspace.mutate(f)?;
+        let result = if let Some(direct) = self.direct() {
+            if !direct.connected() {
+                return Err(ClientError::HostUnavailable("The server is disconnected".into()));
+            }
+            // Capture only this UI mutation. Incoming watch frames must not
+            // become writes sent back to the host between these snapshots.
+            let (before, result, after) = self.workspace.mutate(|doc| {
+                let before = doc.read_all()?;
+                let result = f(doc)?;
+                let after = doc.read_all()?;
+                Ok::<_, rcode_doc::DocError>((before, result, after))
+            })?;
+            direct.registry_written(&before, &after)?;
+            result
+        } else {
+            self.workspace.mutate(f)?
+        };
         self.after_registry_write();
         Ok(result)
     }
@@ -269,7 +297,11 @@ impl ClientInner {
     }
 
     pub(crate) fn recompute_connectivity(self: &Arc<Self>) {
-        let raw = match self.live() {
+        let raw = if let Some(direct) = self.direct() {
+            direct.update_presence(self);
+            RawConnectivity { path_offline: !self.network_online(), registry_connected: direct.connected(),
+                registry_retry_at_ms: None, last_failure: None, chat_rooms: Vec::new() }
+        } else { match self.live() {
             None => RawConnectivity {
                 path_offline: !self.network_online(),
                 registry_connected: true,
@@ -294,7 +326,7 @@ impl ClientInner {
                         .collect(),
                 }
             }
-        };
+        }};
         let next = lock(&self.connectivity_tracker).compute(&raw, now_ms());
         let changed = {
             let mut current = write(&self.connectivity);
@@ -427,6 +459,9 @@ impl ClientInner {
                         .stash(&meta, &attachment.data)
                         .map_err(|e| ClientError::Storage(e.to_string()))?;
                 }
+                if let Some(direct) = self.direct() {
+                    direct.stage(&reference, &name, &attachment.data)?;
+                }
                 self.attachment_cache
                     .put(device_id, &reference, Arc::new(attachment.data.clone()));
                 Ok(reference)
@@ -439,6 +474,7 @@ impl ClientInner {
     pub(crate) fn after_command(self: &Arc<Self>, core: &Arc<SessionCore>, has_attachments: bool) {
         match self.backend() {
             Backend::Demo(demo) => demo.on_command(&core.chat_id),
+            Backend::Direct(_) => core.refresh(),
             Backend::Live(live) => {
                 if has_attachments {
                     live.escorts.respawn_chat(self, &core.chat_id);
@@ -458,6 +494,13 @@ impl ClientInner {
         match self.backend() {
             Backend::Demo(demo) => demo.host_rpc(device_id, method, params).await,
             Backend::Live(live) => live.relay.call(device_id, method, params).await,
+            Backend::Direct(direct) => {
+                let mut params = params;
+                if let Some(map) = params.as_object_mut() {
+                    map.insert("targetDeviceId".into(), serde_json::json!(device_id));
+                }
+                direct.call(method, params).await
+            }
         }
     }
 
@@ -493,6 +536,10 @@ impl ClientInner {
     }
 
     fn tick(self: &Arc<Self>) {
+        if let Some(direct) = self.direct() {
+            direct.update_presence(self);
+            self.recompute_connectivity();
+        }
         if let Some(live) = self.live() {
             if let Some(presence) = live.presence() {
                 self.workspace.replace_presence(presence);
@@ -541,6 +588,13 @@ impl Client {
         if config.device_id.trim().is_empty() {
             return Err(ClientError::InvalidArgument("device_id is required".into()));
         }
+        if let Credentials::Direct { api_key } = &credentials {
+            crate::direct::websocket_url(&config.edge_url)?;
+            if api_key.len() < 8 || !api_key.bytes().all(|c| c.is_ascii_alphanumeric())
+                || !api_key.bytes().any(|c| c.is_ascii_alphabetic()) || !api_key.bytes().any(|c| c.is_ascii_digit()) {
+                return Err(ClientError::InvalidArgument("The API key must contain at least 8 letters and digits".into()));
+            }
+        }
         let events = EventPump::new(listener);
         let tokens = TokenProvider::new(&credentials);
         // Live: restore the registry replica + open the docs store first, so
@@ -587,7 +641,9 @@ impl Client {
                 inner.synced.store(true, Ordering::Release);
                 Backend::Demo(demo)
             }
-            _ => Backend::Live(Box::new({
+            Credentials::Direct { .. } => Backend::Direct(Box::new(crate::direct::DirectBackend::new(
+                &inner, store.ok_or_else(|| ClientError::Internal("docs store missing".into()))?))),
+            Credentials::Paired { .. } => Backend::Live(Box::new({
                 catalog::DiskCatalog::new(&inner.config.data_dir).warm_labels();
                 LiveBackend::new(
                     &inner,
@@ -600,6 +656,7 @@ impl Client {
         inner.recompute_workspace();
         match inner.backend() {
             Backend::Demo(demo) => demo.start(&inner, inner.cancel.clone()),
+            Backend::Direct(direct) => direct.start(&inner),
             Backend::Live(live) => {
                 live.start(&inner);
                 inner.recompute_connectivity();
@@ -650,6 +707,10 @@ impl Client {
     pub fn shutdown(&self) {
         match self.inner.backend() {
             Backend::Demo(demo) => demo.stop(),
+            Backend::Direct(direct) => {
+                for core in self.inner.cores() { direct.persist_session(&core); }
+                direct.stop();
+            }
             Backend::Live(live) => {
                 live.flush_registry(&self.inner);
                 live.stop();
@@ -799,6 +860,9 @@ impl Client {
         {
             tracing::debug!(error = %err, "local chat snapshot delete failed");
         }
+        if let Some(direct) = self.inner.direct() {
+            let _ = direct.store.delete_snapshot(chat_id);
+        }
         Ok(())
     }
 
@@ -833,6 +897,10 @@ impl Client {
     fn pin_change(&self, change: SidebarPinChange) -> Result<()> {
         if !self.workspace().pins_ready {
             return Err(ClientError::Unsupported("pins are not synced yet".into()));
+        }
+        if let Some(direct) = self.inner.direct() {
+            direct.enqueue(rcode_rpc::methods::MUTATE,
+                serde_json::json!({"op":"changeSidebarPin","change":change}), None, None)?;
         }
         self.inner
             .registry_write(|doc| doc.change_sidebar_pin(&change))
@@ -1056,6 +1124,10 @@ impl Client {
         }
         let (doc, cursor, hydrated) = match self.inner.backend() {
             Backend::Demo(demo) => (demo.session_doc(chat_id)?, 0, true),
+            Backend::Direct(direct) => {
+                let local = crate::live::room::load_local(&direct.store, chat_id);
+                (local.doc, local.cursor, local.had_content)
+            }
             Backend::Live(live) => {
                 let local = crate::live::room::load_local(&live.store, chat_id);
                 (local.doc, local.cursor, local.had_content)
@@ -1118,11 +1190,9 @@ impl Client {
     pub async fn list_harnesses(&self, device_id: &str) -> Vec<HarnessInfo> {
         let list = match self.inner.backend() {
             Backend::Demo(demo) => demo.list_harnesses(device_id).await,
-            Backend::Live(live) => {
+            Backend::Live(_) | Backend::Direct(_) => {
                 let cache = catalog::DiskCatalog::new(&self.inner.config.data_dir);
-                let reply = live
-                    .relay
-                    .call(
+                let reply = self.inner.host_rpc(
                         device_id,
                         rcode_rpc::methods::LIST_HARNESSES,
                         serde_json::json!({}),
@@ -1161,11 +1231,9 @@ impl Client {
     pub async fn list_models(&self, device_id: &str, harness: &str) -> Vec<ModelInfo> {
         match self.inner.backend() {
             Backend::Demo(demo) => demo.list_models(harness).await,
-            Backend::Live(live) => {
+            Backend::Live(_) | Backend::Direct(_) => {
                 let cache = catalog::DiskCatalog::new(&self.inner.config.data_dir);
-                let reply = live
-                    .relay
-                    .call(
+                let reply = self.inner.host_rpc(
                         device_id,
                         rcode_rpc::methods::LIST_MODELS,
                         serde_json::json!({ "harness": harness }),
@@ -1265,10 +1333,8 @@ impl Client {
     pub async fn list_refs(&self, device_id: &str, repo_path: &str) -> Result<Vec<RepoRef>> {
         match self.inner.backend() {
             Backend::Demo(demo) => demo.list_refs(repo_path).await,
-            Backend::Live(live) => {
-                let value = live
-                    .relay
-                    .call(
+            Backend::Live(_) | Backend::Direct(_) => {
+                let value = self.inner.host_rpc(
                         device_id,
                         rcode_rpc::methods::LIST_REFS,
                         serde_json::json!({ "repoPath": repo_path }),
@@ -1312,10 +1378,8 @@ impl Client {
                     })
                     .collect())
             }
-            Backend::Live(live) => {
-                let value = live
-                    .relay
-                    .call(
+            Backend::Live(_) | Backend::Direct(_) => {
+                let value = self.inner.host_rpc(
                         device_id,
                         rcode_rpc::methods::SEARCH_FILES,
                         serde_json::json!({ "query": query, "chatId": chat_id, "spaceId": space_id }),
@@ -1334,14 +1398,12 @@ impl Client {
     ) -> Result<FolderListing> {
         match self.inner.backend() {
             Backend::Demo(demo) => demo.list_folders(device_id, path).await,
-            Backend::Live(live) => {
+            Backend::Live(_) | Backend::Direct(_) => {
                 let params = match path.filter(|p| !p.is_empty()) {
                     Some(path) => serde_json::json!({ "path": path }),
                     None => serde_json::json!({}),
                 };
-                let value = live
-                    .relay
-                    .call(device_id, rcode_rpc::methods::LIST_FOLDERS, params)
+                let value = self.inner.host_rpc(device_id, rcode_rpc::methods::LIST_FOLDERS, params)
                     .await?;
                 serde_json::from_value(value).map_err(|e| ClientError::HostError(e.to_string()))
             }
@@ -1352,9 +1414,7 @@ impl Client {
     pub async fn switch_ref(&self, device_id: &str, repo_path: &str, ref_name: &str) -> Result<()> {
         match self.inner.backend() {
             Backend::Demo(demo) => demo.switch_ref(repo_path, ref_name).await,
-            Backend::Live(live) => live
-                .relay
-                .call(
+            Backend::Live(_) | Backend::Direct(_) => self.inner.host_rpc(
                     device_id,
                     rcode_rpc::methods::SWITCH_REF,
                     serde_json::json!({ "repoPath": repo_path, "refName": ref_name }),
@@ -1374,14 +1434,12 @@ impl Client {
     ) -> Result<String> {
         match self.inner.backend() {
             Backend::Demo(demo) => demo.create_worktree(repo_path, branch).await,
-            Backend::Live(live) => {
+            Backend::Live(_) | Backend::Direct(_) => {
                 let mut params = serde_json::json!({ "repoPath": repo_path, "branch": branch });
                 if !space_id.is_empty() {
                     params["spaceId"] = serde_json::Value::String(space_id.to_owned());
                 }
-                let value = live
-                    .relay
-                    .call(device_id, rcode_rpc::methods::CREATE_WORKTREE, params)
+                let value = self.inner.host_rpc(device_id, rcode_rpc::methods::CREATE_WORKTREE, params)
                     .await?;
                 value
                     .get("path")
@@ -1410,6 +1468,11 @@ impl Client {
                 demo.upload(&self.inner, device_id, name, data, progress)
                     .await
             }
+            Backend::Direct(direct) => {
+                let path = direct.upload(&attachments::upload_file_name(name), &data, progress).await?;
+                self.inner.attachment_cache.put(device_id, &path, Arc::new(data));
+                Ok(path)
+            }
             Backend::Live(live) => {
                 let upload_id = crate::new_id();
                 let file_name = attachments::upload_file_name(name);
@@ -1433,6 +1496,7 @@ impl Client {
         }
         let bytes = match self.inner.backend() {
             Backend::Demo(demo) => demo.read_attachment(path)?,
+            Backend::Direct(direct) => Arc::new(direct.read_attachment(path).await?),
             Backend::Live(live) => Arc::new(live.relay.read_attachment(device_id, path).await?),
         };
         self.inner
@@ -1453,6 +1517,9 @@ impl Client {
         }
         if was != online {
             self.inner.recompute_connectivity();
+            if online && let Some(direct) = self.inner.direct() {
+                direct.reconnect_now();
+            }
             if online && let Some(live) = self.inner.live() {
                 live.kick();
                 self.kick_rooms();
@@ -1465,6 +1532,7 @@ impl Client {
     /// restart PR watches.
     pub fn on_foreground(&self) {
         self.inner.foreground.store(true, Ordering::Release);
+        if let Some(direct) = self.inner.direct() { direct.reconnect_now(); }
         if let Some(live) = self.inner.live() {
             live.kick();
             live.probe_health();
@@ -1482,9 +1550,9 @@ impl Client {
         if let Some(live) = self.inner.live() {
             live.relay.stop_watches();
             live.flush_registry(&self.inner);
-            for core in self.inner.cores() {
-                core.flush();
-            }
+        }
+        for core in self.inner.cores() {
+            core.flush();
         }
     }
 

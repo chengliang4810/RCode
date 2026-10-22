@@ -282,6 +282,9 @@ impl SessionCore {
 
     /// Drop the room (deleted chat): its tasks stop and it flushes once.
     pub(crate) fn close_room(&self) {
+        if self.client().is_ok_and(|client| client.direct().is_some()) {
+            self.tasks.cancel();
+        }
         let room = lock(&self.room).take();
         drop(room);
     }
@@ -289,6 +292,10 @@ impl SessionCore {
     /// Live: join the chat's chat2 room once its row says it's dialable
     /// (roomGen ≥ 2). Idempotent.
     pub(crate) fn ensure_room(self: &Arc<Self>, client: &Arc<ClientInner>) {
+        if let Some(direct) = client.direct() {
+            direct.watch_session(client, self);
+            return;
+        }
         let Some(live) = client.live() else { return };
         if lock(&self.room).is_some() {
             return;
@@ -356,6 +363,9 @@ impl SessionCore {
 
     /// Persist the doc now (backgrounding).
     pub(crate) fn flush(&self) {
+        if let Ok(client) = self.client() && let Some(direct) = client.direct() {
+            direct.persist_session(self);
+        }
         if let Some(room) = self.room() {
             room.flush();
         }
@@ -363,6 +373,21 @@ impl SessionCore {
 
     pub(crate) fn doc(&self) -> &Arc<SessionDoc> {
         &self.doc
+    }
+
+    pub(crate) fn direct_cancel(&self) -> tokio_util::sync::CancellationToken { self.tasks.clone() }
+
+    pub(crate) fn direct_failure(&self, command_id: Option<&str>, error: &str) {
+        {
+            let mut state = lock(&self.state);
+            state.queue_error = Some(error.to_owned());
+            if let Some(id) = command_id {
+                if let Some(command) = state.commands.iter_mut().find(|c| c.id == id) {
+                    command.status = SessionCommandStatus::Rejected;
+                }
+            }
+        }
+        self.refresh();
     }
 
     fn client(&self) -> Result<Arc<ClientInner>> {
@@ -597,6 +622,13 @@ impl SessionCore {
             resolution: None,
         };
         let id = entry.id.clone();
+        let client = self.client()?;
+        if let Some(direct) = client.direct() {
+            direct.command(&self.chat_id, &entry)?;
+            lock(&self.state).commands.push(entry);
+            self.refresh();
+            return Ok(id);
+        }
         self.write(|doc| doc.queue_command(&entry))?;
         Ok(id)
     }
@@ -1135,6 +1167,13 @@ impl SessionHandle {
         item.hold_for_turn_end = hold_for_turn_end;
         item.issued_at = now_ms();
         let id = item.id.clone();
+        let client = self.core.client()?;
+        if let Some(direct) = client.direct() {
+            direct.enqueue(rcode_rpc::methods::QUEUE_MESSAGE,
+                serde_json::json!({"chatId":self.core.chat_id,"text":text,"attachments":item.attachments,"holdForTurnEnd":hold_for_turn_end}),
+                Some(self.core.chat_id.clone()), None)?;
+            return Ok(id);
+        }
         self.core.write(|doc| doc.push_queued(&item))?;
         Ok(id)
     }
@@ -1163,6 +1202,13 @@ impl SessionHandle {
     /// Move a queue row to `to` (clamped). Rows under a delivery gate or with
     /// an action in flight don't move.
     pub fn move_queued(&self, id: &str, to: usize) -> Result<bool> {
+        let client = self.core.client()?;
+        if let Some(direct) = client.direct() {
+            direct.enqueue(rcode_rpc::methods::MOVE_QUEUED_MESSAGE,
+                serde_json::json!({"chatId":self.core.chat_id,"id":id,"toIndex":to}),
+                Some(self.core.chat_id.clone()), None)?;
+            return Ok(true);
+        }
         {
             let st = lock(&self.core.state);
             let row = st.queue.iter().find(|q| q.id == id);

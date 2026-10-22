@@ -63,6 +63,13 @@ impl WorkspaceStore {
         f(&mut lock(&self.doc))
     }
 
+    /// A direct host snapshot has its own generation counter, which can equal
+    /// the preceding replica's. Invalidate the materialized rows explicitly.
+    pub(crate) fn replace(&self, doc: RegistryDoc) {
+        *lock(&self.doc) = doc;
+        *lock(&self.cache) = None;
+    }
+
     /// Materialized rows + sidebar prefs, re-read only when the replica's
     /// generation moved.
     pub(crate) fn state(&self) -> (Arc<WorkspaceState>, Option<SidebarPreferences>) {
