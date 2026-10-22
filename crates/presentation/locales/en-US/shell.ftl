@@ -198,6 +198,8 @@ shell-status-done = Done
 shell-status-idle = Idle
 # The pin write was refused because the registry snapshot has not arrived yet.
 shell-pins-syncing = Pins are still syncing
+shell-pin = Pin
+shell-unpin = Unpin
 shell-remote-session = Remote session
 shell-files-fallback-title = Files
 shell-unrelated-archive-error = Unrelated archive error

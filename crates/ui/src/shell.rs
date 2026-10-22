@@ -9963,7 +9963,13 @@ impl Shell {
                             this.set_chat_pinned(pin_id.clone(), !is_pinned, cx)
                         }))
                         .child(icon(icons::PIN).size(px(16.0)).text_color(theme.text_muted))
-                        .child(SharedString::from(if is_pinned { "Unpin" } else { "Pin" }));
+                        .child(SharedString::from(crate::l10n::localizer().text(
+                            if is_pinned {
+                                TextKey::ShellUnpin
+                            } else {
+                                TextKey::ShellPin
+                            },
+                        )));
                     let archive =
                         popover::menu_row(&theme, false, format!("chat-menu-archive-{chat_id}"))
                             .id("chat-menu-archive")

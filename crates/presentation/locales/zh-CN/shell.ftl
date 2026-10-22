@@ -98,7 +98,7 @@ shell-exit-busy-confirm = 仍要关闭
 # 侧边栏与工作区操作：此前没有本地化字符串。
 shell-onboarding-add-project = 添加一个项目开始使用
 shell-onboarding-add-project-detail = 项目是你某个设备上的一个文件夹。
-shell-drop-to-unpin = 拖到这里取消固定
+shell-drop-to-unpin = 拖到这里取消置顶
 shell-star-on-github = 在 GitHub 上加星
 shell-scroll-to-bottom = 滚动到底部
 shell-run-failed = 运行失败
@@ -187,8 +187,10 @@ shell-status-failed = 失败
 shell-status-queued = 排队中
 shell-status-done = 完成
 shell-status-idle = 空闲
-# 固定写入被拒绝：注册表快照还没到达。
-shell-pins-syncing = 固定项仍在同步
+# 置顶写入被拒绝：注册表快照还没到达。
+shell-pins-syncing = 置顶列表仍在同步
+shell-pin = 置顶
+shell-unpin = 取消置顶
 shell-remote-session = 远程会话
 shell-files-fallback-title = 文件
 shell-unrelated-archive-error = 无关的归档错误
@@ -231,7 +233,7 @@ shell-tabs-hide-session-details = 隐藏会话详情
 shell-tabs-show-session-details = 显示会话详情
 shell-tabs-hide-pull-requests = 隐藏拉取请求面板
 shell-tabs-show-pull-requests = 显示拉取请求面板
-shell-pinned = 已固定
+shell-pinned = 置顶
 shell-archived = 已归档
 shell-new-chat-in-project = 在项目中新建会话
 shell-clear-project-filter-to-rename = 清除项目筛选后才能重命名此会话
