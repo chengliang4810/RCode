@@ -93,6 +93,12 @@ extension RCodeThemeContext on BuildContext {
   RCodeColors get colors => Theme.of(this).extension<RCodeColors>()!;
 }
 
+const rcodeFontFallbacks = [
+  'PingFang SC',
+  'Noto Sans CJK SC',
+  'Microsoft YaHei',
+];
+
 ThemeData rcodeTheme(Brightness brightness) {
   final c = brightness == Brightness.dark
       ? RCodeColors.dark
@@ -109,6 +115,7 @@ ThemeData rcodeTheme(Brightness brightness) {
     brightness: brightness,
     colorScheme: scheme,
     fontFamily: 'Geist',
+    fontFamilyFallback: rcodeFontFallbacks,
     scaffoldBackgroundColor: c.background,
     extensions: [c],
     splashFactory: NoSplash.splashFactory,
@@ -120,6 +127,7 @@ ThemeData rcodeTheme(Brightness brightness) {
       centerTitle: true,
       titleTextStyle: TextStyle(
         fontFamily: 'Geist',
+        fontFamilyFallback: rcodeFontFallbacks,
         fontSize: 17,
         fontWeight: FontWeight.w600,
         color: c.text,
