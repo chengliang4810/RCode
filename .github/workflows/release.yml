@@ -250,4 +250,5 @@ jobs:
           files: |
             dist/*
           generate_release_notes: true
-          prerelease: ${{ contains(needs.verify.outputs.version, '-') }}
+          prerelease: false
+          make_latest: true

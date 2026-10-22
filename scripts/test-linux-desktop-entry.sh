@@ -12,17 +12,24 @@ WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 VERSION=9.9.9
 fail() { echo "FAIL: $*" >&2; exit 1; }
+# Git Bash keeps curl in mingw64/bin; its native curl also needs a Windows
+# file URL. Linux/macOS continue to use their usual POSIX file paths.
+CURL_DIR="$(dirname "$(command -v curl)")"
+SITE_URL="file://$WORK/site"
+if command -v cygpath >/dev/null 2>&1; then
+  SITE_URL="file:///$(cygpath -m "$WORK/site")"
+fi
 
 # A fake release: the tarball layout package-linux.sh produces, minus the real
 # binary. `uname` is shimmed so the curl installer also runs on a macOS dev box.
 PKG="rcode-$VERSION-linux-x86_64"
-mkdir -p "$WORK/site/releases" "$WORK/pkg/$PKG" "$WORK/shim"
+mkdir -p "$WORK/site" "$WORK/pkg/$PKG" "$WORK/shim"
 printf '#!/bin/sh\nexit 0\n' >"$WORK/pkg/$PKG/rcode"
 chmod 755 "$WORK/pkg/$PKG/rcode"
 cp "$ROOT/dist/rcode.desktop" "$WORK/pkg/$PKG/rcode.desktop"
 printf 'not-really-a-png' >"$WORK/pkg/$PKG/rcode.png"
-echo "$VERSION" >"$WORK/site/releases/latest.txt"
-tar -czf "$WORK/site/releases/$PKG.tar.gz" -C "$WORK/pkg" "$PKG"
+echo "$VERSION" >"$WORK/site/latest.txt"
+tar -czf "$WORK/site/$PKG.tar.gz" -C "$WORK/pkg" "$PKG"
 printf '#!/bin/sh\ncase "$1" in -s) echo Linux ;; -m) echo x86_64 ;; *) exec /usr/bin/uname "$@" ;; esac\n' >"$WORK/shim/uname"
 chmod 755 "$WORK/shim/uname"
 
@@ -43,8 +50,8 @@ fn_body() { sed -n '/^install_desktop_entry() {$/,/^}$/p' "$1"; }
 mkdir -p "$WORK/tmp"
 run_curl() {
   local home="$1"; shift
-  env -i HOME="$home" USER=tester PATH="$WORK/shim:/usr/bin:/bin" TMPDIR="$WORK/tmp" "$@" \
-    RCODE_BASE_URL="file://$WORK/site" sh "$ROOT/dist/install.sh" >"$WORK/out.log" 2>&1 \
+  env -i HOME="$home" USER=tester SYSTEMROOT="${SYSTEMROOT:-}" PATH="$WORK/shim:$CURL_DIR:/usr/bin:/bin" TMPDIR="$WORK/tmp" "$@" \
+    RCODE_BASE_URL="$SITE_URL" sh "$ROOT/dist/install.sh" >"$WORK/out.log" 2>&1 \
     || { cat "$WORK/out.log" >&2; fail "curl installer exited non-zero"; }
   [ -z "$(ls -A "$WORK/tmp")" ] || fail "curl installer left files in TMPDIR: $(ls -A "$WORK/tmp")"
 }

@@ -1,6 +1,6 @@
 # cargo-nextest settings for CI (pass with --config-file).
 #
-# Two tests are timing-sensitive and fail now and then when nextest runs many tests
+# One test is timing-sensitive and fails now and then when nextest runs many tests
 # at once (the old `cargo test` runs were serial per binary, and the UI run was
 # `--test-threads=1` in the release profile). nextest reports a pass-on-retry as
 # FLAKY, so these stay visible in the log. Remove an override once its test is fixed.
@@ -13,12 +13,4 @@
 # reuse.
 [[profile.default.overrides]]
 filter = 'package(rcode-ui) & test(bootstrap_reports_local_assembly_failure_before_returning_a_handle)'
-retries = 2
-
-# rcode-harness `opencode::mcp_injection_tests::mcp_injection_reaches_isolated_server_processes`
-# starts `node` fixture scripts and `binary_version` gives each `--version` probe 2 s;
-# on a loaded 4-core runner the probe occasionally times out ("cannot determine
-# opencode version for MCP configuration").
-[[profile.default.overrides]]
-filter = 'package(rcode-harness) & test(mcp_injection_reaches_isolated_server_processes)'
 retries = 2

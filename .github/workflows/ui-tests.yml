@@ -35,8 +35,7 @@ concurrency:
 
 jobs:
   # Every Linux Rust test that is not UI: one build, one nextest run (see
-  # scripts/ci/test-core.sh). Replaces session-sync-regressions and the Rust
-  # steps of preview-tests.
+  # scripts/ci/test-core.sh), including local preview networking coverage.
   core-tests:
     runs-on: ubuntu-24.04
     timeout-minutes: 30

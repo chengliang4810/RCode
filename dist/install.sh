@@ -6,12 +6,8 @@
 # Installs the native binary (requires the system ALSA runtime) to
 # ~/.rcode/app, puts `rcode` on PATH, adds a launcher entry and icon under
 # $XDG_DATA_HOME (default ~/.local/share), and runs it as a local-only
-# systemd user service that survives reboots. Signing in is optional and
-# enables sync after a restart. Re-running
-# upgrades in place; ~/.rcode state is preserved.
-#
-# The binary ships with production endpoints baked in: no RCODE_EDGE_URL or
-# client-id configuration needed. Overrides (if any) go in ~/.rcode/env.
+# systemd user service that survives reboots. Re-running upgrades in place;
+# ~/.rcode state is preserved. Model providers are configured in RCode.
 set -eu
 
 BASE="${RCODE_BASE_URL:-https://github.com/chengliang4810/RCode/releases/latest/download}"
@@ -23,7 +19,7 @@ case "$os" in
   Linux) plat=linux ;;
   Darwin)
     echo "rcode install: on macOS, download the desktop app instead:" >&2
-    echo "  $BASE/releases/latest.txt → $BASE/releases/rcode-<version>-macos-arm64.dmg" >&2
+    echo "  $BASE/latest.txt → $BASE/rcode-<version>-macos-arm64.dmg" >&2
     exit 1
     ;;
   *)
@@ -41,7 +37,7 @@ case "$arch" in
 esac
 
 # --- download ----------------------------------------------------------------
-ver="$(curl -fsSL "$BASE/releases/latest.txt" | tr -d '[:space:]')"
+ver="$(curl -fsSL "$BASE/latest.txt" | tr -d '[:space:]')"
 [ -n "$ver" ] || { echo "rcode install: could not resolve latest version" >&2; exit 1; }
 file="rcode-$ver-$plat-$arch.tar.gz"
 data_root="$HOME/.rcode"
@@ -54,7 +50,7 @@ else
   tmp="$(mktemp -d)"
   trap 'rm -rf "$tmp"' EXIT
   echo "downloading rcode $ver ($plat-$arch)…"
-  curl -fSL --progress-bar "$BASE/releases/$file" -o "$tmp/$file"
+  curl -fSL --progress-bar "$BASE/$file" -o "$tmp/$file"
   mkdir -p "$dest"
   tar -xzf "$tmp/$file" -C "$dest" --strip-components=1
 fi
@@ -138,8 +134,8 @@ install_desktop_entry "$dest" "$app_root" \
   || echo "warn: could not install the desktop entry — RCode won't appear in application launchers"
 
 # --- service -----------------------------------------------------------------
-# The daemon is useful before auth: without a saved session it serves the local
-# profile. Login only changes which profile the next daemon start selects.
+# The daemon serves the local profile. Provider credentials are configured
+# inside RCode.
 
 service=manual
 if command -v systemctl >/dev/null 2>&1 && [ -n "${XDG_RUNTIME_DIR:-}" ]; then
@@ -172,10 +168,6 @@ else
   echo "warn: systemd user session not available — run the engine manually with: rcode headless"
 fi
 
-# --- agent CLIs ---------------------------------------------------------------
-command -v claude >/dev/null 2>&1 || \
-  echo "note: Claude Code CLI not found — install it with: curl -fsSL https://claude.ai/install.sh | bash"
-
 case ":$PATH:" in
   *":$HOME/.local/bin:"*) path_hint="" ;;
   *) path_hint=' (add ~/.local/bin to your PATH)' ;;
@@ -186,16 +178,10 @@ echo "✓ rcode $ver installed$path_hint"
 echo ""
 case "$service" in
   running)
-    echo "the engine is running with the new version (local-only unless sync is enabled)."
+    echo "the local engine is running with the new version."
     echo "  systemctl --user status rcode    check the service"
-    echo ""
-    echo "optional sync (local sessions stay local):"
-    echo "  systemctl --user stop rcode"
-    echo "  rcode login"
-    echo "  systemctl --user restart rcode"
     ;;
   manual)
     echo "next: run the local-only engine with \`rcode headless\`."
-    echo "optional sync: run \`rcode login\` before starting the engine."
     ;;
 esac

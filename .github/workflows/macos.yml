@@ -7,10 +7,10 @@ on:
       - 'Cargo.lock'
       - 'rust-toolchain.toml'
       - 'crates/**'
-      - 'edge/**'
       - 'scripts/run-macos-browser-fixture.sh'
       - 'scripts/test-browser-storage.py'
       - 'scripts/ci/run-macos-fixture.sh'
+      - 'scripts/fixtures/preview-server/**'
       - 'dist/macos/Info.plist'
       - 'apps/ios/**'
       - '.github/workflows/macos.yml'
@@ -21,10 +21,10 @@ on:
       - 'Cargo.lock'
       - 'rust-toolchain.toml'
       - 'crates/**'
-      - 'edge/**'
       - 'scripts/run-macos-browser-fixture.sh'
       - 'scripts/test-browser-storage.py'
       - 'scripts/ci/run-macos-fixture.sh'
+      - 'scripts/fixtures/preview-server/**'
       - 'dist/macos/Info.plist'
       - 'apps/ios/**'
       - '.github/workflows/macos.yml'
@@ -146,14 +146,16 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 24
+          cache: npm
+          cache-dependency-path: scripts/fixtures/preview-server/package-lock.json
       - name: Install preview fixture server
-        run: npm ci --prefix edge
+        run: npm ci --prefix scripts/fixtures/preview-server
       - name: Project discovery, stable URLs and HMR in native WebKit
         timeout-minutes: 5
         env:
           RCODE_PREVIEW_AUTO_OPEN: 1
         run: |
-          VITE_BINARY="$GITHUB_WORKSPACE/edge/node_modules/vite/bin/vite.js" scripts/ci/run-macos-fixture.sh target/debug/examples/preview-fixture "$RUNNER_TEMP/preview-captures"
+          VITE_BINARY="$GITHUB_WORKSPACE/scripts/fixtures/preview-server/node_modules/vite/bin/vite.js" scripts/ci/run-macos-fixture.sh target/debug/examples/preview-fixture "$RUNNER_TEMP/preview-captures"
           test -f "$RUNNER_TEMP/preview-captures/result.txt"
       - name: Upload preview screenshots
         if: always()

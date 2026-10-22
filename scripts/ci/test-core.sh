@@ -1,8 +1,6 @@
 #!/usr/bin/env bash
-# The Linux Rust tests that used to run as separate `cargo test` invocations in
-# session-sync-regressions and preview-tests, as ONE
-# build and ONE nextest run (separate invocations recompiled the same
-# dependency graph with different feature sets).
+# Core Linux Rust tests in one build and one nextest run, shared by pull-request
+# CI and the scheduled release-profile checks.
 #
 # Coverage:
 #   rcode-harness  every test binary (globbed below)

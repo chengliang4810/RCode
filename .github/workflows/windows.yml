@@ -86,9 +86,9 @@ jobs:
       - uses: ./.github/actions/windows-ci-setup
       - name: Worktree path compatibility
         run: |
-          cargo test --release --locked -p the original app-proto --lib device_paths
+          cargo test --release --locked -p rcode-proto --lib device_paths
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cargo test --release --locked -p the original app-engine --test worktree_on_run worktree_location_
+          cargo test --release --locked -p rcode-engine --test worktree_on_run worktree_location_
       - name: Engine unit tests
         run: cargo test --release --locked -p rcode-engine --lib
       # The engine's integration targets. The old `--test auth` went away with
