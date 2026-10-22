@@ -38,6 +38,7 @@ use fluent_bundle::{FluentArgs, FluentResource};
 use unic_langid::LanguageIdentifier;
 
 pub mod assessment;
+pub mod statistics;
 pub mod time;
 pub mod tools;
 pub mod workspace;

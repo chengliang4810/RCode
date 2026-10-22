@@ -12,6 +12,37 @@ use std::{cell::Cell, rc::Rc, time::Duration};
 
 const STAT_PADDING: f32 = 6.0;
 
+/// The same remembered labels used by the model picker, refreshed by catalog loads.
+#[derive(Default, Clone)]
+struct ModelLabels(std::collections::HashMap<String, String>);
+impl gpui::Global for ModelLabels {}
+
+pub(crate) fn remember_model_labels<'a>(
+    labels: impl Iterator<Item = (&'a str, &'a str)>,
+    cx: &mut gpui::App,
+) {
+    let mut cache = cx.try_global::<ModelLabels>().cloned().unwrap_or_default();
+    let mut changed = false;
+    for (id, label) in labels {
+        if !label.trim().is_empty() && cache.0.get(id).map(String::as_str) != Some(label) {
+            cache.0.insert(id.to_owned(), label.to_owned());
+            changed = true;
+        }
+    }
+    if changed {
+        cx.set_global(cache);
+    }
+}
+
+impl ModelLabels {
+    fn resolve(&self, ids: &[String]) -> String {
+        ids.iter()
+            .map(|id| self.0.get(id).unwrap_or(id).as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+}
+
 #[derive(Clone, PartialEq)]
 pub struct StatData {
     align: placement::Align,
@@ -20,39 +51,23 @@ pub struct StatData {
     icon: &'static str,
     total: Option<String>,
     rows: Vec<(String, String)>,
+    models: Vec<String>,
 }
 
 fn text(key: TextKey) -> String {
     crate::l10n::localizer().text(key)
 }
 
-fn exact(value: u64) -> String {
-    let digits = value.to_string();
-    let mut result = String::new();
-    for (i, ch) in digits.chars().enumerate() {
-        if i > 0 && (digits.len() - i) % 3 == 0 {
-            result.push(',');
-        }
-        result.push(ch);
-    }
-    format!("{result} tok")
-}
-
 fn compact(value: u64) -> String {
-    if value >= 1_000_000 {
-        format!("{:.1}M tok", value as f64 / 1_000_000.0)
-    } else if value >= 1_000 {
-        format!("{:.1}K tok", value as f64 / 1_000.0)
-    } else {
-        format!("{value} tok")
-    }
+    rcode_presentation::statistics::tokens(crate::l10n::localizer(), value)
 }
 
 fn duration(ms: u64) -> String {
-    crate::l10n::localizer().format_with(
-        TextKey::ConversationStatsSeconds,
-        &[("seconds", &format!("{:.1}", ms as f64 / 1000.0))],
-    )
+    rcode_presentation::statistics::duration(crate::l10n::localizer(), ms)
+}
+
+fn token_rate(value: f64) -> String {
+    rcode_presentation::statistics::token_rate(crate::l10n::localizer(), value)
 }
 
 fn percent(value: f64) -> String {
@@ -81,7 +96,7 @@ impl StatData {
                 ("steps", &stats.calls.to_string()),
             ],
         );
-        let speed = stats.tokens_per_second().map(|v| format!("{v:.0} tok/s"));
+        let speed = stats.tokens_per_second().map(token_rate);
         if let Some(speed) = &speed {
             label.push_str(&format!(" · {speed}"));
         }
@@ -105,6 +120,7 @@ impl StatData {
             icon: crate::icons::USAGE_GAUGE,
             total: None,
             rows,
+            models: Vec::new(),
         })
     }
 
@@ -150,16 +166,16 @@ impl StatData {
         } else {
             stats.input_tokens
         };
-        rows.push((text(input_label), exact(uncached)));
+        rows.push((text(input_label), compact(uncached)));
         if let Some(read) = stats.cache_read_tokens {
-            rows.push((text(TextKey::ConversationStatsCacheRead), exact(read)));
+            rows.push((text(TextKey::ConversationStatsCacheRead), compact(read)));
         }
         if let Some(write) = stats.cache_write_tokens.filter(|write| *write > 0) {
-            rows.push((text(TextKey::ConversationStatsCacheWrite), exact(write)));
+            rows.push((text(TextKey::ConversationStatsCacheWrite), compact(write)));
         }
         rows.push((
             text(TextKey::ConversationStatsOutput),
-            exact(stats.output_tokens),
+            compact(stats.output_tokens),
         ));
         if let Some(hit) = hit {
             rows.push((text(TextKey::ConversationStatsCacheHit), format!("{hit}%")));
@@ -173,13 +189,14 @@ impl StatData {
             },
             label,
             icon: crate::icons::USAGE_TOKENS,
-            total: Some(exact(total)),
+            total: Some(compact(total)),
             rows,
+            models: stats.models.clone(),
         })
     }
 }
 
-fn card(data: &StatData, theme: &Theme) -> gpui::Div {
+fn card(data: &StatData, theme: &Theme, cx: &gpui::App) -> gpui::Div {
     popover::popover_card(theme)
         .w(px(300.0))
         .p(px(12.0))
@@ -207,7 +224,14 @@ fn card(data: &StatData, theme: &Theme) -> gpui::Div {
                 .children(data.total.clone()),
         )
         .child(popover::picker_divider())
-        .children(data.rows.iter().map(|(key, value)| {
+        .children(data.rows.iter().enumerate().map(|(index, (key, value))| {
+            let value = if index == 0 && !data.models.is_empty() {
+                cx.try_global::<ModelLabels>()
+                    .map(|labels| labels.resolve(&data.models))
+                    .unwrap_or_else(|| value.clone())
+            } else {
+                value.clone()
+            };
             div()
                 .flex()
                 .items_start()
@@ -220,7 +244,7 @@ fn card(data: &StatData, theme: &Theme) -> gpui::Div {
                         .text_color(theme.text_muted)
                         .child(key.clone()),
                 )
-                .child(div().min_w_0().text_right().child(value.clone()))
+                .child(div().min_w_0().text_right().child(value))
         }))
 }
 
@@ -230,18 +254,24 @@ pub struct StatControl {
     hovered: bool,
     show_task: Option<Task<()>>,
     hide_task: Option<Task<()>>,
+    #[cfg(feature = "appshots-fixture")]
+    fixture_pinned: bool,
     bounds: PanelBounds,
     panel_bounds: PanelBounds,
 }
 
 impl StatControl {
-    pub fn new(data: StatData, _cx: &mut Context<Self>) -> Self {
+    pub fn new(data: StatData, cx: &mut Context<Self>) -> Self {
+        cx.observe_global::<ModelLabels>(|_, cx| cx.notify())
+            .detach();
         Self {
             data,
             open: false,
             hovered: false,
             show_task: None,
             hide_task: None,
+            #[cfg(feature = "appshots-fixture")]
+            fixture_pinned: false,
             bounds: Rc::new(Cell::new(None)),
             panel_bounds: Rc::new(Cell::new(None)),
         }
@@ -278,6 +308,10 @@ impl StatControl {
     }
 
     fn defer_hide(&mut self, cx: &mut Context<Self>) {
+        #[cfg(feature = "appshots-fixture")]
+        if self.fixture_pinned {
+            return;
+        }
         if !self.open || self.hide_task.is_some() {
             return;
         }
@@ -301,6 +335,29 @@ mod tests {
     use super::*;
     use gpui::{AppContext, TestAppContext};
     use std::time::Duration;
+
+    #[gpui::test]
+    fn usage_model_labels_refresh_when_the_catalog_arrives(cx: &mut TestAppContext) {
+        let ids = vec!["m_50017e69".into(), "legacy-model".into()];
+        let control = cx.new(|cx| StatControl::new(data(), cx));
+        control.update(cx, |control, _| control.open = true);
+        cx.update(|cx| {
+            remember_model_labels([("m_50017e69", "My provider · My model")].into_iter(), cx);
+            assert_eq!(
+                cx.global::<ModelLabels>().resolve(&ids),
+                "My provider · My model, legacy-model"
+            );
+            remember_model_labels(
+                [("m_50017e69", "My provider · Renamed model")].into_iter(),
+                cx,
+            );
+            assert_eq!(
+                cx.global::<ModelLabels>().resolve(&ids),
+                "My provider · Renamed model, legacy-model"
+            );
+        });
+        control.read_with(cx, |control, _| assert!(control.open));
+    }
 
     struct Fixture {
         control: Entity<StatControl>,
@@ -497,7 +554,7 @@ impl Render for StatControl {
             // at least one side of the trigger, even in a short window.
             let max_height =
                 ((f32::from(window.viewport_size().height) - 22.0 - 32.0) / 2.0).max(1.0);
-            let content = card(&self.data, &theme.for_popup())
+            let content = card(&self.data, &theme.for_popup(), cx)
                 .id("statistics-hover-scroll")
                 .debug_selector(|| "statistics-hover-card".into())
                 .max_w((window.viewport_size().width - px(16.0)).max(px(1.0)))
@@ -624,7 +681,7 @@ impl Render for FooterStatistics {
             let mut activity = StatData::activity(&stats);
             if compact {
                 if let (Some(data), Some(speed)) = (&mut activity, stats.tokens_per_second()) {
-                    data.label = format!("{speed:.0} tok/s");
+                    data.label = token_rate(speed);
                 }
             }
             for (slot, data) in self
@@ -701,7 +758,9 @@ impl FooterStatistics {
         {
             control.update(cx, |control, cx| control.fixture_show(true, window, cx));
         } else {
-            window.simulate_mouse_move(gpui::point(px(2.0), px(2.0)), cx);
+            for control in self.controls.iter().flatten() {
+                control.update(cx, |control, cx| control.fixture_show(false, window, cx));
+            }
         }
     }
 }
@@ -711,17 +770,16 @@ impl StatControl {
     pub(crate) fn fixture_show(
         &mut self,
         hover: bool,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let position = if hover {
-            self.bounds
-                .get()
-                .expect("statistics trigger was laid out")
-                .center()
-        } else {
-            gpui::point(px(2.0), px(2.0))
-        };
-        window.simulate_mouse_move(position, cx);
+        // Snapshot fixtures pin the panel directly; hover behavior is covered
+        // by the interaction tests above, without native pointer interference.
+        self.show_task = None;
+        self.hide_task = None;
+        self.hovered = hover;
+        self.open = hover;
+        self.fixture_pinned = hover;
+        cx.notify();
     }
 }

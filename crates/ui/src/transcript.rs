@@ -8497,7 +8497,7 @@ impl Transcript {
                     .unwrap_or_else(|| tool_group_title(summary.clone(), shimmer_phase, theme)),
             });
         let disclosure = div()
-            .w(px(if worked_secs.is_some() { 14.0 } else { 22.0 }))
+            .w(px(if worked_secs.is_some() { 14.0 } else { 6.0 }))
             .h(px(18.0))
             .flex_none()
             .relative()

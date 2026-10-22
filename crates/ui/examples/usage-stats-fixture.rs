@@ -68,6 +68,11 @@ fn main() -> anyhow::Result<()> {
         .expect("output directory");
     std::fs::create_dir_all(&output)?;
     let output = std::path::absolute(output)?;
+    let language = if std::env::args().nth(2).as_deref() == Some("en-US") {
+        rcode_presentation::LanguagePreference::EnUs
+    } else {
+        rcode_presentation::LanguagePreference::ZhCn
+    };
     let temp = tempfile::tempdir()?;
     let runtime = tokio::runtime::Runtime::new()?;
     let _runtime_guard = runtime.enter();
@@ -85,10 +90,10 @@ fn main() -> anyhow::Result<()> {
     let entries: Vec<rcode_doc::SessionMessageEntry> = serde_json::from_value(serde_json::json!([
         {"id":"u1","role":"user","parts":[{"id":"u1t","kind":"text","text":"检查项目"}],"createdAt":1792468800000_i64,"deviceId":core.device_id},
         {"id":"a1","role":"assistant","parts":[{"id":"a1t","kind":"text","text":"已完成检查。"},
-            {"id":"call1","kind":"usage","statistics":{"model":"dawnfan/deepseek-v4.1-flash","inputTokens":10000,"outputTokens":231,"cacheReadTokens":10000,"cacheWriteTokens":null,"durationMs":20000,"firstTokenMs":16000}}],"createdAt":1792468801000_i64,"deviceId":core.device_id,"status":"complete"},
+            {"id":"call1","kind":"usage","statistics":{"model":"m_usage_fixture","inputTokens":10080407,"outputTokens":338989,"cacheReadTokens":10000,"cacheWriteTokens":null,"durationMs":2358500,"firstTokenMs":4400}}],"createdAt":1792468801000_i64,"deviceId":core.device_id,"status":"complete"},
         {"id":"u2","role":"user","parts":[{"id":"u2t","kind":"text","text":"再检查一下统计数据"}],"createdAt":1792468860000_i64,"deviceId":core.device_id},
         {"id":"a2","role":"assistant","parts":[{"id":"a2t","kind":"text","text":"已核对输入、输出和缓存用量。"},
-            {"id":"call2","kind":"usage","statistics":{"model":"dawnfan/deepseek-v4.1-flash","inputTokens":10589,"outputTokens":297,"cacheReadTokens":0,"cacheWriteTokens":null,"durationMs":13800,"firstTokenMs":11800}}],"createdAt":1792468861000_i64,"deviceId":core.device_id,"status":"complete"}
+            {"id":"call2","kind":"usage","statistics":{"model":"m_usage_fixture","inputTokens":10589,"outputTokens":297,"cacheReadTokens":0,"cacheWriteTokens":null,"durationMs":20000,"firstTokenMs":4400}}],"createdAt":1792468861000_i64,"deviceId":core.device_id,"status":"complete"}
     ]))?;
     let doc = core.doc_host.open("usage-fixture")?;
     for entry in &entries {
@@ -99,6 +104,13 @@ fn main() -> anyhow::Result<()> {
     let _ipc = runtime.block_on(rcode_engine::serve_ipc(ipc_port, core.rpc_service()))?;
     let data = temp.path().join("ui");
     std::fs::create_dir(&data)?;
+    settings::composer::ComposerDefaults {
+        model_labels: std::collections::HashMap::from([(
+            "m_usage_fixture".into(),
+            "Fixture provider · DeepSeek V4.1 Flash".into(),
+        )]),
+        ..Default::default()
+    }.save(&data)?;
     let boot = EngineBootConfig {
         roots: DataRoots::same(data.clone()),
         ipc_port,
@@ -114,7 +126,7 @@ fn main() -> anyhow::Result<()> {
     let result = failure.clone();
     gpui_platform::application().with_assets(icons::Assets).run(move |cx| {
         gpui_tokio::init(cx); gpui_base::init(cx);
-        l10n::init(rcode_presentation::LanguagePreference::ZhCn);
+        l10n::init(language);
         let settings = settings::UiSettings::default();
         settings::init(settings.clone(), data.clone(), cx);
         let fonts = typography::register_fonts(cx);
@@ -125,6 +137,7 @@ fn main() -> anyhow::Result<()> {
         composer::init(cx, settings.composer_send_behavior); terminal::panel::init(cx); app_menus::init(cx);
         let state = cx.new(|_| {
             let mut s = state::AppState::new(); s.fixture_attachment_engine(handle);
+            s.data_dir = Some(data.clone());
             s.no_project = true;
             s.connection = rcode_proto::view::ConnectionStatus::Ready; s.local_device_id = Some(device.clone());
             s.devices = vec![serde_json::from_value(serde_json::json!({"id":device,"name":"This device","platform":std::env::consts::OS,"lastSeenAt":null})).unwrap()];
@@ -150,7 +163,7 @@ fn main() -> anyhow::Result<()> {
                 window.update(cx, |shell, window, cx| shell.fixture_appshots_composer().update(cx, |c, cx| c.fixture_usage_panel(None, window, cx)))?;
                 pause(cx, 700).await;
                 let opened = window.update(cx, |shell, _, cx| shell.fixture_appshots_composer().read(cx).fixture_usage_open_count(cx))?;
-                anyhow::ensure!(opened == 0, "Pointer exit did not dismiss the statistics panel");
+                anyhow::ensure!(opened == 0, "Statistics panel did not close");
                 window.update(cx, |shell, window, cx| shell.fixture_appshots_composer().update(cx, |c, cx| c.fixture_usage_panel(Some(1), window, cx)))?;
                 pause(cx, 700).await;
                 capture(cx, output.clone(), "session-token-card").await?;

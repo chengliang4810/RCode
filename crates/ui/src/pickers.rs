@@ -1062,6 +1062,13 @@ impl Pickers {
             .as_deref()
             .map(ComposerDefaults::load)
             .unwrap_or_default();
+        crate::usage_stats::remember_model_labels(
+            defaults
+                .model_labels
+                .iter()
+                .map(|(id, label)| (id.as_str(), label.as_str())),
+            cx,
+        );
         // Restore explicit opt-outs as well as project picks before the first frame.
         if title.is_none() {
             state.update(cx, |s, _| s.restore_composer_target(&defaults));
@@ -2000,6 +2007,12 @@ impl Pickers {
             return;
         }
         if let Loadable::Ready(models) = &loaded {
+            crate::usage_stats::remember_model_labels(
+                models
+                    .iter()
+                    .map(|model| (model.id.as_str(), model.label.as_str())),
+                cx,
+            );
             let fresh = self
                 .defaults
                 .remember_labels(models.iter().map(|m| (m.id.as_str(), m.label.as_str())));
