@@ -62,6 +62,37 @@ void main() {
   });
 
   testWidgets(
+    'forgetting a host revokes draft writes from the closing new-session page',
+    (tester) async {
+      resetRecoveredImagesForTesting(retrieval: Future.value([]));
+      final workspace = PageWorkspace();
+      final preferences = await AppPreferences.load();
+      addTearDown(workspace.dispose);
+      final oldScope = workspace.cacheScope;
+      await tester.pumpWidget(
+        app(NewSessionPage(workspace: workspace, preferences: preferences)),
+      );
+      await tester.pumpAndSettle();
+      await tester.enterText(
+        find.byKey(const Key('new-message')),
+        'Draft on the old host',
+      );
+      await tester.pump(const Duration(milliseconds: 300));
+      expect(
+        preferences.captureHostDraft(oldScope).value?['text'],
+        'Draft on the old host',
+      );
+      await AppPreferences.forgetHostDrafts(oldScope);
+      workspace.host = 'ws://another-host:27655/';
+      final nextScope = workspace.cacheScope;
+      await tester.pumpWidget(const SizedBox());
+      await tester.pump();
+      expect(preferences.captureHostDraft(oldScope).value, isNull);
+      expect(preferences.captureHostDraft(nextScope).value, isNull);
+    },
+  );
+
+  testWidgets(
     'new-session catalog and reasoning determine the actual first run',
     (tester) async {
       resetRecoveredImagesForTesting(retrieval: Future.value([]));
