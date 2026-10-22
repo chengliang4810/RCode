@@ -150,8 +150,15 @@ impl ArchivedPage {
                     continue;
                 }
                 let params = serde_json::json!({ "op": "deleteChat", "chatId": chat_id });
-                if engine.client().call(methods::MUTATE, params).await.is_err() {
-                    failed += 1;
+                match engine.client().call(methods::MUTATE, params).await {
+                    Err(_) => failed += 1,
+                    Ok(_) => { this.update(cx, |page, cx| {
+                        page.state.update(cx, |state, cx| {
+                            state.confirm_chat_deleted(&chat_id);
+                            cx.notify();
+                        });
+                        cx.notify();
+                    }).ok(); }
                 }
             }
             this.update(cx, |page, cx| {
@@ -177,7 +184,7 @@ impl ArchivedPage {
         let card = popover::dialog_card(&theme)
             .child(popover::dialog_title(
                 &theme,
-                "Delete all archived sessions?",
+                crate::l10n::localizer().text(TextKey::ShellArchivedDeleteTitle),
             ))
             .child(
                 div()
@@ -192,7 +199,7 @@ impl ArchivedPage {
                     .justify_end()
                     .gap(px(8.0))
                     .child(
-                        popover::btn_ghost(&theme, "Cancel", "delete-archived-cancel")
+                        popover::btn_ghost(&theme, crate::l10n::localizer().text(TextKey::ActionCancel), "delete-archived-cancel")
                             .id("delete-archived-cancel")
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.delete_all_confirm = None;
@@ -200,7 +207,7 @@ impl ArchivedPage {
                             })),
                     )
                     .child(
-                        popover::btn_danger(&theme, "Delete all")
+                        popover::btn_danger(&theme, crate::l10n::localizer().text(TextKey::ShellArchivedDeleteAll))
                             .id("delete-archived-confirm")
                             .on_click(cx.listener(|this, _, _, cx| this.delete_all(cx))),
                     ),
@@ -580,19 +587,11 @@ impl Render for ArchivedPage {
 }
 
 fn delete_all_body(count: usize) -> String {
-    match count {
-        1 => "1 archived session will be permanently deleted. This can\u{2019}t be undone.".into(),
-        n => format!(
-            "{n} archived sessions will be permanently deleted. This can\u{2019}t be undone."
-        ),
-    }
+    crate::l10n::localizer().format_count(TextKey::ShellArchivedDeleteBody, "count", count as i64)
 }
 
 fn delete_all_failure(failed: usize) -> String {
-    match failed {
-        1 => "Couldn\u{2019}t delete 1 archived session. Try again.".into(),
-        n => format!("Couldn\u{2019}t delete {n} archived sessions. Try again."),
-    }
+    crate::l10n::localizer().format_count(TextKey::ShellArchivedDeleteFailed, "count", failed as i64)
 }
 
 #[cfg(test)]
@@ -744,7 +743,7 @@ mod tests {
                     .or_else(|| crate::toast::messages(cx).last().cloned());
                 assert_eq!(
                     notice.as_deref(),
-                    Some("Couldn\u{2019}t delete 1 archived session. Try again.")
+                    Some(delete_all_failure(1).as_str())
                 );
             })
             .unwrap();
@@ -752,8 +751,10 @@ mod tests {
 
     #[test]
     fn delete_all_copy_handles_one_and_many() {
-        assert!(delete_all_body(1).starts_with("1 archived session will"));
-        assert!(delete_all_body(146).starts_with("146 archived sessions will"));
+        for count in [1, 146] {
+            assert_eq!(delete_all_body(count), crate::l10n::localizer().format_count(
+                TextKey::ShellArchivedDeleteBody, "count", count as i64));
+        }
     }
 
     #[test]

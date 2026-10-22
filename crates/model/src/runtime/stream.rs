@@ -162,6 +162,9 @@ async fn response_to_sse_stream(
                         }
                         Some(Err(error)) => return Some((Err(error), state)),
                         None => {
+                            tracing::warn!(provider = %provider,
+                                request_id = state.request_id.as_deref(),
+                                "HTTP response ended before SSE completion");
                             return Some((
                                 Err(ModelError::transport(
                                     crate::TransportErrorKind::Other,

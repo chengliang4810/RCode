@@ -120,7 +120,7 @@ shell-sidebar-view-branch = 分支
 shell-sidebar-view-pull-request = 拉取请求
 shell-sidebar-view-harness = 智能体
 shell-sidebar-view-project-icon = 项目图标
-shell-sidebar-view-location = 位置
+shell-sidebar-view-project-label = 项目名称
 shell-sidebar-view-project-filter = 项目筛选
 shell-sidebar-view-archived = 已归档
 shell-in-home = 在个人目录
@@ -269,3 +269,12 @@ pickers-reasoning-ultracode = 超级编码
 pickers-reasoning-ultrathink = 超级思考
 
 shell-subagent-background = 转为后台
+
+shell-chat-delete-title = 删除会话？
+shell-chat-delete-body = 将永久删除“{ $title }”，此操作无法撤销。
+shell-chat-delete-disconnected = 引擎未连接，无法删除会话。
+shell-chat-delete-failed = 删除会话失败：{ $error }
+shell-archived-delete-title = 删除所有已归档会话？
+shell-archived-delete-all = 全部删除
+shell-archived-delete-body = 将永久删除 { $count } 个已归档会话，此操作无法撤销。
+shell-archived-delete-failed = { $count } 个已归档会话删除失败，请重试。

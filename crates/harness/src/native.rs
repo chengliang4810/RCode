@@ -1803,31 +1803,11 @@ impl NativeHost {
         // Fold the provider's events into the loop's terms as they arrive. The
         // loop reads tool calls only off the finished message, so the builder
         // has to see every event before the `Done` chunk is emitted.
-        let builder = crate::native_bridge::ResponseBuilder::default();
-        let chunks =
-            futures::stream::unfold((stream, builder), |(mut stream, mut builder)| async move {
-                loop {
-                    let event = stream.next().await?;
-                    match event {
-                        Ok(event) => {
-                            if let Some(chunk) = builder.push(event) {
-                                return Some((Ok(chunk), (stream, builder)));
-                            }
-                            // An event that produced no chunk (a tool-call
-                            // fragment, usage) still updated the builder, so
-                            // keep pulling rather than yielding nothing.
-                        }
-                        Err(error) => {
-                            return Some((
-                                Err(AgentError::Model(error.to_string())),
-                                (stream, builder),
-                            ));
-                        }
-                    }
-                }
-            });
-
-        Ok(Box::pin(chunks))
+        Ok(crate::native_bridge::reasoning_chunks(
+            stream,
+            self.model.clone(),
+            self.provider.id.clone(),
+        ))
     }
 }
 

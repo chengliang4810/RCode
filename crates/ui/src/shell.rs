@@ -69,6 +69,8 @@ mod chat_dropzone_tests;
 mod chat_pull_requests;
 #[cfg(test)]
 mod chat_rename_tests;
+#[cfg(test)]
+mod chat_delete_tests;
 mod command_palette;
 mod file_mutations;
 mod files_panel;
@@ -1911,6 +1913,7 @@ pub struct Shell {
     chat_rename: Option<ChatRename>,
     /// Chat id awaiting delete confirmation.
     delete_confirm: Option<String>,
+    delete_chat_tasks: std::collections::HashMap<String, Task<()>>,
     /// Global confirmation/error dialog for the Changes-pane trash action. The
     /// RPC task is retained separately so rerenders do not cancel it.
     discard_working_tree: Option<DiscardWorkingTreeFlow>,
@@ -2365,6 +2368,7 @@ impl Shell {
             chat_copy_left: false,
             chat_rename: None,
             delete_confirm: None,
+            delete_chat_tasks: Default::default(),
             discard_working_tree: None,
             discard_working_tree_task: None,
             space_menu: popover::Popup::default(),
@@ -6232,28 +6236,55 @@ impl Shell {
 
     fn delete_chat(&mut self, chat_id: String, cx: &mut Context<Self>) {
         self.delete_confirm = None;
-        if let Some(tabs) = self.right_tabs.get(&chat_id) {
+        if self.delete_chat_tasks.contains_key(&chat_id) { return; }
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            self.show_notice(crate::toast::ToastKind::Error,
+                crate::l10n::localizer().text(TextKey::ShellChatDeleteDisconnected), cx);
+            cx.notify();
+            return;
+        };
+        let task_id = chat_id.clone();
+        let task = cx.spawn(async move |this, cx| {
+            let result = engine.client().call(methods::MUTATE,
+                serde_json::json!({ "op": "deleteChat", "chatId": chat_id })).await;
+            this.update(cx, |shell, cx| {
+                shell.delete_chat_tasks.remove(&chat_id);
+                if !shell.state.read(cx).engine().is_some_and(|active| active.same_connection(&engine)) {
+                    return;
+                }
+                match result {
+                    Ok(_) => shell.finish_delete_chat(&chat_id, cx),
+                    Err(error) => shell.show_notice(crate::toast::ToastKind::Error,
+                        crate::l10n::localizer().format_with(TextKey::ShellChatDeleteFailed,
+                            &[("error", &error.to_string())]), cx),
+                }
+                cx.notify();
+            }).ok();
+        });
+        self.delete_chat_tasks.insert(task_id, task);
+        cx.notify();
+    }
+
+    fn finish_delete_chat(&mut self, chat_id: &str, cx: &mut Context<Self>) {
+        if let Some(tabs) = self.right_tabs.remove(chat_id) {
             for surface in tabs {
                 if let RightSurface::Browser(id) = surface {
-                    if let Some(browser) = self.browsers.remove(id) {
+                    if let Some(browser) = self.browsers.remove(&id) {
                         browser.update(cx, |browser, cx| browser.close(cx));
                     }
-                    self.browser_subs.remove(id);
+                    self.browser_subs.remove(&id);
                 }
                 if let RightSurface::PullRequest(id) = surface {
-                    self.chat_pull_requests.remove(id);
+                    self.chat_pull_requests.remove(&id);
                 }
             }
         }
-        if self.state.read(cx).selected_chat.as_deref() == Some(chat_id.as_str()) {
-            self.state.update(cx, |s, cx| s.select_chat(None, cx));
-        }
+        self.state.update(cx, |state, cx| {
+            state.confirm_chat_deleted(chat_id);
+            cx.notify();
+        });
         self.composer
-            .update(cx, |composer, cx| composer.purge_chat(&chat_id, cx));
-        self.mutate(
-            serde_json::json!({ "op": "deleteChat", "chatId": chat_id }),
-            cx,
-        );
+            .update(cx, |composer, cx| composer.purge_chat(chat_id, cx));
         cx.notify();
     }
 
@@ -9941,10 +9972,10 @@ impl Shell {
                     }),
             );
             let card = popover::dialog_card(&theme)
-                .child(popover::dialog_title(&theme, "Delete session?"))
+                .child(popover::dialog_title(&theme, crate::l10n::localizer().text(TextKey::ShellChatDeleteTitle)))
                 .child(div().mt(px(6.0)).child(popover::dialog_body(
                     &theme,
-                    format!("\u{201C}{title}\u{201D} will be permanently deleted. This can\u{2019}t be undone."),
+                    crate::l10n::localizer().format_with(TextKey::ShellChatDeleteBody, &[("title", &title)]),
                 )))
                 .child(
                     div()
@@ -9954,7 +9985,7 @@ impl Shell {
                         .justify_end()
                         .gap(px(8.0))
                         .child(
-                            popover::btn_ghost(&theme, "Cancel", "delete-chat-cancel")
+                            popover::btn_ghost(&theme, crate::l10n::localizer().text(TextKey::ActionCancel), "delete-chat-cancel")
                                 .id("delete-chat-cancel")
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.delete_confirm = None;
@@ -9962,7 +9993,7 @@ impl Shell {
                                 })),
                         )
                         .child(
-                            popover::btn_danger(&theme, "Delete")
+                            popover::btn_danger(&theme, crate::l10n::localizer().text(TextKey::ActionDelete))
                                 .id("delete-chat-confirm")
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     this.delete_chat(chat_id.clone(), cx)

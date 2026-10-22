@@ -11,6 +11,7 @@
 //! `ToolCallDelta` into complete `ToolCall`s has to be right or tool calls are
 //! silently lost.
 
+use futures::{StreamExt, stream::BoxStream};
 use std::sync::Arc;
 
 use rcode_agent::{ContentBlock, Message, MessageContent, MessageId, MessageRole, Tool};
@@ -19,6 +20,78 @@ use rcode_model::{
     ContentBlock as ModelContentBlock, JsonObject, ModelMessage, ModelRequest, ModelResponse,
     ModelStreamEvent, ToolCall as ModelToolCall, ToolDefinition, ToolResult as ModelToolResult,
 };
+
+/// Preserve terminal provider failures while translating streamed deltas. A
+/// partial response must never become a completed message or execute tools.
+pub(crate) fn reasoning_chunks(
+    stream: rcode_model::ModelStream,
+    model: String,
+    provider: String,
+) -> BoxStream<'static, Result<rcode_agent::ReasoningChunk, rcode_agent::AgentError>> {
+    let call_id = uuid::Uuid::new_v4().to_string();
+    let started = std::time::Instant::now();
+    tracing::info!(%call_id, %model, %provider, "model stream started");
+    Box::pin(futures::stream::unfold(
+        (stream, ResponseBuilder::default(), false, 0_u64),
+        move |(mut stream, mut builder, terminal, mut events)| {
+            let (call_id, model, provider) = (call_id.clone(), model.clone(), provider.clone());
+            async move {
+                if terminal {
+                    return None;
+                }
+                loop {
+                    let Some(event) = stream.next().await else {
+                        tracing::warn!(%call_id, %model, %provider, events,
+                            elapsed_ms = started.elapsed().as_millis() as u64,
+                            "model stream ended before completion");
+                        return Some((
+                            Err(rcode_agent::AgentError::Model(
+                                "model stream ended before completion".into(),
+                            )),
+                            (stream, builder, true, events),
+                        ));
+                    };
+                    events += 1;
+                    let elapsed_ms = started.elapsed().as_millis() as u64;
+                    let failure = match event {
+                        Ok(ModelStreamEvent::Interrupted {
+                            error,
+                            attempts,
+                            max_attempts,
+                        }) => {
+                            tracing::warn!(%call_id, %model, %provider, events, elapsed_ms, attempts, max_attempts,
+                                request_id = error.request_id(), error = %error, "model stream interrupted");
+                            Some(error)
+                        }
+                        Err(error) => {
+                            tracing::warn!(%call_id, %model, %provider, events, elapsed_ms,
+                                request_id = error.request_id(), error = %error, "model stream failed");
+                            Some(error)
+                        }
+                        Ok(event) => {
+                            if let ModelStreamEvent::Completed(response) = &event {
+                                tracing::info!(%call_id, %model, %provider, events, elapsed_ms,
+                                    request_id = response.request_id(), "model stream completed");
+                            }
+                            if let Some(chunk) = builder.push(event) {
+                                let done =
+                                    matches!(chunk, rcode_agent::ReasoningChunk::Done { .. });
+                                return Some((Ok(chunk), (stream, builder, done, events)));
+                            }
+                            None
+                        }
+                    };
+                    if let Some(error) = failure {
+                        return Some((
+                            Err(rcode_agent::AgentError::Model(error.to_string())),
+                            (stream, builder, true, events),
+                        ));
+                    }
+                }
+            }
+        },
+    ))
+}
 
 /// The loop's messages, as the provider layer needs them.
 pub(crate) fn to_model_request(
@@ -362,6 +435,62 @@ mod tests {
         ModelMessage as ProviderMessage, ModelResponse as ProviderResponse, StopReason, TokenUsage,
     };
 
+    #[tokio::test]
+    async fn interrupted_stream_preserves_cause_and_never_completes_partial_tools() {
+        let stream = rcode_model::ModelStream::new(futures::stream::iter(vec![
+            Ok(ModelStreamEvent::TextDelta {
+                text: "partial".into(),
+            }),
+            Ok(ModelStreamEvent::ToolCallDelta {
+                index: 0,
+                id: Some("call-1".into()),
+                name: Some("Bash".into()),
+                arguments_delta: "{\"command\":".into(),
+            }),
+            Ok(ModelStreamEvent::Interrupted {
+                error: rcode_model::ModelError::stream_interrupted(
+                    Some("openai-compatible"),
+                    Some("request-123"),
+                )
+                .with_message("HTTP response ended before SSE completion"),
+                attempts: 1,
+                max_attempts: 6,
+            }),
+        ]));
+        let chunks = reasoning_chunks(stream, "model".into(), "provider".into())
+            .collect::<Vec<_>>()
+            .await;
+        assert!(
+            matches!(&chunks[0], Ok(rcode_agent::ReasoningChunk::Text(text)) if text == "partial")
+        );
+        assert!(matches!(
+            &chunks[1],
+            Ok(rcode_agent::ReasoningChunk::Activity)
+        ));
+        let error = chunks[2].as_ref().err().unwrap().to_string();
+        assert!(
+            error.contains("HTTP response ended before SSE completion"),
+            "{error}"
+        );
+        assert!(error.contains("request-123"), "{error}");
+        assert_eq!(chunks.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn completed_stream_does_not_report_false_eof() {
+        let stream = rcode_model::ModelStream::new(futures::stream::iter(vec![Ok(
+            ModelStreamEvent::Completed(completed("answer")),
+        )]));
+        let chunks = reasoning_chunks(stream, "model".into(), "provider".into())
+            .collect::<Vec<_>>()
+            .await;
+        assert_eq!(chunks.len(), 1);
+        assert!(matches!(
+            &chunks[0],
+            Ok(rcode_agent::ReasoningChunk::Done { .. })
+        ));
+    }
+
     fn user(text: &str) -> Message {
         Message {
             id: MessageId::new(),
@@ -548,8 +677,19 @@ mod tests {
         let mut usage = TokenUsage::new(1000, 200);
         usage.cache_read_input_tokens = Some(800);
         usage.cache_creation_input_tokens = Some(100);
-        let response = ProviderResponse::new(ProviderMessage::assistant_text("ok"), StopReason::EndTurn, Some(usage), None).unwrap();
-        let Some(rcode_agent::ReasoningChunk::Done { usage: Some(usage), .. }) = ResponseBuilder::default().push(ModelStreamEvent::Completed(response)) else { panic!("completed usage missing") };
+        let response = ProviderResponse::new(
+            ProviderMessage::assistant_text("ok"),
+            StopReason::EndTurn,
+            Some(usage),
+            None,
+        )
+        .unwrap();
+        let Some(rcode_agent::ReasoningChunk::Done {
+            usage: Some(usage), ..
+        }) = ResponseBuilder::default().push(ModelStreamEvent::Completed(response))
+        else {
+            panic!("completed usage missing")
+        };
         assert_eq!(usage.input_tokens, 1000);
         assert_eq!(usage.output_tokens, 200);
         assert_eq!(usage.cache_read_tokens, Some(800));

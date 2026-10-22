@@ -2156,7 +2156,6 @@ enum SidebarViewRow {
     Created,
     ShowBranch,
     ShowPullRequest,
-    ShowHarness,
     ShowProjectFilter,
     ShowArchived,
 }
@@ -2173,7 +2172,7 @@ impl SidebarViewRow {
 }
 
 /// Which rows each of the three submenus holds, in row order.
-const SIDEBAR_VIEW_GROUPS: [std::ops::Range<usize>; 3] = [0..2, 2..4, 4..11];
+const SIDEBAR_VIEW_GROUPS: [std::ops::Range<usize>; 3] = [0..2, 2..4, 4..10];
 
 /// The three group headings of [`SIDEBAR_VIEW_GROUPS`], in the same order.
 const SIDEBAR_VIEW_GROUP_KEYS: [TextKey; 3] = [
@@ -2182,14 +2181,13 @@ const SIDEBAR_VIEW_GROUP_KEYS: [TextKey; 3] = [
     TextKey::ShellSidebarViewGroupShow,
 ];
 
-const SIDEBAR_VIEW_ROWS: [SidebarViewRow; 11] = [
+const SIDEBAR_VIEW_ROWS: [SidebarViewRow; 10] = [
     SidebarViewRow::ByProject,
     SidebarViewRow::InOneList,
     SidebarViewRow::LastUpdated,
     SidebarViewRow::Created,
     SidebarViewRow::ShowBranch,
     SidebarViewRow::ShowPullRequest,
-    SidebarViewRow::ShowHarness,
     SidebarViewRow::ShowProjectIcon,
     SidebarViewRow::ShowProjectLabel,
     SidebarViewRow::ShowProjectFilter,
@@ -3858,9 +3856,6 @@ impl Shell {
                     state.set_change_requests_visible(visible, cx)
                 });
             }
-            SidebarViewRow::ShowHarness => {
-                self.settings.sidebar_show_harness = !self.settings.sidebar_show_harness
-            }
             SidebarViewRow::ShowArchived => {
                 self.settings.sidebar_show_archived = !self.settings.sidebar_show_archived
             }
@@ -4025,7 +4020,6 @@ impl Shell {
         let focus = menu_state.focus.clone();
         let organization = self.settings.sidebar_organization;
         let sort = self.settings.sidebar_sort;
-        let show_harness = self.settings.sidebar_show_harness;
         let show_branch = self.settings.sidebar_show_branch;
         let show_pr = self.settings.sidebar_show_pull_request;
 
@@ -4037,9 +4031,8 @@ impl Shell {
             localizer.text(TextKey::ShellSidebarViewCreated).into(),
             localizer.text(TextKey::ShellSidebarViewBranch).into(),
             localizer.text(TextKey::ShellSidebarViewPullRequest).into(),
-            localizer.text(TextKey::ShellSidebarViewHarness).into(),
             localizer.text(TextKey::ShellSidebarViewProjectIcon).into(),
-            localizer.text(TextKey::ShellSidebarViewLocation).into(),
+            localizer.text(TextKey::ShellSidebarViewProjectLabel).into(),
             localizer
                 .text(TextKey::ShellSidebarViewProjectFilter)
                 .into(),
@@ -4052,10 +4045,8 @@ impl Shell {
             icons::CALENDAR,
             icons::GIT_BRANCH,
             icons::PULL_REQUEST,
-            icons::BOT,
             icons::PROJECT_DEFAULT,
-            // Location names the host: the remote glyph sidebar rows wear.
-            icons::REMOTE_SERVER,
+            icons::FOLDER,
             icons::FOLDER,
             icons::ARCHIVE_MINIMALISTIC,
         ];
@@ -4066,7 +4057,6 @@ impl Shell {
             sort == SidebarSort::Created,
             show_branch,
             show_pr,
-            show_harness,
             self.settings.sidebar_show_project_icon,
             self.settings.sidebar_show_project_label,
             self.settings.sidebar_show_project_filter,

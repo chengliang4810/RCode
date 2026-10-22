@@ -735,6 +735,8 @@ pub struct AppState {
     pub spaces: Vec<Space>,
     /// Sorted (see [`sort_chats`]); includes archived rows — views filter.
     pub chats: Vec<Chat>,
+    /// Successful deletes stay hidden until the chats watch acknowledges them.
+    confirmed_chat_deletions: HashSet<String>,
     /// Fork RPC may arrive ahead of its registry row on a remote device.
     pending_side_chat: Option<Chat>,
     /// `pending_side_chat` was started by hand and nothing has minted it:
@@ -918,6 +920,7 @@ impl AppState {
             connectivity_observed: false,
             spaces: Vec::new(),
             chats: Vec::new(),
+            confirmed_chat_deletions: HashSet::new(),
             pending_side_chat: None,
             unsaved_side_chat: false,
             sessions: Vec::new(),
@@ -1141,6 +1144,8 @@ impl AppState {
     /// identical lists (presence and sync churn elsewhere in the doc), and
     /// each notify re-renders the whole shell.
     pub fn apply_chats(&mut self, mut chats: Vec<Chat>) -> bool {
+        self.confirmed_chat_deletions.retain(|id| chats.iter().any(|chat| &chat.id == id));
+        chats.retain(|chat| !self.confirmed_chat_deletions.contains(&chat.id));
         let mut changed = false;
         if let Some(pending) = &self.pending_side_chat {
             if chats.iter().any(|chat| chat.id == pending.id) {
@@ -1178,6 +1183,25 @@ impl AppState {
             self.queue_task = None;
         }
         changed
+    }
+
+    /// Reconcile an acknowledged delete immediately, including an unsaved side
+    /// chat which would otherwise be reinserted by `apply_chats`.
+    pub(crate) fn confirm_chat_deleted(&mut self, chat_id: &str) {
+        if self.pending_side_chat.as_ref().is_some_and(|chat| chat.id == chat_id) {
+            self.pending_side_chat = None;
+            self.unsaved_side_chat = false;
+        }
+        let chats = self.chats.iter().filter(|chat| chat.id != chat_id).cloned().collect();
+        let awaiting_watch = std::mem::take(&mut self.confirmed_chat_deletions);
+        self.apply_chats(chats);
+        self.confirmed_chat_deletions = awaiting_watch;
+        self.confirmed_chat_deletions.insert(chat_id.into());
+        self.sessions.retain(|session| session.chat_id != chat_id);
+        self.session_presentation = None;
+        self.pending_sends.remove(chat_id);
+        self.transcript_baselines.remove(chat_id);
+        self.prepared_transcripts.remove(chat_id);
     }
 
     pub fn apply_sessions(&mut self, sessions: Vec<Session>) -> bool {
@@ -4862,6 +4886,36 @@ mod tests {
         state.selected_chat = Some("b".into());
         state.apply_chats(vec![chat("b", 1, None), chat("c", 2, None)]);
         assert_eq!(state.selected_chat.as_deref(), Some("b"));
+    }
+
+    #[test]
+    fn confirmed_chat_deletion_removes_selection_and_ignores_late_watch_frames() {
+        let mut state = AppState::new();
+        let before = vec![chat("a", 0, None), chat("b", 1, None), chat("c", 2, None)];
+        state.apply_chats(before.clone());
+        state.selected_chat = Some("a".into());
+        state.confirm_chat_deleted("a");
+        assert!(state.selected_chat.is_none());
+        state.confirm_chat_deleted("b");
+        state.apply_chats(before);
+        assert_eq!(state.chats.iter().map(|chat| chat.id.as_str()).collect::<Vec<_>>(), ["c"]);
+        state.apply_chats(vec![chat("c", 2, None)]);
+        assert!(state.confirmed_chat_deletions.is_empty());
+    }
+
+    #[test]
+    fn confirmed_chat_deletion_does_not_reinsert_pending_side_chat_or_close_another_chat() {
+        let mut state = AppState::new();
+        state.apply_chats(vec![chat("other", 0, None)]);
+        state.selected_chat = Some("other".into());
+        state.pending_side_chat = Some(chat("side", 1, None));
+        state.unsaved_side_chat = true;
+        state.confirm_chat_deleted("side");
+        state.apply_chats(vec![chat("other", 0, None)]);
+        assert_eq!(state.selected_chat.as_deref(), Some("other"));
+        assert!(state.pending_side_chat.is_none());
+        assert!(!state.unsaved_side_chat);
+        assert_eq!(state.chats.len(), 1);
     }
 
     fn clock_epoch() -> DateTime<Utc> {

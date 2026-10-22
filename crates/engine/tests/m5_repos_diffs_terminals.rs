@@ -1556,6 +1556,32 @@ async fn delete_space_cascades_chats_and_sessions() {
     core.shutdown().await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn delete_chat_rpc_removes_registry_row_and_publishes_sidebar_update() {
+    let tmp = tempfile::tempdir().unwrap();
+    let core = assemble(&tmp.path().join("data"));
+    for id in ["delete-me", "keep-me"] {
+        core.workspace.create_chat(id, None, Some(&core.device_id), None, None).unwrap();
+    }
+    let mut chats = core.workspace.watch_chats();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while chats.borrow().len() != 2 { chats.changed().await.unwrap(); }
+    }).await.expect("initial sidebar publication");
+    let client = rcode_rpc::memory_client(core.rpc_service());
+    client.call(rcode_rpc::methods::MUTATE,
+        serde_json::json!({"op":"deleteChat", "chatId":"delete-me"})).await.unwrap();
+    assert!(core.workspace.chat("delete-me").unwrap().is_none());
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let rows = chats.borrow().clone();
+            if rows.len() == 1 && rows[0].id == "keep-me" { break; }
+            chats.changed().await.unwrap();
+        }
+    }).await.expect("deleted chat must leave the sidebar watch");
+    drop(client);
+    core.shutdown().await;
+}
+
 // ---------------------------------------------------------------------------
 // Diff sync (watchers + workspace branch upkeep) via EngineCore
 // ---------------------------------------------------------------------------

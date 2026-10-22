@@ -1283,7 +1283,16 @@ impl EngineRpc {
                 .map(drop),
             MutateParams::DeleteChat { chat_id } => {
                 self.workspace.delete_chat(&chat_id).map_err(failed)?;
-                self.doc_host.purge_chat(&chat_id);
+                // Settle the writer before dropping its document. Otherwise a
+                // live turn can persist the deleted snapshot again.
+                let sessions = self.sessions.clone();
+                let doc_host = self.doc_host.clone();
+                tokio::spawn(async move {
+                    if let Err(error) = sessions.terminate(&chat_id).await {
+                        tracing::warn!(chat = %chat_id, %error, "deleted chat teardown failed");
+                    }
+                    doc_host.purge_chat(&chat_id);
+                });
                 Ok(())
             }
             MutateParams::RenameDevice { device_id, name } => self

@@ -130,7 +130,7 @@ shell-sidebar-view-branch = Branch
 shell-sidebar-view-pull-request = Pull request
 shell-sidebar-view-harness = Harness
 shell-sidebar-view-project-icon = Project icon
-shell-sidebar-view-location = Location
+shell-sidebar-view-project-label = Project name
 shell-sidebar-view-project-filter = Project filter
 shell-sidebar-view-archived = Archived
 shell-in-home = In Home
@@ -287,3 +287,18 @@ pickers-reasoning-ultracode = Ultracode
 pickers-reasoning-ultrathink = Ultrathink
 
 shell-subagent-background = Run in background
+
+shell-chat-delete-title = Delete session?
+shell-chat-delete-body = “{ $title }” will be permanently deleted. This can’t be undone.
+shell-chat-delete-disconnected = Can’t delete the session while the engine is disconnected.
+shell-chat-delete-failed = Couldn’t delete the session: { $error }
+shell-archived-delete-title = Delete all archived sessions?
+shell-archived-delete-all = Delete all
+shell-archived-delete-body = { $count ->
+    [one] 1 archived session will be permanently deleted. This can’t be undone.
+   *[other] { $count } archived sessions will be permanently deleted. This can’t be undone.
+}
+shell-archived-delete-failed = { $count ->
+    [one] Couldn’t delete 1 archived session. Try again.
+   *[other] Couldn’t delete { $count } archived sessions. Try again.
+}
