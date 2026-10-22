@@ -4,15 +4,16 @@
 //! the application's trust-all policy. The working directory sets the initial
 //! location; it does not restrict filesystem access.
 //!
-//! The command runs through the platform's shell — `cmd /C` on Windows, `sh -c`
-//! elsewhere — because the model writes shell syntax, not an argv list.
+//! One model-visible tool, with PowerShell on Windows and Bash on Unix/macOS.
+//! Windows scripts travel through a file rather than command-line quoting;
+//! stdin stays closed so child commands cannot consume the script.
 
 use std::process::Stdio;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
-use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::io::AsyncReadExt;
 
 use crate::tool::{Tool, ToolContext, ToolError, ToolResult};
 
@@ -20,10 +21,29 @@ use crate::tool::{Tool, ToolContext, ToolError, ToolResult};
 const DEFAULT_TIMEOUT_SECS: u64 = 120;
 /// Hard ceiling, whatever the caller asks for.
 const MAX_TIMEOUT_SECS: u64 = 600;
-/// Combined output kept before truncation.
-const MAX_OUTPUT_CHARS: usize = 100_000;
+/// Combined UTF-8 output kept before truncation, excluding the result header.
+const MAX_OUTPUT_BYTES: usize = 100_000;
+const READ_CHUNK_BYTES: usize = 8192;
+/// An exited launcher must not leave the tool waiting forever for inherited pipes.
+const POST_EXIT_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
+const PROCESS_REAP_TIMEOUT: Duration = Duration::from_secs(2);
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum CommandShell {
+    Bash,
+    #[cfg(windows)]
+    PowerShell,
+}
 
 pub struct BashTool;
+
+pub(crate) fn platform_shell() -> CommandShell {
+    if cfg!(windows) {
+        #[cfg(windows)]
+        return CommandShell::PowerShell;
+    }
+    CommandShell::Bash
+}
 
 #[async_trait]
 impl Tool for BashTool {
@@ -32,10 +52,14 @@ impl Tool for BashTool {
     }
 
     fn description(&self) -> &str {
+        #[cfg(windows)]
+        return "Run a shell command. On Windows the Bash tool executes PowerShell syntax, not Bash syntax. Uses pwsh when installed, otherwise Windows PowerShell 5.1, without profiles or interactive input. Send PowerShell directly; do not wrap it in another shell. Prefer Read/Write/Edit, Glob/Grep and FolderOperations for ordinary file work. Cmdlet errors and nonzero native exit codes are failures.";
+        #[cfg(not(windows))]
         "Run a shell command (bash syntax). Prefer the purpose-built tools: \
          Read/Write/Edit for files, Glob/Grep for searching, FolderOperations \
          for listings — they give structured output. Use Bash for builds, tests, version control and anything \
-         without a dedicated tool."
+         without a dedicated tool. Bash pipelines report a failure if any stage fails (pipefail). \
+         For an expected nonzero status, handle it explicitly with shell conditionals."
     }
 
     fn input_schema(&self) -> Value {
@@ -44,12 +68,9 @@ impl Tool for BashTool {
             "properties": {
                 "command": {
                     "type": "string",
-                    "description": "The command line to run."
+                    "description": if cfg!(windows) { "PowerShell script to execute directly on Windows." } else { "Bash command to execute." }
                 },
-                "timeout": {
-                    "type": "integer",
-                    "description": "Seconds to allow before killing it. Defaults to 120, capped at 600."
-                }
+                "timeout": timeout_schema()
             },
             "required": ["command"]
         })
@@ -60,7 +81,39 @@ impl Tool for BashTool {
     }
 }
 
+pub(crate) fn timeout_schema() -> Value {
+    json!({
+        "type": "integer",
+        "minimum": 1,
+        "maximum": MAX_TIMEOUT_SECS,
+        "description": "Timeout in seconds, not milliseconds. Defaults to 120; values above 600 are capped at 600."
+    })
+}
+
+pub(crate) fn timeout_seconds(input: &Value) -> Result<u64, ToolError> {
+    match input.get("timeout") {
+        None => Ok(DEFAULT_TIMEOUT_SECS),
+        Some(value) => value
+            .as_u64()
+            .filter(|seconds| *seconds > 0)
+            .map(|seconds| seconds.min(MAX_TIMEOUT_SECS))
+            .ok_or_else(|| {
+                ToolError::InvalidInput("`timeout` must be a positive integer in seconds".into())
+            }),
+    }
+}
+
 pub(crate) async fn execute(
+    input: Value,
+    ctx: &ToolContext,
+    timed: bool,
+    progress: Option<std::sync::Arc<dyn Fn(String) + Send + Sync>>,
+) -> Result<ToolResult, ToolError> {
+    execute_with_shell(platform_shell(), input, ctx, timed, progress).await
+}
+
+pub(crate) async fn execute_with_shell(
+    shell: CommandShell,
     input: Value,
     ctx: &ToolContext,
     timed: bool,
@@ -76,13 +129,20 @@ pub(crate) async fn execute(
     if command.trim().is_empty() {
         return Err(ToolError::InvalidInput("`command` is empty".to_owned()));
     }
-    let seconds = input
-        .get("timeout")
-        .and_then(Value::as_u64)
-        .unwrap_or(DEFAULT_TIMEOUT_SECS)
-        .clamp(1, MAX_TIMEOUT_SECS);
+    if command.contains('\0') {
+        return Err(ToolError::InvalidInput(
+            "`command` contains a NUL byte".into(),
+        ));
+    }
+    let seconds = timeout_seconds(&input)?;
 
-    let mut process = shell_command(command);
+    // Keep the temporary script alive for the whole process lifetime, including
+    // managed background execution, timeout and cancellation cleanup.
+    let (mut process, _script) = match shell {
+        CommandShell::Bash => shell_command(command)?,
+        #[cfg(windows)]
+        CommandShell::PowerShell => super::powershell::shell_command(command)?,
+    };
     process
         .current_dir(&ctx.cwd)
         .stdin(Stdio::null())
@@ -100,8 +160,10 @@ pub(crate) async fn execute(
     }
     #[cfg(windows)]
     {
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        process.creation_flags(CREATE_NO_WINDOW);
+        // Attach the suspended leader to its Job Object before any user code
+        // can start children. Resume only after the ownership is established.
+        use windows_sys::Win32::System::Threading::{CREATE_NO_WINDOW, CREATE_SUSPENDED};
+        process.creation_flags(CREATE_NO_WINDOW | CREATE_SUSPENDED);
     }
 
     let mut child = process
@@ -113,91 +175,111 @@ pub(crate) async fn execute(
     // wrote — a runaway `yes` or a 10-minute build log accumulates
     // unboundedly and can exhaust the process's memory before the cap is
     // ever applied.
-    let stdout = child.stdout.take();
-    let stderr = child.stderr.take();
+    let mut stdout = child.stdout.take();
+    let mut stderr = child.stderr.take();
 
     // Own the tree, not just the shell. `kill_on_drop` reaches the direct
     // child only; a command that starts its own children (any build, any
     // `sh -c '… &'`) leaves them running after the shell dies, still
     // writing files and holding resources. Verified on Windows: a 1-second
     // timeout returned "it was killed" while the grandchild kept going.
-    let mut tree = ProcessTree::new(&mut child);
+    let mut tree = match ProcessTree::new(&mut child) {
+        Ok(tree) => tree,
+        Err(error) => {
+            let _ = child.start_kill();
+            let _ = tokio::time::timeout(PROCESS_REAP_TIMEOUT, child.wait()).await;
+            return Err(ToolError::Execution(format!(
+                "cannot own the command's process tree: {error}"
+            )));
+        }
+    };
 
     let deadline = tokio::time::Instant::now() + Duration::from_secs(seconds);
-    let mut stdout_buf = BoundedOutput::new(MAX_OUTPUT_CHARS);
-    let mut stderr_buf = BoundedOutput::new(MAX_OUTPUT_CHARS);
-
-    let mut out_lines = stdout.map(BufReader::new).map(|reader| reader.lines());
-    let mut err_lines = stderr.map(BufReader::new).map(|reader| reader.lines());
-    let mut out_done = out_lines.is_none();
-    let mut err_done = err_lines.is_none();
+    let mut remaining = MAX_OUTPUT_BYTES;
+    let mut stdout_buf = BoundedOutput::default();
+    let mut stderr_buf = BoundedOutput::default();
+    let mut out_chunk = [0; READ_CHUNK_BYTES];
+    let mut err_chunk = [0; READ_CHUNK_BYTES];
+    let mut out_done = stdout.is_none();
+    let mut err_done = stderr.is_none();
+    let mut exit_status = None;
+    let mut drain_deadline = None;
 
     let status = loop {
+        if let Some(status) = exit_status {
+            if out_done && err_done {
+                break status;
+            }
+        }
         tokio::select! {
-            // Reading a line at a time keeps memory bounded by the cap
-            // rather than by what the command produced. A single line
-            // longer than the cap is truncated by the buffer itself.
-            line = async { out_lines.as_mut().unwrap().next_line().await }, if !out_done => {
-                match line {
-                    Ok(Some(line)) => { stdout_buf.push_line(&line); if let Some(progress) = &progress { progress(format!("{}{}", stdout_buf.text(), stderr_buf.text())); } },
-                    Ok(None) | Err(_) => out_done = true,
-                }
-            }
-            line = async { err_lines.as_mut().unwrap().next_line().await }, if !err_done => {
-                match line {
-                    Ok(Some(line)) => { stderr_buf.push_line(&line); if let Some(progress) = &progress { progress(format!("{}{}", stdout_buf.text(), stderr_buf.text())); } },
-                    Ok(None) | Err(_) => err_done = true,
-                }
-            }
-            result = child.wait() => {
-                break result.map_err(|error| ToolError::Execution(error.to_string()))?;
+            // Cancellation/deadlines remain active after wait() completes,
+            // even if descendants keep a pipe open or continuously write.
+            biased;
+            _ = ctx.cancel.cancelled() => {
+                stop_process_tree(&mut child, &mut tree).await;
+                return Err(ToolError::Cancelled);
             }
             _ = tokio::time::sleep_until(deadline), if timed => {
-                // Kill the whole tree before returning: the message says
-                // "it was killed", and it needs to be true of everything
-                // the command started, not just the top shell.
-                tree.kill();
-                let _ = child.wait().await;
+                stop_process_tree(&mut child, &mut tree).await;
                 return Err(ToolError::Timeout(format!(
                     "`{command}` did not finish within {seconds}s; it and everything it \
                      started were killed"
                 )));
             }
-            _ = ctx.cancel.cancelled() => {
-                tree.kill();
-                let _ = child.wait().await;
-                return Err(ToolError::Cancelled);
+            _ = tokio::time::sleep_until(drain_deadline.unwrap_or(deadline)), if drain_deadline.is_some() => {
+                stop_process_tree(&mut child, &mut tree).await;
+                return Err(ToolError::Execution(
+                    "command exited but its inherited output pipes did not close within 2s; \
+                     its remaining child processes were killed".to_owned()
+                ));
+            }
+            result = child.wait(), if exit_status.is_none() => {
+                match result {
+                    Ok(status) => {
+                        exit_status = Some(status);
+                        drain_deadline = Some(tokio::time::Instant::now() + POST_EXIT_DRAIN_TIMEOUT);
+                    }
+                    Err(error) => {
+                        stop_process_tree(&mut child, &mut tree).await;
+                        return Err(ToolError::Execution(error.to_string()));
+                    }
+                }
+            }
+            (is_stdout, result) = async {
+                // Keep control signals prioritized above, but let the two
+                // readable streams make fair progress even under continuous output.
+                tokio::select! {
+                    result = async { stdout.as_mut().unwrap().read(&mut out_chunk).await }, if !out_done => (true, result),
+                    result = async { stderr.as_mut().unwrap().read(&mut err_chunk).await }, if !err_done => (false, result),
+                }
+            }, if !out_done || !err_done => {
+                let (buffer, done, chunk, name) = if is_stdout {
+                    (&mut stdout_buf, &mut out_done, &out_chunk, "stdout")
+                } else {
+                    (&mut stderr_buf, &mut err_done, &err_chunk, "stderr")
+                };
+                let changed = match result {
+                    Ok(0) => { *done = true; buffer.finish(&mut remaining) }
+                    Ok(count) => buffer.push_bytes(&chunk[..count], &mut remaining),
+                    Err(error) => {
+                        stop_process_tree(&mut child, &mut tree).await;
+                        return Err(ToolError::Execution(format!("reading command {name}: {error}")));
+                    }
+                };
+                if changed {
+                    if let Some(progress) = &progress {
+                        progress(output_text(&stdout_buf, &stderr_buf));
+                    }
+                }
             }
         }
     };
 
-    // Drain whatever is still buffered in the pipes after the process
-    // exited, so a short-lived command's output is not lost to the race.
-    if let Some(lines) = out_lines.as_mut() {
-        while let Ok(Some(line)) = lines.next_line().await {
-            stdout_buf.push_line(&line);
-        }
-    }
-    if let Some(lines) = err_lines.as_mut() {
-        while let Ok(Some(line)) = lines.next_line().await {
-            stderr_buf.push_line(&line);
-        }
-    }
-    // The tree is reaped on drop; `kill` is only for the paths that
-    // return early.
+    // Both streams reached EOF. A launcher which explicitly redirected its
+    // descendants' output may leave them running on successful completion.
     tree.disarm();
 
-    let mut body = String::new();
-    if !stdout_buf.text().trim().is_empty() {
-        body.push_str(stdout_buf.text().trim_end());
-    }
-    if !stderr_buf.text().trim().is_empty() {
-        if !body.is_empty() {
-            body.push_str("\n\n");
-        }
-        body.push_str("stderr:\n");
-        body.push_str(stderr_buf.text().trim_end());
-    }
+    let mut body = output_text(&stdout_buf, &stderr_buf);
     if body.is_empty() {
         body.push_str("(no output)");
     }
@@ -215,6 +297,28 @@ pub(crate) async fn execute(
     Ok(result)
 }
 
+async fn stop_process_tree(child: &mut tokio::process::Child, tree: &mut ProcessTree) {
+    tree.kill();
+    // Also cover failures before the leader could join its process group/job.
+    let _ = child.start_kill();
+    let _ = tokio::time::timeout(PROCESS_REAP_TIMEOUT, child.wait()).await;
+}
+
+fn output_text(stdout: &BoundedOutput, stderr: &BoundedOutput) -> String {
+    let mut text = stdout.text.trim_end().to_owned();
+    if !stderr.text.trim().is_empty() {
+        if !text.is_empty() {
+            text.push_str("\n\n");
+        }
+        text.push_str("stderr:\n");
+        text.push_str(stderr.text.trim_end());
+    }
+    if stdout.truncated || stderr.truncated {
+        text.push_str("\n… (output truncated)");
+    }
+    text
+}
+
 /// Output held for the model, capped as it arrives.
 ///
 /// The cap has to apply *during* collection, not after: a command that prints
@@ -222,44 +326,87 @@ pub(crate) async fn execute(
 /// all before trimming means the process's memory is bounded by the command
 /// rather than by the cap. That is the difference between a slow command and
 /// an out-of-memory crash.
+#[derive(Default)]
 struct BoundedOutput {
     text: String,
-    /// The limit, in characters.
-    cap: usize,
-    /// How much was dropped, so the model can tell the tail is missing.
-    dropped: usize,
+    /// At most three bytes of an incomplete UTF-8 character across reads.
+    pending: Vec<u8>,
+    truncated: bool,
 }
 
 impl BoundedOutput {
-    fn new(cap: usize) -> Self {
-        Self {
-            text: String::new(),
-            cap,
-            dropped: 0,
+    fn push_text(&mut self, text: &str, remaining: &mut usize) -> bool {
+        let mut end = text.len().min(*remaining);
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        self.text.push_str(&text[..end]);
+        if end < text.len() {
+            // Keep a prefix, never part of a character. Once full, neither
+            // stream allocates for new output; the pipe still gets drained.
+            let changed = end > 0 || !self.truncated;
+            self.truncated = true;
+            *remaining = 0;
+            changed
+        } else {
+            *remaining -= end;
+            end > 0
         }
     }
 
-    fn push_line(&mut self, line: &str) {
-        if self.text.len() >= self.cap {
-            // Already full: count the line and stop growing. Counting rather
-            // than measuring bytes keeps this O(1) per line.
-            self.dropped += 1;
-            return;
+    fn push_bytes(&mut self, bytes: &[u8], remaining: &mut usize) -> bool {
+        let mut changed = false;
+        for chunk in bytes.chunks(READ_CHUNK_BYTES) {
+            if *remaining == 0 {
+                self.pending.clear();
+                changed |= !self.truncated;
+                self.truncated = true;
+                break;
+            }
+            let mut joined = std::mem::take(&mut self.pending);
+            joined.extend_from_slice(chunk);
+            let mut undecoded = joined.as_slice();
+            while !undecoded.is_empty() {
+                match std::str::from_utf8(undecoded) {
+                    Ok(text) => {
+                        changed |= self.push_text(text, remaining);
+                        break;
+                    }
+                    Err(error) => {
+                        let valid = error.valid_up_to();
+                        changed |= self.push_text(
+                            std::str::from_utf8(&undecoded[..valid])
+                                .expect("validated UTF-8 prefix"),
+                            remaining,
+                        );
+                        if let Some(invalid) = error.error_len() {
+                            changed |= self.push_text("\u{fffd}", remaining);
+                            undecoded = &undecoded[valid + invalid..];
+                        } else {
+                            self.pending.extend_from_slice(&undecoded[valid..]);
+                            break;
+                        }
+                    }
+                }
+                if *remaining == 0 {
+                    if !undecoded.is_empty() {
+                        changed |= !self.truncated;
+                        self.truncated = true;
+                    }
+                    break;
+                }
+            }
         }
-        self.text.push_str(line);
-        self.text.push('\n');
+        changed
     }
 
-    /// The collected text, with a note when anything was dropped.
-    fn text(&self) -> String {
-        if self.dropped == 0 {
-            return self.text.clone();
+    fn finish(&mut self, remaining: &mut usize) -> bool {
+        if self.pending.is_empty() {
+            false
+        } else {
+            self.pending.clear();
+            self.push_text("\u{fffd}", remaining)
         }
-        format!(
-            "{}\n… ({} more lines dropped)",
-            self.text.trim_end(),
-            self.dropped
-        )
     }
 }
 
@@ -285,38 +432,30 @@ struct ProcessTree {
 
 impl ProcessTree {
     #[cfg(unix)]
-    fn new(child: &mut tokio::process::Child) -> Self {
+    fn new(child: &mut tokio::process::Child) -> std::io::Result<Self> {
         // The process group was created at spawn (`process_group(0)`), so the
         // child's pid is also the group id, and a negative pid addresses it.
-        Self {
+        Ok(Self {
             disarmed: false,
             group: child.id().map(|pid| -(pid as i32)),
-        }
+        })
     }
 
     #[cfg(windows)]
-    fn new(child: &mut tokio::process::Child) -> Self {
-        // Assigned immediately after spawn. A process already running could in
-        // principle start a child before the assignment lands; closing that gap
-        // needs the thread handle, which tokio does not expose, and a command
-        // that forks within microseconds of starting is not the case this
-        // defends against — a build's children come seconds later.
-        let job = child
+    fn new(child: &mut tokio::process::Child) -> std::io::Result<Self> {
+        let process = child
             .raw_handle()
-            .ok_or_else(|| std::io::Error::other("the child has already exited"))
-            .and_then(|handle| JoinJob::create().and_then(|job| job.assign(handle).map(|()| job)))
-            .map_err(|error| {
-                // Not fatal: the command still runs, and `kill_on_drop` still
-                // reaches the shell. Losing the tree is worth a log line, not a
-                // failed command.
-                tracing::warn!(%error, "bash: could not attach the command to a job object");
-                error
-            })
-            .ok();
-        Self {
+            .ok_or_else(|| std::io::Error::other("the suspended child has no process handle"))?;
+        let pid = child
+            .id()
+            .ok_or_else(|| std::io::Error::other("the suspended child has no process ID"))?;
+        let job = JoinJob::create()?;
+        job.assign(process)?;
+        resume_suspended_leader(pid)?;
+        Ok(Self {
             disarmed: false,
-            job,
-        }
+            job: Some(job),
+        })
     }
 
     /// Kill the tree now.
@@ -347,6 +486,79 @@ impl ProcessTree {
                 tracing::warn!(%error, "could not release background command descendants");
             }
         }
+    }
+}
+
+/// Tokio exposes the suspended process handle but not its primary thread.
+/// Resolve that one thread without allowing the command to execute first.
+#[cfg(windows)]
+fn resume_suspended_leader(pid: u32) -> std::io::Result<()> {
+    use std::os::windows::io::{FromRawHandle, OwnedHandle};
+    use windows_sys::Win32::Foundation::{ERROR_NO_MORE_FILES, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, TH32CS_SNAPTHREAD, THREADENTRY32, Thread32First, Thread32Next,
+    };
+    use windows_sys::Win32::System::Threading::{
+        GetProcessIdOfThread, OpenThread, ResumeThread, THREAD_QUERY_LIMITED_INFORMATION,
+        THREAD_SUSPEND_RESUME,
+    };
+
+    // SAFETY: a fresh, non-inherited thread snapshot is owned by this function.
+    let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) };
+    if snapshot == INVALID_HANDLE_VALUE {
+        return Err(std::io::Error::last_os_error());
+    }
+    let snapshot = unsafe { OwnedHandle::from_raw_handle(snapshot) };
+    let mut entry = THREADENTRY32 {
+        dwSize: std::mem::size_of::<THREADENTRY32>() as u32,
+        ..Default::default()
+    };
+    if unsafe { Thread32First(snapshot.as_raw_handle(), &mut entry) } == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let mut primary = None;
+    loop {
+        if entry.th32OwnerProcessID == pid {
+            if primary.is_some() {
+                return Err(std::io::Error::other(
+                    "suspended command has multiple threads",
+                ));
+            }
+            let handle = unsafe {
+                OpenThread(
+                    THREAD_QUERY_LIMITED_INFORMATION | THREAD_SUSPEND_RESUME,
+                    0,
+                    entry.th32ThreadID,
+                )
+            };
+            if handle.is_null() {
+                return Err(std::io::Error::last_os_error());
+            }
+            let thread = unsafe { OwnedHandle::from_raw_handle(handle) };
+            if unsafe { GetProcessIdOfThread(thread.as_raw_handle()) } != pid {
+                return Err(std::io::Error::other(
+                    "suspended command thread identity changed",
+                ));
+            }
+            primary = Some(thread);
+        }
+        entry.dwSize = std::mem::size_of::<THREADENTRY32>() as u32;
+        if unsafe { Thread32Next(snapshot.as_raw_handle(), &mut entry) } == 0 {
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() != Some(ERROR_NO_MORE_FILES as i32) {
+                return Err(error);
+            }
+            break;
+        }
+    }
+    let primary = primary
+        .ok_or_else(|| std::io::Error::other("suspended command primary thread is missing"))?;
+    match unsafe { ResumeThread(primary.as_raw_handle()) } {
+        1 => Ok(()),
+        u32::MAX => Err(std::io::Error::last_os_error()),
+        _ => Err(std::io::Error::other(
+            "command primary thread was not suspended once",
+        )),
     }
 }
 
@@ -530,7 +742,7 @@ fn find_posix_shell() -> Option<&'static str> {
 
 /// `which`, without a dependency: walk PATH ourselves looking for `name.exe`.
 #[cfg(windows)]
-fn which_static(name: &str) -> Option<std::path::PathBuf> {
+pub(super) fn which_static(name: &str) -> Option<std::path::PathBuf> {
     let path = std::env::var_os("PATH")?;
     let extensions = std::env::var_os("PATHEXT")
         .map(|ext| {
@@ -551,20 +763,59 @@ fn which_static(name: &str) -> Option<std::path::PathBuf> {
     None
 }
 
-fn shell_command(command: &str) -> tokio::process::Command {
+fn shell_command(
+    command: &str,
+) -> Result<(tokio::process::Command, Option<tempfile::TempPath>), ToolError> {
     match shell() {
         Shell::Posix(program) => {
             let mut process = tokio::process::Command::new(program);
-            process.arg("-c").arg(command);
-            process
+            // Probe in a subshell: older /bin/sh implementations reject
+            // pipefail as a fatal option error. Do not enable errexit; callers
+            // still control conditionals, explicit recovery and sequencing.
+            let script =
+                format!("if (set -o pipefail) 2>/dev/null; then set -o pipefail; fi\n{command}");
+            #[cfg(windows)]
+            {
+                use std::io::Write;
+                // Rust/Windows argv quoting and MSYS parsing disagree about
+                // backslashes in -c payloads, even inside quoted heredocs.
+                // A UTF-8 file avoids that translation and command-line limits
+                // without exposing the script to child processes via stdin.
+                let mut file = tempfile::Builder::new()
+                    .prefix("rcode-bash-")
+                    .suffix(".sh")
+                    .tempfile()
+                    .map_err(|error| {
+                        ToolError::Execution(format!("cannot create shell script: {error}"))
+                    })?;
+                file.write_all(script.as_bytes()).map_err(|error| {
+                    ToolError::Execution(format!("cannot write shell script: {error}"))
+                })?;
+                let path = file.into_temp_path();
+                process.arg(path.to_string_lossy().replace('\\', "/"));
+                Ok((process, Some(path)))
+            }
+            #[cfg(not(windows))]
+            {
+                process.arg("-c").arg(script);
+                Ok((process, None))
+            }
         }
         Shell::Cmd => {
             let mut process = tokio::process::Command::new("cmd");
             process.arg("/C").arg(command);
-            process
+            Ok((process, None))
         }
     }
 }
+
+#[cfg(test)]
+#[path = "bash_script_tests.rs"]
+mod script_tests;
+
+#[cfg(test)]
+#[path = "bash_regression_tests.rs"]
+mod regression_tests;
 
 #[cfg(test)]
 mod tests {
@@ -660,7 +911,7 @@ mod tests {
         // cmd fails ("cannot access '/;'"), so the model burns calls guessing
         // shell syntax. The name Bash promises this syntax, and this test
         // makes that promise checkable.
-        if !matches!(shell(), Shell::Posix(_)) {
+        if !matches!(platform_shell(), CommandShell::Bash) || !matches!(shell(), Shell::Posix(_)) {
             return; // No POSIX shell available on this machine.
         }
         let dir = tempfile::tempdir().unwrap();
@@ -707,6 +958,12 @@ mod tests {
     /// the file shows up a moment later.
     fn forking_command(marker: &std::path::Path) -> String {
         let marker = marker.display();
+        if cfg!(windows) {
+            return format!(
+                "Start-Job -ScriptBlock {{ param($path); Start-Sleep -Seconds 2; [IO.File]::WriteAllText($path, 'CHILD_SURVIVED') }} -ArgumentList '{}' | Wait-Job | Receive-Job",
+                marker.to_string().replace('\'', "''")
+            );
+        }
         match shell() {
             Shell::Posix(_) => {
                 // A subshell in the background: it is not the shell the tool
@@ -808,9 +1065,13 @@ mod tests {
         // implementation buffered everything and truncated at the end, so a
         // long command could exhaust memory before the cap ever applied.
         let dir = tempfile::tempdir().unwrap();
-        let command = match shell() {
-            Shell::Posix(_) => "seq 1 500000".to_owned(),
-            Shell::Cmd => "for /l %i in (1,1,500000) do @echo %i".to_owned(),
+        let command = if cfg!(windows) {
+            "[Console]::Write(('x' * 200000))".to_owned()
+        } else {
+            match shell() {
+                Shell::Posix(_) => "seq 1 500000".to_owned(),
+                Shell::Cmd => "for /l %i in (1,1,500000) do @echo %i".to_owned(),
+            }
         };
 
         let result = BashTool
@@ -818,9 +1079,9 @@ mod tests {
             .await
             .expect("runs");
 
-        // The output is capped near MAX_OUTPUT_CHARS and says what it dropped.
+        // The output is capped near MAX_OUTPUT_BYTES and says what it dropped.
         assert!(
-            result.output.chars().count() < MAX_OUTPUT_CHARS + 1_000,
+            result.output.len() < MAX_OUTPUT_BYTES + 1_000,
             "output was not capped: {} chars",
             result.output.chars().count()
         );

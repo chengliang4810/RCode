@@ -423,14 +423,17 @@ impl NativeSubagents {
         level.filter(|level| model.reasoning_levels.contains(level))
     }
 
-    fn child_prompt(&self, definition: &SubagentDefinition, cwd: &Path) -> String {
+    fn child_prompt(&self, definition: &SubagentDefinition, cwd: &Path, tools: &ToolRegistry) -> String {
         let mut parts = vec![definition.system_prompt.clone()];
         // ZCode 的 Explore 不注入 AGENTS.md；同名自定义角色仍遵循自定义规则。
         if definition.path != Path::new("builtin:Explore") && let Some(instructions) = self.deps.user_instructions.get().filter(|text| !text.is_empty()) {
             parts.push(instructions.clone());
         }
         parts.push(format!("Working directory: {}\nPlatform: {}\nShell: {}", cwd.display(), std::env::consts::OS,
-            rcode_agent::tools::posix_shell().unwrap_or(if cfg!(windows) { "cmd.exe" } else { "system shell" })));
+            rcode_agent::tools::command_shell_program()));
+        if let Some(instructions) = crate::prompts::platform_shell_instructions(tools) {
+            parts.push(instructions);
+        }
         parts.join("\n\n")
     }
 }
@@ -511,7 +514,7 @@ impl SubagentRuntime for NativeSubagents {
             model,
             cwd: spawn.cwd.clone(),
             max_steps: None,
-            system_prompt: Some(self.child_prompt(&definition, &spawn.cwd)),
+            system_prompt: Some(self.child_prompt(&definition, &spawn.cwd, &tools)),
             history: spawn.history.iter().filter(|message| message.role != rcode_agent::MessageRole::System).cloned().collect(),
             images: Vec::new(),
             compact: model_config

@@ -21,7 +21,9 @@ impl Tool for EditTool {
     fn description(&self) -> &str {
         "Replace an exact string in a file. `old_string` must appear exactly \
          once unless `replace_all` is true, so include enough surrounding \
-         context to be unambiguous. Use Edit for targeted changes rather than \
+         context to be unambiguous. CRLF and LF match equivalently; the file's \
+         line endings are preserved. Read the current file again after a failed \
+         match instead of retrying an old snippet. Use Edit for targeted changes rather than \
          rewriting the file with Write."
     }
 
@@ -68,6 +70,8 @@ impl Tool for EditTool {
             .and_then(Value::as_bool)
             .unwrap_or(false);
 
+        let old = old.replace("\r\n", "\n");
+        let new = new.replace("\r\n", "\n");
         if old == new {
             return Err(ToolError::InvalidInput(
                 "`old_string` and `new_string` are identical; nothing to do".to_owned(),
@@ -86,34 +90,61 @@ impl Tool for EditTool {
                 ToolError::Execution(format!("cannot read {}: {error}", resolved.display()))
             })?;
 
-        let matches = text.matches(old).count();
-        if matches == 0 {
+        // Match the same LF view that Read exposes, but map each replacement
+        // back to the original bytes. Whole-file normalization would silently
+        // rewrite unrelated lines (especially in mixed-ending files).
+        let normalized = text.replace("\r\n", "\n");
+        let matches: Vec<_> = normalized
+            .match_indices(&old)
+            .map(|(start, _)| start)
+            .collect();
+        if matches.is_empty() {
             return Err(ToolError::InvalidInput(format!(
-                "`old_string` does not appear in {}. Read the file and match it exactly, \
-                 including whitespace.",
-                resolved.display()
+                "`old_string` does not appear in {}. {}",
+                resolved.display(),
+                missing_match_hint(&normalized, &old, &new)
             )));
         }
-        if matches > 1 && !replace_all {
+        if matches.len() > 1 && !replace_all {
             return Err(ToolError::InvalidInput(format!(
                 "`old_string` appears {matches} times in {}. Add surrounding context to make \
                  it unique, or pass `replace_all: true` to change every occurrence.",
-                resolved.display()
+                resolved.display(),
+                matches = matches.len()
             )));
         }
 
-        let updated = if replace_all {
-            text.replace(old, new)
-        } else {
-            text.replacen(old, new, 1)
-        };
+        // Offsets of removed CR bytes in the normalized view. A boundary at
+        // the LF itself maps to the CR, so replacing a newline replaces CRLF
+        // as one unit, including matches which begin or end at a newline.
+        let removed_crs: Vec<_> = text
+            .match_indices("\r\n")
+            .enumerate()
+            .map(|(removed, (index, _))| index - removed)
+            .collect();
+        let original_offset = |offset| offset + removed_crs.partition_point(|&cr| cr < offset);
+        let line_endings: Vec<_> = text.match_indices('\n').map(|(index, _)| index).collect();
+        let mut updated = String::with_capacity(text.len());
+        let mut cursor = 0;
+        for &normalized_start in &matches {
+            let start = original_offset(normalized_start);
+            let end = original_offset(normalized_start + old.len());
+            updated.push_str(&text[cursor..start]);
+            if uses_crlf_near(&text, &line_endings, start) {
+                updated.push_str(&new.replace('\n', "\r\n"));
+            } else {
+                updated.push_str(&new);
+            }
+            cursor = end;
+        }
+        updated.push_str(&text[cursor..]);
         tokio::fs::write(&resolved, &updated)
             .await
             .map_err(|error| {
                 ToolError::Execution(format!("cannot write {}: {error}", resolved.display()))
             })?;
 
-        let changed = if replace_all { matches } else { 1 };
+        let changed = matches.len();
         Ok(ToolResult::ok(format!(
             "Edited {} ({changed} replacement{})",
             resolved.display(),
@@ -127,6 +158,33 @@ impl Tool for EditTool {
         }))
     }
 }
+
+fn uses_crlf_near(text: &str, line_endings: &[usize], start: usize) -> bool {
+    let next = line_endings.partition_point(|&index| index < start);
+    // Index once instead of rescanning long lines for every replace_all match.
+    let newline = line_endings.get(next).or_else(|| line_endings.last());
+    newline.is_some_and(|&index| index > 0 && text.as_bytes()[index - 1] == b'\r')
+}
+
+fn missing_match_hint(text: &str, old: &str, new: &str) -> String {
+    if !new.is_empty() && text.contains(new) {
+        return "The requested `new_string` is already present; this edit may already be applied. Read the current file before retrying.".into();
+    }
+    // Give a bounded location hint, never perform a fuzzy replacement. A
+    // missing modifier or stale body must not select a different code block.
+    let anchor = old.lines().map(str::trim).find(|line| line.len() >= 8);
+    if let Some(index) = anchor.and_then(|line| text.find(line)) {
+        let line = text[..index].bytes().filter(|byte| *byte == b'\n').count() + 1;
+        return format!(
+            "Part of the requested context occurs near line {line}, but the full text differs. Read the current file and match it exactly, including whitespace; do not reuse a stale snippet."
+        );
+    }
+    "Read the current file and match it exactly, including whitespace; do not reuse a stale snippet.".into()
+}
+
+#[cfg(test)]
+#[path = "edit_regression_tests.rs"]
+mod regression_tests;
 
 #[cfg(test)]
 mod tests {

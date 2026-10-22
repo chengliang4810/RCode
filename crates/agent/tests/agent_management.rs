@@ -399,6 +399,68 @@ async fn manual_and_timed_promotion_keep_the_original_agent_alive() {
 }
 
 #[tokio::test]
+async fn managed_bash_caps_excessive_timeouts_and_shares_the_timeout_schema() {
+    let (manager, mut tools, ctx) = setup(Arc::new(Runtime::default()));
+    let plain = rcode_agent::tools::BashTool;
+    let schema = rcode_agent::Tool::input_schema(&plain);
+    tools.register(Arc::new(plain));
+    tools.set_managed_agents(manager);
+    let managed = tools.get("Bash").unwrap();
+    assert_eq!(
+        managed.input_schema()["properties"]["timeout"],
+        schema["properties"]["timeout"]
+    );
+    let result = tools
+        .call(
+            "Bash",
+            json!({"command":"echo capped", "timeout":900}),
+            &ctx,
+        )
+        .await
+        .unwrap();
+    assert!(!result.is_error, "{}", result.output);
+    assert!(result.output.contains("capped"));
+    let tasks = call(&tools, "TaskList", json!({}), &ctx).await;
+    assert_eq!(tasks["tasks"].as_array().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn managed_bash_records_pipeline_failure_in_task_output() {
+    let (manager, mut tools, ctx) = setup(Arc::new(Runtime::default()));
+    tools.register(Arc::new(rcode_agent::tools::BashTool));
+    tools.set_managed_agents(manager);
+    let result = tools
+        .call(
+            "Bash",
+            json!({
+                "command":if cfg!(windows) { "Write-Output build-failed; cmd.exe /d /c exit 23 | Select-Object -Last 5" } else { "(printf build-failed; exit 23) | cat" }, "timeout":10
+            }),
+            &ctx,
+        )
+        .await
+        .unwrap();
+    assert!(result.is_error, "{}", result.output);
+    assert!(result.output.starts_with("exit 23\n"), "{}", result.output);
+    let tasks = call(&tools, "TaskList", json!({}), &ctx).await;
+    let task = &tasks["tasks"][0];
+    assert_eq!(task["status"], "failed");
+    let output = call(
+        &tools,
+        "TaskOutput",
+        json!({"task_id":task["task_id"]}),
+        &ctx,
+    )
+    .await;
+    assert_eq!(output["task"]["status"], "failed");
+    assert!(
+        output["task"]["output"]
+            .as_str()
+            .unwrap()
+            .contains("build-failed")
+    );
+}
+
+#[tokio::test]
 async fn bash_timeout_promotes_the_same_process_and_retains_output_after_parent_stop() {
     let (manager, mut tools, mut ctx) = setup(Arc::new(Runtime::default()));
     tools.register(Arc::new(rcode_agent::tools::BashTool));
@@ -406,7 +468,7 @@ async fn bash_timeout_promotes_the_same_process_and_retains_output_after_parent_
     let dir = tempfile::tempdir().unwrap();
     ctx.cwd = dir.path().into();
     let command = if cfg!(windows) {
-        r#"powershell -NoProfile -NonInteractive -Command "Add-Content executions.txt once; Write-Output started; Start-Sleep -Seconds 3; Write-Output finished""#
+        "Add-Content executions.txt once; Write-Output started; Start-Sleep -Seconds 3; Write-Output finished"
     } else {
         "echo once >> executions.txt; echo started; sleep 3; echo finished"
     };
@@ -479,7 +541,7 @@ async fn explicit_background_shell_is_stopped_with_its_process_tree_on_runtime_e
     let root = CancellationToken::new();
     manager.bind_runtime(root.clone(), Arc::new(|_| {}));
     let command = if cfg!(windows) {
-        r#"powershell -NoProfile -NonInteractive -Command "Write-Output started; Start-Sleep -Seconds 5; Set-Content leaked.txt leaked""#
+        "Write-Output started; Start-Sleep -Seconds 5; Set-Content leaked.txt leaked"
     } else {
         "echo started; sleep 5; echo leaked > leaked.txt"
     };
@@ -531,7 +593,7 @@ async fn manual_shell_promotion_disarms_the_original_foreground_timeout() {
     let dir = tempfile::tempdir().unwrap();
     ctx.cwd = dir.path().into();
     let command = if cfg!(windows) {
-        r#"powershell -NoProfile -NonInteractive -Command "Write-Output started; Start-Sleep -Seconds 3; Write-Output finished""#
+        "Write-Output started; Start-Sleep -Seconds 3; Write-Output finished"
     } else {
         "echo started; sleep 3; echo finished"
     };

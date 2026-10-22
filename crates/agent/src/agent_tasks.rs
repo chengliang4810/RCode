@@ -1,5 +1,6 @@
 //! Conversation-scoped background agents and their management tools.
 use crate::subagents::SubagentDefinition;
+use crate::tools::bash::CommandShell;
 use crate::tools::{AgentTool, NestedEventSender, SubagentRuntime, SubagentSpawn};
 use crate::{Message, Tool, ToolContext, ToolError, ToolResult};
 use futures::FutureExt;
@@ -111,8 +112,9 @@ impl AgentTasks {
 
     pub fn register(self: &Arc<Self>, registry: &mut crate::ToolRegistry) {
         if registry.get("Bash").is_some() {
-            registry.register(Arc::new(ManagedBash {
+            registry.register(Arc::new(ManagedShell {
                 tasks: self.clone(),
+                shell: crate::tools::bash::platform_shell(),
             }));
         }
         for name in [
@@ -498,8 +500,16 @@ fn make_room(tasks: &mut HashMap<String, AgentTask>) -> Result<(), ToolError> {
 }
 
 fn task_json(task: &AgentTask) -> Value {
-    json!({"task_id":task.id,"agentId":task.id,"task_type":if task.definition.is_some() {"local_agent"} else {"local_bash"},"agentType":task.definition.as_ref().map(|definition| &definition.name),"isBackgrounded":task.background,"output_file":task.output_file,
+    json!({"task_id":task.id,"agentId":task.id,"task_type":task_type(task),"agentType":task.definition.as_ref().map(|definition| &definition.name),"isBackgrounded":task.background,"output_file":task.output_file,
         "description":task.description,"status":task.status,"output":crate::tools::truncate(&if task.output.is_empty() { task.live_output.lock().unwrap().clone() } else { task.output.clone() }, 30_000).0,"outputTruncated":crate::tools::truncate(&if task.output.is_empty() { task.live_output.lock().unwrap().clone() } else { task.output.clone() }, 30_000).1,"error":task.error})
+}
+
+fn task_type(task: &AgentTask) -> &'static str {
+    if task.definition.is_some() {
+        "local_agent"
+    } else {
+        "local_bash"
+    }
 }
 
 struct AgentManagementTool {
@@ -531,14 +541,14 @@ impl Tool for AgentManagementTool {
                 "Delegate to a configured subagent. Set run_in_background=true for parallel work; you may finish your turn while it runs; completion automatically wakes the conversation. Uses the role's configured model. Include complete task context. Returns an agentId for TaskOutput, TaskStop and SendMessage."
             }
             "TaskBackground" => {
-                "Move a running foreground Agent or Bash task to the background without restarting it."
+                "Move a running foreground Agent or shell task to the background without restarting it."
             }
-            "TaskList" => "List Agent and Bash tasks belonging to this conversation.",
+            "TaskList" => "List Agent and shell tasks belonging to this conversation.",
             "TaskOutput" => {
-                "Read an Agent or Bash task's result or wait for it. task_id must belong to this conversation. block defaults true; timeout is milliseconds, at most 600000."
+                "Read an Agent or shell task's result or wait for it. task_id must belong to this conversation. block defaults true; timeout is milliseconds, at most 600000."
             }
             "TaskStop" => {
-                "Cancel one Agent or Bash task by task_id without stopping the parent or other children."
+                "Cancel one Agent or shell task by task_id without stopping the parent or other children."
             }
             _ => {
                 "Send a message to a child agent by its agentId. Running agents receive it at a step boundary; completed agents resume in the background with their original role and history."
@@ -686,7 +696,7 @@ impl Tool for AgentManagementTool {
                     .tasks
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
-                let mut rows: Vec<_> = tasks.values().map(|task| json!({"task_id":task.id,"agentId":task.id,"task_type":if task.definition.is_some() {"local_agent"} else {"local_bash"},"description":task.description,"status":task.status,"isBackgrounded":task.background,"agentType":task.definition.as_ref().map(|definition| &definition.name),"output_file":task.output_file})).collect();
+                let mut rows: Vec<_> = tasks.values().map(|task| json!({"task_id":task.id,"agentId":task.id,"task_type":task_type(task),"description":task.description,"status":task.status,"isBackgrounded":task.background,"agentType":task.definition.as_ref().map(|definition| &definition.name),"output_file":task.output_file})).collect();
                 rows.sort_by(|a, b| a["task_id"].as_str().cmp(&b["task_id"].as_str()));
                 json!({"tasks":rows})
             }
@@ -817,19 +827,28 @@ impl Tool for AgentManagementTool {
     }
 }
 
-struct ManagedBash {
+struct ManagedShell {
     tasks: Arc<AgentTasks>,
+    shell: CommandShell,
 }
 #[async_trait::async_trait]
-impl Tool for ManagedBash {
+impl Tool for ManagedShell {
     fn name(&self) -> &str {
         "Bash"
     }
     fn description(&self) -> &str {
-        "Run a shell command. Supports run_in_background; foreground timeout (seconds, default 120, max 600) promotes the same process to background. Use TaskList/TaskOutput/TaskStop/TaskBackground to manage tasks. auto_background=false keeps timeout termination. Pure sleep commands do not auto-promote."
+        match self.shell {
+            CommandShell::Bash => {
+                "Run a shell command. Bash pipelines use pipefail, so any failed stage makes the pipeline fail. Supports run_in_background; foreground timeout (seconds, default 120, capped at 600) promotes the same process to background. Use TaskList/TaskOutput/TaskStop/TaskBackground to manage tasks. auto_background=false keeps timeout termination. Pure sleep commands do not auto-promote."
+            }
+            #[cfg(windows)]
+            CommandShell::PowerShell => {
+                "Run a shell command. On Windows the Bash tool executes PowerShell syntax, not Bash syntax. Uses pwsh if available, otherwise Windows PowerShell 5.1; profiles and interactive input are disabled. Send PowerShell directly without another shell wrapper. Supports run_in_background; foreground timeout (seconds, default 120, capped at 600) promotes the same process to background. Use TaskList/TaskOutput/TaskStop/TaskBackground to manage tasks. auto_background=false keeps timeout termination. Pure sleep commands do not auto-promote. Cmdlet errors and nonzero native exit codes are failures."
+            }
+        }
     }
     fn input_schema(&self) -> Value {
-        json!({"type":"object","properties":{"command":{"type":"string"},"timeout":{"type":"integer","minimum":1,"maximum":600},"run_in_background":{"type":"boolean"},"auto_background":{"type":"boolean"}},"required":["command"],"additionalProperties":false})
+        json!({"type":"object","properties":{"command":{"type":"string","description":if cfg!(windows) {"PowerShell script to execute directly on Windows."} else {"Bash command to execute."}},"timeout":crate::tools::bash::timeout_schema(),"run_in_background":{"type":"boolean"},"auto_background":{"type":"boolean"}},"required":["command"],"additionalProperties":false})
     }
     async fn call(&self, input: Value, ctx: &ToolContext) -> Result<ToolResult, ToolError> {
         let command = input["command"]
@@ -845,15 +864,7 @@ impl Tool for ManagedBash {
                 ));
             }
         };
-        let seconds = match input.get("timeout") {
-            None => 120,
-            Some(v) => v
-                .as_u64()
-                .filter(|v| (1..=600).contains(v))
-                .ok_or_else(|| {
-                    ToolError::InvalidInput("timeout must be seconds between 1 and 600".into())
-                })?,
-        };
+        let seconds = crate::tools::bash::timeout_seconds(&input)?;
         let auto = match input.get("auto_background") {
             None => {
                 !command.trim_start().starts_with("sleep ")
@@ -869,6 +880,7 @@ impl Tool for ManagedBash {
                 ));
             }
         };
+        let shell = self.shell;
         let id = format!("bash_{}", uuid::Uuid::new_v4());
         let directory = std::env::temp_dir().join("rcode-task-output");
         std::fs::create_dir_all(&directory).map_err(|e| ToolError::Execution(e.to_string()))?;
@@ -934,7 +946,8 @@ impl Tool for ManagedBash {
             let _ = file.write_all(text.as_bytes());
         });
         tokio::spawn(async move {
-            let result = std::panic::AssertUnwindSafe(crate::tools::bash::execute(
+            let result = std::panic::AssertUnwindSafe(crate::tools::bash::execute_with_shell(
+                shell,
                 input,
                 &ctx_owned,
                 false,

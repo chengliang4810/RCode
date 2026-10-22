@@ -162,6 +162,9 @@ impl PromptSessions {
                 dynamic_sections.push(value);
             }
         };
+        // Platform/tool availability may change after a saved session resumes.
+        // Keep this outside the immutable conversation snapshot.
+        add(platform_shell_instructions(tools));
         // The settings gate is applied by the host. Refresh the index on
         // each run so corrected facts and newly saved pointers are visible.
         add(memory.map(str::to_owned));
@@ -188,15 +191,40 @@ impl PromptSessions {
             frozen.instructions.clone()
         };
         drop(state);
-        Ok(PreparedPrompt { system, session_id, user_instructions })
+        Ok(PreparedPrompt {
+            system,
+            session_id,
+            user_instructions,
+        })
     }
+}
+
+pub(crate) fn platform_shell_instructions(tools: &ToolRegistry) -> Option<String> {
+    #[cfg(windows)]
+    if tools.get("Bash").is_some() {
+        let program = rcode_agent::tools::powershell_path();
+        let syntax = if program
+            .file_stem()
+            .is_some_and(|name| name.eq_ignore_ascii_case("pwsh"))
+        {
+            "Selected engine: pwsh. PowerShell 7+ supports `&&` and `||` for conditional command chains. Its default file encoding is UTF-8."
+        } else {
+            "Selected engine: Windows PowerShell 5.1. Do not use `&&`, `||`, ternary `?:` or null-coalescing `??`; use `A; if ($?) { B }` for conditional execution. Specify `-Encoding utf8` when writing text with PowerShell cmdlets."
+        };
+        return Some(format!(
+            "{}\n\n{syntax}",
+            include_str!("prompts/windows.md").trim()
+        ));
+    }
+    let _ = tools;
+    None
 }
 
 fn environment(cwd: &Path, tools: &ToolRegistry, additional: &[PathBuf], is_git: bool) -> String {
     let shell = if tools.get("Bash").is_some() {
-        rcode_agent::tools::posix_shell().unwrap_or("cmd.exe")
+        rcode_agent::tools::command_shell_program()
     } else {
-        "No shell tool is available"
+        "No shell tool is available".into()
     };
     format!(
         "# Environment\n\n- Primary working directory: {}\n- Is a git repository: {is_git}\n- Additional working directories: {}\n- Platform: {} ({})\n- Shell used by Bash: {shell}",

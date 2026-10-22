@@ -9,6 +9,8 @@
 
 pub mod ask_user;
 pub(crate) mod bash;
+#[cfg(windows)]
+mod powershell;
 mod edit;
 mod folder;
 mod glob;
@@ -23,6 +25,8 @@ mod write;
 
 pub use ask_user::{ASK_USER_QUESTION, AskUserQuestionTool, validate as validate_questions};
 pub use bash::BashTool;
+#[cfg(windows)]
+pub use powershell::program as powershell_path;
 pub use edit::EditTool;
 pub use folder::FolderTool;
 pub use glob::GlobTool;
@@ -73,14 +77,22 @@ pub fn register_core_tools_with_search(registry: &mut ToolRegistry, search: WebS
 
 /// The POSIX shell to run shell commands through, when one is available.
 ///
-/// Shared so the hook runner and the Bash tool agree on which shell a command
-/// gets: two answers would mean a hook that works when run by hand behaves
-/// differently under the agent.
+/// Hooks may explicitly use POSIX syntax on Windows even though the model's
+/// Bash tool executes PowerShell. This resolver is for that POSIX backend.
 pub fn posix_shell() -> Option<&'static str> {
     match bash::shell() {
         bash::Shell::Posix(program) => Some(program),
         bash::Shell::Cmd => None,
     }
+}
+
+/// Actual platform backend used by the model-visible Bash tool. Hooks may
+/// explicitly choose a POSIX shell independently of the model's tool syntax.
+pub fn command_shell_program() -> String {
+    #[cfg(windows)]
+    return powershell_path().to_string_lossy().into_owned();
+    #[cfg(not(windows))]
+    posix_shell().unwrap_or("sh").to_owned()
 }
 
 /// The path to name in a diff: workspace-relative when the file is inside
@@ -125,6 +137,15 @@ pub(crate) fn truncate(text: &str, max_chars: usize) -> (String, bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn one_shell_tool_is_registered_with_platform_appropriate_syntax() {
+        let mut tools = ToolRegistry::new();
+        register_core_tools(&mut tools);
+        assert!(tools.get("PowerShell").is_none());
+        let bash = tools.get("Bash").expect("single shell tool");
+        assert_eq!(bash.description().contains("executes PowerShell syntax"), cfg!(windows));
+    }
     use crate::tool::{Tool, ToolContext};
     use serde_json::json;
 

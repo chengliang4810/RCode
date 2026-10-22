@@ -59,7 +59,10 @@ async fn default_base_contains_only_the_approved_text_and_environment() {
             normalize(MAIN_SYSTEM_PROMPT)
         );
         assert_eq!(result.system.identity, IDENTITY);
-        assert!(result.system.dynamic_sections.is_empty());
+        assert_eq!(
+            result.system.dynamic_sections.len(),
+            usize::from(cfg!(windows) && registry.get("Bash").is_some())
+        );
         assert_eq!(result.system.frozen_sections.len(), 2);
         let environment = &result.system.frozen_sections[0];
         let fields: Vec<_> = environment
@@ -79,6 +82,40 @@ async fn default_base_contains_only_the_approved_text_and_environment() {
         );
         assert!(environment.contains("Is a git repository: true"));
         assert!(!environment.contains("test-model"));
+    }
+}
+
+#[tokio::test]
+async fn platform_guidance_follows_tool_availability_even_after_snapshot_resume() {
+    let project = tempfile::tempdir().unwrap();
+    let data = tempfile::tempdir().unwrap();
+    let mut tools = ToolRegistry::new();
+    for available in [false, true, false] {
+        if available {
+            rcode_agent::register_core_tools(&mut tools);
+        } else {
+            tools = ToolRegistry::new();
+        }
+        // A new runtime loads the same saved immutable prompt each time.
+        let result = PromptSessions::default()
+            .prepare(PromptRequest {
+                cwd: project.path(),
+                data_dir: Some(data.path()),
+                user_home: None,
+                tools: &tools,
+                memory: None,
+                mcp_instructions: None,
+                settings: &PromptSettings::default(),
+                resume: Some("platform-resume"),
+            })
+            .await
+            .unwrap();
+        let text = result.system.text();
+        assert_eq!(text.contains("# Windows shell"), cfg!(windows) && available);
+        if cfg!(windows) && available {
+            assert!(text.contains("the `Bash` tool executes PowerShell"));
+            assert!(text.contains("Selected engine:"));
+        }
     }
 }
 
@@ -197,7 +234,10 @@ async fn optional_context_is_appended_in_order_after_the_complete_base() {
     for pair in sections.windows(2) {
         assert!(text.find(pair[0]).unwrap() < text.find(pair[1]).unwrap());
     }
-    assert_eq!(result.system.dynamic_sections.len(), 2);
+    assert_eq!(
+        result.system.dynamic_sections.len(),
+        2 + usize::from(cfg!(windows))
+    );
     assert!(!text.contains("# Language"));
     assert!(!text.contains("# Output Style"));
 }

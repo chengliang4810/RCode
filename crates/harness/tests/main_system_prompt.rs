@@ -268,6 +268,10 @@ async fn assert_settings_refresh(protocol: Protocol) {
         assert!(system.contains("# Doing tasks"));
         assert!(system.contains("# Formatting rules"));
         assert!(system.contains("# Environment"));
+        assert_eq!(system.contains("# Windows shell"), cfg!(windows));
+        if cfg!(windows) {
+            assert!(system.contains("the `Bash` tool executes PowerShell"));
+        }
         for excluded in [
             "# Using your tools",
             "# Session-specific guidance",
@@ -503,8 +507,13 @@ async fn project_context_cache_reset_and_all_cache_modes_reach_the_wire() {
         );
         assert_eq!(
             body["system"].as_array().unwrap().len(),
-            if index == 1 { 3 } else { 2 }
+            (if index == 1 { 3 } else { 2 }) + usize::from(cfg!(windows))
         );
+        if cfg!(windows) {
+            let dynamic = body["system"].as_array().unwrap().last().unwrap();
+            assert!(dynamic["text"].as_str().unwrap().contains("# Windows shell"));
+            assert!(dynamic.get("cache_control").is_none());
+        }
         let messages = body["messages"].as_array().unwrap();
         assert_eq!(messages[0]["role"], "user");
         assert!(!system_text(&body, protocol).contains("<project-instructions>"));
