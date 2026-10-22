@@ -1190,7 +1190,11 @@ mod rendered_tests {
                 assert_eq!(original.as_ref(), url);
                 assert_eq!(offsets.unwrap().omissions.len(), 1);
                 assert!(layout.bounds().size.width < px(220.));
-                assert!(layout.bounds().size.height <= px(23.));
+                assert!(
+                    layout.bounds().size.height <= layout.line_height(),
+                    "table link must stay on one line: {:?}",
+                    layout.bounds()
+                );
             })
             .unwrap();
             cx.spawn(async move |cx| {

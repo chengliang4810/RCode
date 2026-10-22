@@ -25,10 +25,21 @@ pub(super) async fn wait_for_visible_window(cx: &mut AsyncApp) -> anyhow::Result
         if windows.status.success() && !windows.stdout.is_empty() {
             return Ok(());
         }
-        anyhow::ensure!(
-            std::time::Instant::now() < deadline,
-            "fixture window did not become visible within 10 seconds"
-        );
+        if std::time::Instant::now() >= deadline {
+            eprintln!(
+                "window lookup: pid={}, compositor={}, DISPLAY={:?}, stderr={}",
+                std::process::id(),
+                gpui::guess_compositor(),
+                std::env::var_os("DISPLAY"),
+                String::from_utf8_lossy(&windows.stderr)
+            );
+            for args in [vec!["-root", "-tree"], vec!["-root", "-all"]] {
+                if let Ok(output) = std::process::Command::new("xwininfo").args(args).output() {
+                    eprintln!("{}", String::from_utf8_lossy(&output.stdout));
+                }
+            }
+            anyhow::bail!("fixture window did not become visible within 10 seconds");
+        }
         pause(cx, 50).await;
     }
 }
