@@ -268,3 +268,45 @@ fn invalid_key_or_port_keeps_the_existing_access_configuration(cx: &mut TestAppC
         .unwrap();
     server.assert_idle(cx);
 }
+
+#[gpui::test]
+fn closing_external_access_ignores_unsaved_invalid_port_and_key(cx: &mut TestAppContext) {
+    let runtime = runtime();
+    let _guard = runtime.enter();
+    let (mut server, window) = setup(&runtime, cx);
+    for draft in ["", "0", "unfinished"] {
+        window
+            .update(cx, |page, _, cx| {
+                page.access = Some(RemoteAccess {
+                    enabled: true,
+                    port: 28888,
+                    has_api_key: true,
+                    error: None,
+                });
+                page.port.update(cx, |input, cx| input.set_text(draft, cx));
+                page.key
+                    .update(cx, |input, cx| input.set_text("unfinished", cx));
+                page.save_access(false, false, cx);
+            })
+            .unwrap();
+        let request = server.request(cx);
+        assert_eq!(request.method.as_deref(), Some("SetRemoteAccess"));
+        assert_eq!(request.params, json!({"enabled":false,"port":28888}));
+        server.reply(
+            &runtime,
+            &request,
+            json!({"enabled":false,"port":28888,"hasApiKey":true,"error":null}),
+        );
+        let request = server.request(cx);
+        assert_eq!(request.method.as_deref(), Some("GetRemoteAccessApiKey"));
+        server.reply(&runtime, &request, json!({"apiKey":"Fixture12345"}));
+        cx.run_until_parked();
+        window
+            .update(cx, |page, _, _| {
+                assert!(!page.access.as_ref().unwrap().enabled);
+                assert!(page.error.is_none());
+            })
+            .unwrap();
+    }
+    server.assert_idle(cx);
+}

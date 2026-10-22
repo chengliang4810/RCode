@@ -271,18 +271,21 @@ impl DevicesPage {
             return;
         }
         let text = crate::l10n::localizer();
-        let Ok(port) = self.port.read(cx).text().parse::<u16>() else {
-            self.error = Some(text.text(TextKey::SettingsDevicesInvalidPort));
-            cx.notify();
-            return;
+        let port = if enabled {
+            match self.port.read(cx).text().parse::<u16>() {
+                Ok(port) if port != 0 => port,
+                _ => {
+                    self.error = Some(text.text(TextKey::SettingsDevicesInvalidPort));
+                    cx.notify();
+                    return;
+                }
+            }
+        } else {
+            // Closing access must not depend on an unfinished settings draft.
+            self.access.as_ref().map_or(27655, |access| access.port)
         };
-        if port == 0 {
-            self.error = Some(text.text(TextKey::SettingsDevicesInvalidPort));
-            cx.notify();
-            return;
-        }
         let mut params = json!({"enabled":enabled,"port":port});
-        if replace_key {
+        if enabled && replace_key {
             let key = self.key.read(cx).text();
             if !valid_key(key) {
                 self.error = Some(text.text(TextKey::SettingsDevicesInvalidKey));
