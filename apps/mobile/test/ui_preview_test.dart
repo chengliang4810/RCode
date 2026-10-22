@@ -22,11 +22,6 @@ void main() {
     final preferences = await AppPreferences.load();
     await preferences.setValue('language', 'zh');
     await preferences.setValue('renderMath', false);
-    for (final family in ['Geist', 'GeistMono']) {
-      final font = FontLoader(family)
-        ..addFont(rootBundle.load('assets/fonts/$family.ttf'));
-      await font.load();
-    }
     final cjk = Platform.environment['RCODE_QA_CJK_FONT'];
     if (cjk != null) {
       final bytes = await tester.runAsync(() => File(cjk).readAsBytes());
@@ -34,9 +29,6 @@ void main() {
         'Microsoft YaHei',
       )..addFont(Future.value(ByteData.sublistView(bytes!)))).load();
     }
-    await (FontLoader(
-      'MaterialIcons',
-    )..addFont(rootBundle.load('fonts/MaterialIcons-Regular.otf'))).load();
     final workspace = PageWorkspace();
     workspace.spaces = [
       {'id': 'project', 'name': 'RCode', 'path': '/workspace', 'deviceId': 'a'},
