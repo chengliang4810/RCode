@@ -935,3 +935,93 @@ async fn absolute_paths_read_inside_normally_and_outside_read_only() {
     );
     core.shutdown().await;
 }
+
+/// A path as the chat's shell prints it: the drive spelling without the
+/// verbatim prefix `canonicalize` adds.
+#[cfg(windows)]
+fn drive_spelling(path: &Path) -> String {
+    let path = path.to_string_lossy();
+    path.strip_prefix(r"\\?\").unwrap_or(&path).to_string()
+}
+
+// Drive paths are absolute on this host too, in the spelling a Windows chat
+// writes: the agent's own `D:\...` link reads the workspace file, and one
+// outside every root stays read-only.
+#[cfg(windows)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn drive_paths_read_inside_normally_and_outside_read_only() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    init_repo(&repo).await;
+    let outside = temp.path().join("outside");
+    std::fs::create_dir_all(&outside).expect("outside dir");
+    std::fs::write(outside.join("report.md"), "outside\n").expect("outside file");
+    let core = assemble(&temp.path().join("data"), "device-drive");
+    core.workspace
+        .create_space(
+            "space-drive",
+            &core.device_id,
+            &repo.to_string_lossy(),
+            None,
+            true,
+        )
+        .expect("space");
+    core.workspace
+        .create_chat("chat-drive", Some("space-drive"), None, None, None)
+        .expect("chat");
+    let client = rcode_rpc::memory_client(core.rpc_service());
+
+    // The link's own spelling - a drive path with backslashes - reads the file
+    // as the equivalent relative path does.
+    let inside_abs = drive_spelling(&std::fs::canonicalize(repo.join("README.md")).unwrap());
+    let read: WorkspaceFileText = serde_json::from_value(
+        client
+            .call(
+                methods::READ_WORKSPACE_FILE,
+                serde_json::json!({ "chatId": "chat-drive", "path": inside_abs }),
+            )
+            .await
+            .expect("inside drive read"),
+    )
+    .expect("typed inside read");
+    assert_eq!(read.text.as_deref(), Some("hello\n"));
+    assert_eq!(read.path, "README.md");
+    assert!(read.read_only_reason.is_none());
+    assert!(!read.checkout_id.is_empty());
+
+    // The same path outside every root is a read-only host file with no
+    // checkout identity, in either separator spelling.
+    let outside_abs = drive_spelling(&std::fs::canonicalize(outside.join("report.md")).unwrap());
+    for spelling in [outside_abs.clone(), outside_abs.replace('\\', "/")] {
+        let read: WorkspaceFileText = serde_json::from_value(
+            client
+                .call(
+                    methods::READ_WORKSPACE_FILE,
+                    serde_json::json!({ "chatId": "chat-drive", "path": spelling }),
+                )
+                .await
+                .expect("outside drive read"),
+        )
+        .expect("typed outside read");
+        assert_eq!(read.text.as_deref(), Some("outside\n"), "{spelling}");
+        assert_eq!(
+            read.read_only_reason,
+            Some(rcode_proto::WorkspaceReadOnlyReason::OutsideWorkspace),
+            "{spelling}"
+        );
+        assert!(read.checkout_id.is_empty(), "{spelling}");
+    }
+
+    // A drive path is still never a workspace-relative one, so a space target
+    // keeps rejecting it.
+    assert!(
+        client
+            .call(
+                methods::READ_WORKSPACE_FILE,
+                serde_json::json!({ "spaceId": "space-drive", "path": outside_abs }),
+            )
+            .await
+            .is_err()
+    );
+    core.shutdown().await;
+}

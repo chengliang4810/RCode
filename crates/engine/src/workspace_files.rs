@@ -22,6 +22,7 @@ use rcode_proto::{
     WriteWorkspaceFileRequest,
 };
 use rcode_rpc::RpcError;
+use rcode_proto::device_paths::is_host_absolute;
 use rcode_proto::workspace_errors::{WorkspaceFailure, WorkspaceRule};
 use sha2::{Digest, Sha256};
 use tokio::sync::{Notify, broadcast, mpsc};
@@ -556,8 +557,11 @@ impl WorkspaceFiles {
     ) -> Result<WorkspaceFileText, WorkspaceFilesError> {
         let workspace = self.resolve_target(&request.target).await?;
         // Only a chat target may read by absolute path; space targets keep
-        // the workspace-relative grammar.
-        let absolute = request.target.chat_id.is_some() && request.path.starts_with('/');
+        // the workspace-relative grammar. Absolute means absolute on the host
+        // that owns the path — a POSIX root or a Windows drive — so a Windows
+        // chat's `D:\…` link is read as that file instead of being rejected as
+        // an invalid relative path.
+        let absolute = request.target.chat_id.is_some() && is_host_absolute(&request.path);
         let cancel = Arc::new(AtomicBool::new(false));
         let cancel_on_drop = CancelOnDrop::new(cancel.clone());
         let result = tokio::task::spawn_blocking(move || {
@@ -587,7 +591,7 @@ impl WorkspaceFiles {
         request: rcode_proto::ReadWorkspaceImageRequest,
     ) -> Result<rcode_proto::WorkspaceImageChunk, WorkspaceFilesError> {
         let workspace = self.resolve_target(&request.target).await?;
-        let absolute = request.target.chat_id.is_some() && request.path.starts_with('/');
+        let absolute = request.target.chat_id.is_some() && is_host_absolute(&request.path);
         if !absolute
             && (request.expected_checkout_id.is_empty()
                 || request.expected_checkout_id != workspace.checkout_id)
@@ -1713,23 +1717,34 @@ enum AbsoluteRead {
 }
 
 /// Canonicalize an absolute request path and classify it against the
-/// workspace. The wire grammar mirrors the link side's safety envelope: one
-/// leading slash, never `//`, no trailing slash, no `?`, backslashes, NUL or
-/// `.`/`..` segments. A missing path is the same `NotFound` a relative read
-/// reports.
+/// workspace. The wire grammar mirrors the link side's safety envelope, in
+/// the path's own spelling: no `?`, no control characters, no empty, `.` or
+/// `..` step, and no doubled or trailing separator. A POSIX path separates
+/// with `/` and its one leading slash is the root; a Windows one separates
+/// with the host's own characters and names its drive. A missing path is the
+/// same `NotFound` a relative read reports.
 fn resolve_absolute_read(
     workspace: &ResolvedWorkspace,
     path: &str,
 ) -> Result<AbsoluteRead, WorkspaceFilesError> {
     if path.len() > MAX_ABSOLUTE_PATH_BYTES
-        || path.len() == 1
-        || path.starts_with("//")
-        || path.ends_with('/')
-        || path.contains(['\\', '?'])
+        || path.contains('?')
         || path.chars().any(char::is_control)
-        || path
-            .split('/')
-            .any(|component| matches!(component, "." | ".."))
+    {
+        return Err(bad_path(WorkspaceRule::PathRelative));
+    }
+    let names: Vec<&str> = if rcode_proto::device_paths::is_windows_drive(path) {
+        // The separator just past the drive is the root's, not a name.
+        path[2..].split(['\\', '/']).skip(1).collect()
+    } else {
+        match path.strip_prefix('/') {
+            Some(rest) if !rest.starts_with('/') => rest.split('/').collect(),
+            _ => return Err(bad_path(WorkspaceRule::PathRelative)),
+        }
+    };
+    if names
+        .iter()
+        .any(|name| name.is_empty() || matches!(*name, "." | ".."))
     {
         return Err(bad_path(WorkspaceRule::PathRelative));
     }
@@ -3212,6 +3227,89 @@ mod tests {
             Some(WorkspaceReadOnlyReason::NotRegularFile)
         );
         assert!(file.text.is_none());
+    }
+
+    /// A Windows chat writes absolute paths in the spelling its own shell
+    /// prints. The host reads them as the files they name; anything outside
+    /// the workspace stays read-only.
+    #[cfg(windows)]
+    #[test]
+    fn drive_paths_read_inside_normally_and_outside_read_only() {
+        let workspace_dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(workspace_dir.path().join("dir")).unwrap();
+        std::fs::write(workspace_dir.path().join("dir/file.txt"), b"inside\n").unwrap();
+        let canonical_root = std::fs::canonicalize(workspace_dir.path()).unwrap();
+        let workspace = ResolvedWorkspace {
+            checkout_id: "checkout-test".into(),
+            root: canonical_root.clone(),
+        };
+        // The chat's own spelling: no verbatim prefix, backslash separators.
+        let plain = drive_spelling(&canonical_root);
+        let inside = format!("{plain}\\dir\\file.txt");
+        let file = read_absolute_file_blocking(&workspace, &inside, &no_cancel()).unwrap();
+        assert_eq!(file.text.as_deref(), Some("inside\n"));
+        assert_eq!(file.path, "dir/file.txt");
+        assert_eq!(file.checkout_id, "checkout-test");
+        assert!(file.read_only_reason.is_none());
+
+        // Another folder on the same drive is a read-only host file, and it
+        // reads whichever separator the link spelled it with.
+        let outside_dir = tempfile::tempdir().unwrap();
+        std::fs::write(outside_dir.path().join("report.md"), b"outside\n").unwrap();
+        let outside = drive_spelling(&std::fs::canonicalize(outside_dir.path().join("report.md")).unwrap());
+        for spelling in [outside.clone(), outside.replace('\\', "/")] {
+            let file = read_absolute_file_blocking(&workspace, &spelling, &no_cancel()).unwrap();
+            assert_eq!(file.text.as_deref(), Some("outside\n"), "{spelling}");
+            assert_eq!(
+                file.read_only_reason,
+                Some(WorkspaceReadOnlyReason::OutsideWorkspace),
+                "{spelling}"
+            );
+            assert_eq!(file.checkout_id, "", "{spelling}");
+            assert_eq!(file.path, spelling);
+        }
+    }
+
+    /// A path as the chat's shell prints it: the drive spelling without the
+    /// verbatim prefix `canonicalize` adds.
+    #[cfg(windows)]
+    fn drive_spelling(path: &Path) -> String {
+        let path = path.to_string_lossy();
+        path.strip_prefix(r"\\?\").unwrap_or(&path).to_string()
+    }
+
+    /// The absolute wire shape is checked in the path's own spelling, before
+    /// any filesystem access, so the same rules hold on every host.
+    #[test]
+    fn absolute_wire_shapes_are_checked_in_their_own_spelling() {
+        let workspace = ResolvedWorkspace {
+            checkout_id: String::new(),
+            root: PathBuf::from("/nowhere"),
+        };
+        for path in [
+            "",
+            "/",
+            "//double/slash.md",
+            "/tmp/dir/",
+            "/tmp/a?b.md",
+            "/tmp/a/../b.md",
+            "/tmp/./b.md",
+            "D:",
+            "D:/",
+            "D:\\",
+            "D:\\\\dir\\a.md",
+            "D:\\dir\\\\a.md",
+            "D:\\dir\\a.md\\",
+            "D:\\dir\\..\\a.md",
+            "D:\\dir\\.\\a.md",
+            "D:\\a?b.md",
+            "D:dir\\a.md",
+        ] {
+            match resolve_absolute_read(&workspace, path) {
+                Err(WorkspaceFilesError::BadParams(_)) => {}
+                other => panic!("{path}: {:?}", other.map(|_| ())),
+            }
+        }
     }
 
     #[cfg(unix)]
