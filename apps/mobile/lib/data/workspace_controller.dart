@@ -72,6 +72,10 @@ class WorkspaceController extends ChangeNotifier {
   final List<StreamSubscription<dynamic>> _subscriptions = [];
   final Map<String, SessionController> _sessionControllers = {};
   final Map<String, int> _sessionViews = {};
+  final Map<String, int> _sessionTouches = {};
+  final Map<String, VoidCallback> _sessionListeners = {};
+  int _sessionClock = 0;
+  bool _warmEvictionScheduled = false;
   Timer? _cacheDebounce;
   Future<void> _credentialWrites = Future.value();
   Future<void> _workspaceCacheWrites = Future.value();
@@ -129,11 +133,7 @@ class WorkspaceController extends ChangeNotifier {
     error = null;
     await _cancelSubscriptions();
     if (_disposed || generation != _generation) return;
-    for (final session in _sessionControllers.values.toList()) {
-      session.dispose();
-    }
-    _sessionControllers.clear();
-    _sessionViews.clear();
+    _disposeSessions();
     _clearWorkspace();
     _paired = restoring;
     host = normalized;
@@ -247,11 +247,7 @@ class WorkspaceController extends ChangeNotifier {
     error = null;
     await _cancelSubscriptions();
     if (_disposed || generation != _generation) return;
-    for (final session in _sessionControllers.values.toList()) {
-      session.dispose();
-    }
-    _sessionControllers.clear();
-    _sessionViews.clear();
+    _disposeSessions();
     await rpc.disconnect();
     if (_disposed || generation != _generation) return;
     _clearWorkspace();
@@ -286,11 +282,14 @@ class WorkspaceController extends ChangeNotifier {
   }
 
   SessionController session(String chatId) {
+    _sessionTouches[chatId] = ++_sessionClock;
     final existing = _sessionControllers[chatId];
     if (existing != null && !existing.disposed) return existing;
     final controller = SessionController(this, chatId);
     _sessionControllers[chatId] = controller;
     _sessionViews.remove(chatId);
+    _sessionListeners[chatId] = _scheduleWarmEviction;
+    controller.addListener(_scheduleWarmEviction);
     return controller;
   }
 
@@ -307,8 +306,50 @@ class WorkspaceController extends ChangeNotifier {
       _sessionViews[controller.chatId] = count - 1;
     } else {
       _sessionViews.remove(controller.chatId);
-      _sessionControllers.remove(controller.chatId);
-      controller.dispose();
+      _scheduleWarmEviction();
+    }
+  }
+
+  void _scheduleWarmEviction() {
+    if (_disposed || _warmEvictionScheduled) return;
+    _warmEvictionScheduled = true;
+    scheduleMicrotask(() {
+      _warmEvictionScheduled = false;
+      if (_disposed) return;
+      final quiet =
+          _sessionControllers.values
+              .where(
+                (session) =>
+                    (_sessionViews[session.chatId] ?? 0) == 0 &&
+                    !session.needsWarmSubscription,
+              )
+              .toList()
+            ..sort(
+              (a, b) => (_sessionTouches[a.chatId] ?? 0).compareTo(
+                _sessionTouches[b.chatId] ?? 0,
+              ),
+            );
+      for (final session in quiet.take(
+        quiet.length > 6 ? quiet.length - 6 : 0,
+      )) {
+        _removeSession(session);
+      }
+    });
+  }
+
+  void _removeSession(SessionController session) {
+    final id = session.chatId;
+    final listener = _sessionListeners.remove(id);
+    if (listener != null) session.removeListener(listener);
+    _sessionControllers.remove(id);
+    _sessionViews.remove(id);
+    _sessionTouches.remove(id);
+    session.dispose();
+  }
+
+  void _disposeSessions() {
+    for (final session in _sessionControllers.values.toList()) {
+      _removeSession(session);
     }
   }
 
@@ -457,11 +498,7 @@ class WorkspaceController extends ChangeNotifier {
     _cacheDebounce?.cancel();
     rpc.removeListener(_connectionChanged);
     unawaited(_cancelSubscriptions());
-    for (final session in _sessionControllers.values.toList()) {
-      session.dispose();
-    }
-    _sessionControllers.clear();
-    _sessionViews.clear();
+    _disposeSessions();
     rpc.dispose();
     super.dispose();
   }
