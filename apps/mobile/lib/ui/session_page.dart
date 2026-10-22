@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 
 import '../data/workspace_controller.dart';
@@ -50,6 +51,12 @@ class _SessionPageState extends State<SessionPage> {
   String? _metadataIdentity;
   JsonMap? _pullRequest;
   bool _canSteer = false;
+  Set<String>? _waitingOwnBefore, _queuedBefore;
+  String? _anchorId, _tailIdentity;
+  GlobalKey? _anchorKey;
+  GlobalKey _tailKey = GlobalKey();
+  double _runway = 0, _transcriptHeight = 0;
+  bool _followScheduled = false;
   late final String _draftKey;
   @override
   void initState() {
@@ -158,17 +165,94 @@ class _SessionPageState extends State<SessionPage> {
     if (!mounted) return;
     _refreshMetadata();
     final entries = _session.entries;
+    final materialized = _session.messages.where(
+      (row) => row['role'] == 'user',
+    );
+    if (_queuedBefore case final before?) {
+      final landed = materialized
+          .where((row) => !before.contains('${row['id']}'))
+          .lastOrNull;
+      if (landed != null) {
+        _queuedBefore = null;
+        _anchorTo('${landed['id']}');
+      }
+    }
+    if (_waitingOwnBefore case final before?) {
+      final landed = entries
+          .where(
+            (row) => row['role'] == 'user' && !before.contains('${row['id']}'),
+          )
+          .lastOrNull;
+      if (landed != null) {
+        _waitingOwnBefore = null;
+        _anchorTo('${landed['id']}');
+      }
+    }
+    final tailIdentity = _session.working
+        ? 'working'
+        : '${entries.lastOrNull?['id']}';
+    if (tailIdentity != _tailIdentity) {
+      _tailIdentity = tailIdentity;
+      _tailKey = GlobalKey();
+    }
     final next =
         '${entries.length}:${entries.lastOrNull?['id']}:${identityHashCode(entries.lastOrNull)}:${_session.openInput?['requestId']}';
     if (_signature != next && _following) {
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (_following) _bottom(animate: false);
-      });
+      _scheduleFollow();
     }
     _signature = next;
     final ids = entries.map((entry) => '${entry['id']}').toSet();
     _rows.removeWhere((id, _) => !ids.contains(id));
     setState(() {});
+  }
+
+  void _anchorTo(String id) {
+    _anchorId = id;
+    _anchorKey = GlobalKey();
+    _runway = 0;
+    _following = true;
+    _jump = false;
+  }
+
+  void _scheduleFollow() {
+    if (_followScheduled || !_following) return;
+    _followScheduled = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _followScheduled = false;
+      if (mounted && _following) unawaited(_bottom(animate: false));
+    });
+  }
+
+  void _measureRunway() {
+    if (_anchorId == null || !_scroll.hasClients) return;
+    final anchor = _anchorKey?.currentContext?.findRenderObject();
+    final tail = _tailKey.currentContext?.findRenderObject();
+    if (anchor is! RenderBox ||
+        tail is! RenderBox ||
+        !anchor.attached ||
+        !tail.attached) {
+      return;
+    }
+    final viewport = RenderAbstractViewport.maybeOf(anchor);
+    if (viewport == null) return;
+    final top = viewport.getOffsetToReveal(anchor, 0).offset;
+    final naturalEnd =
+        viewport.getOffsetToReveal(tail, 0).offset + tail.size.height + 32;
+    final needed = (top + _scroll.position.viewportDimension - naturalEnd)
+        .clamp(0, _scroll.position.viewportDimension)
+        .toDouble();
+    if ((needed - _runway).abs() > .5 && mounted) {
+      setState(() => _runway = needed);
+    }
+  }
+
+  Widget _transcriptRow(JsonMap entry, bool tail) {
+    Widget row = _message(entry);
+    if (tail) row = KeyedSubtree(key: _tailKey, child: row);
+    if (entry['id'] == _anchorId) {
+      row = _AnchorRetention(key: _anchorKey, child: row);
+    }
+    return SizeChangedLayoutNotifier(child: row);
   }
 
   void _refreshMetadata() {
@@ -258,6 +342,7 @@ class _SessionPageState extends State<SessionPage> {
     final request = ++_scrollRequest;
     _autoScrolling = true;
     _following = true;
+    _measureRunway();
     if (_jump) setState(() => _jump = false);
     if (!animate || MediaQuery.disableAnimationsOf(context)) {
       _scroll.jumpTo(_scroll.position.maxScrollExtent);
@@ -270,9 +355,10 @@ class _SessionPageState extends State<SessionPage> {
     }
     // Lazy rows and decoded images can change the extent during the animation.
     // Settle against the measured tail instead of its earlier estimate.
-    for (var pass = 0; pass < 3; pass++) {
+    for (var pass = 0; pass < 4; pass++) {
       await WidgetsBinding.instance.endOfFrame;
       if (!mounted || request != _scrollRequest || !_scroll.hasClients) return;
+      _measureRunway();
       _scroll.jumpTo(_scroll.position.maxScrollExtent);
     }
     if (request == _scrollRequest) _autoScrolling = false;
@@ -293,6 +379,17 @@ class _SessionPageState extends State<SessionPage> {
       final outgoing = [..._attachments];
       if (before.trim().isEmpty && outgoing.isEmpty) return;
       if (interrupt) await _session.interrupt();
+      final users = _session.entries
+          .where((row) => row['role'] == 'user')
+          .map((row) => '${row['id']}')
+          .toSet();
+      if (_session.working && !steer && !interrupt) {
+        _queuedBefore ??= users;
+      } else {
+        _queuedBefore = null;
+        _waitingOwnBefore = users;
+      }
+      _following = true;
       final existing = _session.pendingMessages.map((row) => row['id']).toSet();
       try {
         await _session.send(before, attachments: outgoing, steer: steer);
@@ -303,6 +400,8 @@ class _SessionPageState extends State<SessionPage> {
           // An uncertain acknowledgement already has a stable local echo.
           // Its Retry action reuses that command instead of creating a second run.
           await _clearSentDraft(before, outgoing);
+        } else {
+          _waitingOwnBefore = null;
         }
         rethrow;
       }
@@ -315,6 +414,7 @@ class _SessionPageState extends State<SessionPage> {
     List<UploadAttachment> outgoing,
   ) async {
     if (!mounted) return;
+    _focus.unfocus();
     // A late send acknowledgement cannot erase a newer draft.
     if (_text.text == before) _text.clear();
     for (final attachment in outgoing) {
@@ -323,7 +423,7 @@ class _SessionPageState extends State<SessionPage> {
     await widget.preferences.setJson(_draftKey, {
       'text': _text.text,
     }, notify: false);
-    _bottom();
+    _scheduleFollow();
   }
 
   Future<void> _attach() async {
@@ -580,55 +680,84 @@ class _SessionPageState extends State<SessionPage> {
                     if (!_session.hydrated && entries.isEmpty)
                       const Center(child: CircularProgressIndicator())
                     else
-                      NotificationListener<ScrollStartNotification>(
-                        onNotification: (notice) {
-                          if (notice.dragDetails != null) {
-                            ++_scrollRequest;
-                            _autoScrolling = false;
-                            _scrolled();
+                      LayoutBuilder(
+                        builder: (context, bounds) {
+                          if ((_transcriptHeight - bounds.maxHeight).abs() >
+                              .5) {
+                            _transcriptHeight = bounds.maxHeight;
+                            if (_anchorId != null) _scheduleFollow();
                           }
-                          return false;
+                          return NotificationListener<
+                            SizeChangedLayoutNotification
+                          >(
+                            onNotification: (_) {
+                              _scheduleFollow();
+                              return false;
+                            },
+                            child: NotificationListener<ScrollStartNotification>(
+                              onNotification: (notice) {
+                                if (notice.dragDetails != null) {
+                                  ++_scrollRequest;
+                                  _autoScrolling = false;
+                                  _scrolled();
+                                }
+                                return false;
+                              },
+                              child: ListView.builder(
+                                key: PageStorageKey(
+                                  'transcript.${widget.workspace.cacheScope}.${widget.chatId}',
+                                ),
+                                controller: _scroll,
+                                padding: EdgeInsets.only(
+                                  top: 10,
+                                  bottom: 32 + _runway,
+                                ),
+                                keyboardDismissBehavior:
+                                    ScrollViewKeyboardDismissBehavior.onDrag,
+                                itemCount: entries.length + (busy ? 1 : 0),
+                                itemBuilder: (context, i) => i == entries.length
+                                    ? SizeChangedLayoutNotifier(
+                                        child: KeyedSubtree(
+                                          key: _tailKey,
+                                          child: Padding(
+                                            padding: const EdgeInsets.fromLTRB(
+                                              24,
+                                              8,
+                                              24,
+                                              14,
+                                            ),
+                                            child: Row(
+                                              children: [
+                                                SizedBox(
+                                                  width: 12,
+                                                  height: 12,
+                                                  child:
+                                                      CircularProgressIndicator(
+                                                        strokeWidth: 1.5,
+                                                        color: c.secondary,
+                                                      ),
+                                                ),
+                                                const SizedBox(width: 10),
+                                                Text(
+                                                  context.tr('正在处理', 'Working'),
+                                                  style: TextStyle(
+                                                    fontSize: 12,
+                                                    color: c.secondary,
+                                                  ),
+                                                ),
+                                              ],
+                                            ),
+                                          ),
+                                        ),
+                                      )
+                                    : _transcriptRow(
+                                        entries[i],
+                                        !busy && i == entries.length - 1,
+                                      ),
+                              ),
+                            ),
+                          );
                         },
-                        child: ListView.builder(
-                          key: PageStorageKey(
-                            'transcript.${widget.workspace.cacheScope}.${widget.chatId}',
-                          ),
-                          controller: _scroll,
-                          padding: const EdgeInsets.only(top: 10, bottom: 32),
-                          keyboardDismissBehavior:
-                              ScrollViewKeyboardDismissBehavior.onDrag,
-                          itemCount: entries.length + (busy ? 1 : 0),
-                          itemBuilder: (context, i) => i == entries.length
-                              ? Padding(
-                                  padding: const EdgeInsets.fromLTRB(
-                                    24,
-                                    8,
-                                    24,
-                                    14,
-                                  ),
-                                  child: Row(
-                                    children: [
-                                      SizedBox(
-                                        width: 12,
-                                        height: 12,
-                                        child: CircularProgressIndicator(
-                                          strokeWidth: 1.5,
-                                          color: c.secondary,
-                                        ),
-                                      ),
-                                      const SizedBox(width: 10),
-                                      Text(
-                                        context.tr('正在处理', 'Working'),
-                                        style: TextStyle(
-                                          fontSize: 12,
-                                          color: c.secondary,
-                                        ),
-                                      ),
-                                    ],
-                                  ),
-                                )
-                              : _message(entries[i]),
-                        ),
                       ),
                     if (_jump)
                       Positioned(
@@ -1045,4 +1174,22 @@ class _SessionPageState extends State<SessionPage> {
 
 class _SendIntent extends Intent {
   const _SendIntent();
+}
+
+class _AnchorRetention extends StatefulWidget {
+  const _AnchorRetention({super.key, required this.child});
+  final Widget child;
+  @override
+  State<_AnchorRetention> createState() => _AnchorRetentionState();
+}
+
+class _AnchorRetentionState extends State<_AnchorRetention>
+    with AutomaticKeepAliveClientMixin {
+  @override
+  bool get wantKeepAlive => true;
+  @override
+  Widget build(BuildContext context) {
+    super.build(context);
+    return widget.child;
+  }
 }
