@@ -723,6 +723,7 @@ enum MutateParams {
 #[derive(Clone)]
 pub struct EngineRpc {
     remote_access: Option<std::sync::Arc<crate::remote_access::RemoteAccess>>,
+    remote_hosts: Option<std::sync::Arc<crate::remote_hosts::RemoteHosts>>,
     sessions: SessionsEngine,
     doc_host: DocHost,
     workspace: WorkspaceHost,
@@ -768,6 +769,7 @@ impl EngineRpc {
         let github = GitHubCli::new().with_store(repos.data_dir());
         Self {
             remote_access: None,
+            remote_hosts: None,
             sessions,
             doc_host,
             workspace,
@@ -800,7 +802,50 @@ impl EngineRpc {
 
     pub fn without_remote_access(mut self) -> Self {
         self.remote_access = None;
+        self.remote_hosts = None;
         self
+    }
+
+    pub fn with_remote_hosts(mut self, hosts: std::sync::Arc<crate::remote_hosts::RemoteHosts>) -> Self {
+        self.remote_hosts = Some(hosts);
+        self
+    }
+
+    fn hosts(&self) -> Result<&std::sync::Arc<crate::remote_hosts::RemoteHosts>, RpcError> {
+        self.remote_hosts.as_ref().ok_or_else(|| RpcError::Failed("remote host management is local only".into()))
+    }
+
+    fn catalog_stream<T>(&self, method: &'static str, local: watch::Receiver<T>) -> BoxStream<'static, serde_json::Value>
+    where T: serde::Serialize + Clone + Send + Sync + 'static {
+        let Some(hosts) = self.remote_hosts.clone() else { return watch_stream(local) };
+        let changed = hosts.changes();
+        futures::stream::unfold((local, changed, hosts, false), move |(mut local, mut changed, hosts, emitted)| async move {
+            if emitted {
+                tokio::select! {
+                    result = local.changed() => { result.ok()?; },
+                    result = changed.changed() => { result.ok()?; },
+                }
+            }
+            changed.borrow_and_update();
+            let rows = serde_json::to_value(&*local.borrow_and_update()).ok()?;
+            Some((hosts.merge(method, rows), (local, changed, hosts, true)))
+        }).boxed()
+    }
+
+    async fn forward_direct(&self, client: std::sync::Arc<rcode_rpc::RpcClient>, method: &str, mut params: serde_json::Value) -> Result<RpcReply, RpcError> {
+        if let Some(params) = params.as_object_mut() { params.remove("targetDeviceId"); }
+        if is_stream_method(method) || method.starts_with("Watch") {
+            let rx = if matches!(method, methods::WATCH_CHECKOUT_CHANGE_REQUEST | methods::WATCH_WORKSPACE_GIT_STATUS) {
+                client.subscribe_checked(method, params).await?
+            } else { client.subscribe_scoped(method, params).await? };
+            Ok(RpcReply::Stream(futures::stream::unfold((rx, client), |(mut rx, client)| async move {
+                rx.recv().await.map(|value| (value, (rx, client)))
+            }).boxed()))
+        } else {
+            let value = tokio::time::timeout(forward_deadline(method), client.call(method, params)).await
+                .map_err(|_| RpcError::Transport("remote request timed out; it may already have been accepted".into()))??;
+            Ok(RpcReply::Value(value))
+        }
     }
 
     /// Attach the auth service (AuthStatus + AuthRpc mutations).
@@ -1663,6 +1708,12 @@ impl RpcService for AuthRpc {
 #[async_trait]
 impl RpcService for EngineRpc {
     async fn handle(&self, method: &str, params: serde_json::Value) -> Result<RpcReply, RpcError> {
+        if let Some(hosts) = &self.remote_hosts
+            && let Some(target) = hosts.target_for(method, &params)
+            && let Some(client) = hosts.client(&target)
+        {
+            return self.forward_direct(client?, method, params).await;
+        }
         // Device-addressed routing: forward calls that target another device over its
         // relay. The target compares the id to its own, so forwards cannot loop.
         if forwardable(method)
@@ -1678,6 +1729,17 @@ impl RpcService for EngineRpc {
                 .await;
         }
         match method {
+            "ListRemoteHosts" => RpcReply::value(&self.hosts()?.list()),
+            "SaveRemoteHost" => RpcReply::value(&self.hosts()?.save(parse_params(params)?).await?),
+            "GetRemoteHostApiKey" => {
+                let id = params["id"].as_str().ok_or_else(|| RpcError::BadParams("missing host id".into()))?;
+                RpcReply::value(&serde_json::json!({"apiKey": self.hosts()?.api_key(id)?}))
+            }
+            "RemoveRemoteHost" => {
+                let id = params["id"].as_str().ok_or_else(|| RpcError::BadParams("missing host id".into()))?;
+                self.hosts()?.remove(id).await?;
+                RpcReply::value(&serde_json::json!({"ok":true}))
+            }
             "GetRemoteAccess" => RpcReply::value(&self.remote_access.as_ref().ok_or_else(|| RpcError::Failed("external access management is local only".into()))?.view()),
             "GetRemoteAccessApiKey" => RpcReply::value(&serde_json::json!({"apiKey":self.remote_access.as_ref().ok_or_else(|| RpcError::Failed("external access management is local only".into()))?.api_key()})),
             "SetRemoteAccess" => {
@@ -2873,23 +2935,23 @@ impl RpcService for EngineRpc {
                 Ok(RpcReply::Stream(Box::pin(stream)))
             }
             methods::WATCH_CHATS => {
-                Ok(RpcReply::Stream(watch_stream(self.workspace.watch_chats())))
+                Ok(RpcReply::Stream(self.catalog_stream(methods::WATCH_CHATS, self.workspace.watch_chats())))
             }
             methods::WATCH_SIDEBAR_PREFERENCES => Ok(RpcReply::Stream(watch_stream(
                 self.workspace.watch_sidebar_preferences(),
             ))),
-            methods::WATCH_DEVICES => Ok(RpcReply::Stream(watch_stream(
-                self.workspace.watch_devices(),
+            methods::WATCH_DEVICES => Ok(RpcReply::Stream(self.catalog_stream(
+                methods::WATCH_DEVICES, self.workspace.watch_devices(),
             ))),
-            methods::WATCH_SPACES => Ok(RpcReply::Stream(watch_stream(
-                self.workspace.watch_spaces(),
+            methods::WATCH_SPACES => Ok(RpcReply::Stream(self.catalog_stream(
+                methods::WATCH_SPACES, self.workspace.watch_spaces(),
             ))),
             methods::WATCH_SESSIONS => {
                 // Local live statuses merged with remote devices' workspace rows.
                 let merged = self
                     .workspace
                     .merged_sessions_watch(self.sessions.watch_sessions());
-                Ok(RpcReply::Stream(watch_stream(merged)))
+                Ok(RpcReply::Stream(self.catalog_stream(methods::WATCH_SESSIONS, merged)))
             }
             methods::LOCAL_DEVICE => {
                 RpcReply::value(&serde_json::json!({ "deviceId": self.doc_host.device_id() }))

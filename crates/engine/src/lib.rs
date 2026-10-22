@@ -16,6 +16,7 @@ use rcode_sync::DocsStore;
 
 pub mod auth;
 pub mod remote_access;
+pub mod remote_hosts;
 mod change_request_store;
 pub mod change_requests;
 pub mod chat2_host;
@@ -135,6 +136,7 @@ pub struct EngineConfig {
 /// and the in-process (headed) mode.
 pub struct EngineCore {
     pub remote_access: Arc<remote_access::RemoteAccess>,
+    pub remote_hosts: Arc<remote_hosts::RemoteHosts>,
     pub sessions: SessionsEngine,
     pub doc_host: DocHost,
     pub workspace: WorkspaceHost,
@@ -294,8 +296,11 @@ impl EngineCore {
         let spaces_sync = SpacesSync::start(repos.clone(), workspace.clone(), &device_id);
         let remote_access = remote_access::RemoteAccess::open(config_root)
             .map_err(|error| EngineError::Other(error.to_string()))?;
+        let remote_hosts = remote_hosts::RemoteHosts::open(config_root, &device_id)
+            .map_err(|error| EngineError::Other(error.to_string()))?;
         Ok(Self {
             remote_access,
+            remote_hosts,
             sessions,
             doc_host,
             workspace,
@@ -444,6 +449,7 @@ impl EngineCore {
         )
         .with_auth(self.auth())
         .with_remote_access(self.remote_access.clone())
+        .with_remote_hosts(self.remote_hosts.clone())
         .with_previews(self.previews.clone());
         if let Some(links) = self.links() {
             rpc = rpc.with_links(links);
@@ -471,6 +477,7 @@ impl EngineCore {
     /// snapshot.
     pub async fn shutdown(&self) {
         self.remote_access.shutdown().await;
+        self.remote_hosts.shutdown().await;
         self.previews.shutdown().await;
         // A run interruption transitions its chat to Idle, and Idle normally
         // releases the next queued row. Freeze first so quitting never starts
@@ -778,6 +785,7 @@ impl Engine {
         });
 
         let external_service = Arc::new(core.rpc_service().as_ref().clone().without_remote_access());
+        core.remote_hosts.start();
         if let Some((api_key, port)) = remote_override {
             core.remote_access.start_configured(external_service, api_key, port).await?;
         } else {
