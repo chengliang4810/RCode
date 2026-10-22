@@ -5556,6 +5556,12 @@ impl DocHost {
         let Ok(commands) = handle.doc.read_commands() else {
             return false;
         };
+        let still_pending = commands.iter().any(|current| {
+            current.id == snapshot.id && current.status == SessionCommandStatus::Pending
+        });
+        if !still_pending {
+            return false;
+        }
         // A relayed command's original chat2 row can arrive after its host
         // outcome. Copy that outcome to the duplicate instead of declaring
         // the already completed execution a crash.
@@ -5564,12 +5570,6 @@ impl DocHost {
         }) {
             self.resolve_command(handle, &snapshot.id, settled.status, settled.resolution.as_deref());
             return true;
-        }
-        let still_pending = commands.iter().any(|current| {
-            current.id == snapshot.id && current.status == SessionCommandStatus::Pending
-        });
-        if !still_pending {
-            return false;
         }
         tracing::warn!(chat = %handle.chat_id, command = %snapshot.id,
             "command consumed but never resolved (crash mid-execute?); rejecting");
