@@ -17,6 +17,7 @@ pub(super) struct SessionState {
     pub expected_goal: Mutex<Option<String>>,
     pub goal_continuation: Arc<Mutex<Option<rcode_agent::goal::GoalContinuation>>>,
     pub tasks: Mutex<Option<Arc<rcode_agent::agent_tasks::AgentTasks>>>,
+    pub turn_yield: Mutex<CancellationToken>,
 }
 impl SessionState {
     fn manager(&self) -> Option<Arc<rcode_agent::agent_tasks::AgentTasks>> {
@@ -45,6 +46,7 @@ pub(super) async fn start(
         goal_continuation: Arc::default(),
         expected_goal: Mutex::default(),
         tasks: Mutex::default(),
+        turn_yield: Mutex::new(CancellationToken::new()),
     });
     let input: Arc<
         dyn Fn(
@@ -93,7 +95,7 @@ pub(super) async fn start(
         let mut session_id = request.resume.clone();
         loop {
             // User assignments have priority over completion wakes at every turn boundary.
-            let mut next: Option<SteerMessage> = pending_prompt.take();
+            let mut next: Option<SteerMessage> = if active { None } else { pending_prompt.take() };
             let user_waiting = session_goal.as_ref().is_some_and(|store| store.should_yield().unwrap_or(true));
             let mut wake = false;
             let mut goal_prompt = None;
@@ -143,6 +145,7 @@ pub(super) async fn start(
             }
             if next.is_some() || wake || goal_prompt.is_some() {
                 current_cancel = state.cancel.child_token();
+                *state.turn_yield.lock().unwrap() = CancellationToken::new();
                 *state.expected_goal.lock().unwrap() = None;
                 if let Some(prompt) = next {
                     if let Some(config) = prompt.config {
@@ -220,12 +223,17 @@ pub(super) async fn start(
                 _ = tx.closed() => { state.cancel.cancel(); break; }
                 _ = state.turn.stop_requested() => {
                     suppressed = true;
+                    pending_prompt = None;
+                    while steering.try_recv().is_ok() {}
                     current_cancel.cancel();
                     if let Some(tasks) = &manager { tasks.cancel_foreground(); }
                 }
-                prompt = steering.recv(), if !active && steering_open => {
+                prompt = steering.recv(), if pending_prompt.is_none() && steering_open => {
                     match prompt {
-                        Some(prompt) => pending_prompt = Some(prompt),
+                        Some(prompt) => {
+                            pending_prompt = Some(prompt);
+                            if active { state.turn_yield.lock().unwrap().cancel(); }
+                        }
                         None => steering_open = false,
                     }
                 }

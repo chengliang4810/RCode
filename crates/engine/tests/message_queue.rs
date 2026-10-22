@@ -5,7 +5,7 @@
 //! - idle agent → the queue drains immediately, in order;
 //! - busy agent that only takes input at a turn boundary → the queue HOLDS,
 //!   and flushes when the turn ends;
-//! - busy agent, including one that takes input mid-turn → held until turn end;
+//! - busy mid-turn agent → steer text unless explicitly held until turn end;
 //! - "send now" → interrupts whatever is running.
 
 use std::sync::{Arc, Mutex};
@@ -757,9 +757,23 @@ async fn batched_remote_steers_preserve_every_message_in_order_exactly_once() {
     core.shutdown().await;
 }
 
-/// Even agents that support mid-turn input deliver queue rows one turn at a time.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn queued_text_waits_for_a_steerable_turn_even_with_legacy_policy() {
+async fn unheld_text_steers_a_busy_agent_without_restarting_it() {
+    let (core, harness, prompts) = setup(SteeringMode::StepBoundary).await;
+    core.doc_host.queue_message(CHAT, "opening", Vec::new()).unwrap();
+    wait_for(|| prompts.lock().unwrap().iter().any(|p| p == "opening"), "first turn").await;
+    let id = core.doc_host.queue_message_with_behavior(CHAT, "correct the direction", Vec::new(), false).unwrap();
+    wait_for(|| prompts.lock().unwrap().iter().any(|p| p == "correct the direction"), "mid-turn correction").await;
+    wait_for(|| user_message_id(&core, "correct the direction").as_deref() == Some(id.as_str()), "stable correction identity").await;
+    assert!(queue_texts(&core).is_empty());
+    assert_eq!(harness.requests.lock().unwrap().len(), 1, "correction must not restart the runtime");
+    let _ = harness.finish.send(());
+    core.shutdown().await;
+}
+
+/// Queue preference holds even when the provider supports correction.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn queued_text_waits_for_a_steerable_turn_when_held() {
     let (core, harness, prompts) = setup(SteeringMode::StepBoundary).await;
     core.doc_host
         .queue_message(CHAT, "opening", Vec::new())
@@ -770,12 +784,12 @@ async fn queued_text_waits_for_a_steerable_turn_even_with_legacy_policy() {
     )
     .await;
 
-    // Omitted and explicitly false policies from old clients must both wait.
+    // Both messages explicitly opt into waiting for the turn end.
     core.doc_host
-        .queue_message(CHAT, "first queued", Vec::new())
+        .queue_message_with_behavior(CHAT, "first queued", Vec::new(), true)
         .unwrap();
     core.doc_host
-        .queue_message_with_behavior(CHAT, "second queued", Vec::new(), false)
+        .queue_message_with_behavior(CHAT, "second queued", Vec::new(), true)
         .unwrap();
     tokio::time::sleep(Duration::from_millis(150)).await;
     assert_eq!(queue_texts(&core), vec!["first queued", "second queued"]);
@@ -802,8 +816,7 @@ async fn queued_text_waits_for_a_steerable_turn_even_with_legacy_policy() {
     core.shutdown().await;
 }
 
-/// The legacy explicit-steer RPC remains compatible with older clients;
-/// current clients offer only Send now.
+/// A held row can still be explicitly promoted to correction from the queue.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn held_policy_keeps_a_steerable_message_visible_until_steer_now() {
     let (core, harness, prompts) = setup(SteeringMode::StepBoundary).await;

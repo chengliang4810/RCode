@@ -41,7 +41,7 @@
 //!
 //! ## Session lifetime
 //!
-//! - User steering is consumed at turn boundaries by `native_session`.
+//! - User steering hands off between safe steps through `native_session`.
 //!   Background Agent and Bash tasks retain their runtime until explicit teardown.
 //! Tools execute directly; their argument and path validation still applies.
 
@@ -294,7 +294,7 @@ impl Harness for NativeHarness {
     }
 
     fn steering_mode(&self) -> SteeringMode {
-        SteeringMode::TurnBoundary
+        SteeringMode::StepBoundary
     }
 
     fn reasoning_levels(&self) -> &[ReasoningLevel] {
@@ -1224,6 +1224,7 @@ impl NativeHarness {
         }
         if let Some(session) = &session {
             runner = runner.with_history_sink(session.history.clone())
+                .with_turn_yield(session.turn_yield.lock().unwrap().clone())
                 .with_goal_continuation(session.goal_continuation.clone());
             if let Some(id) = session.expected_goal.lock().unwrap().clone() {
                 runner = runner.with_expected_goal(id);

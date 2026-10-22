@@ -110,6 +110,8 @@ pub struct AgentRunner {
     inbox: Option<Arc<crate::agent_tasks::MessageInbox>>,
     history_sink: Option<Arc<std::sync::Mutex<Vec<Message>>>>,
     history_recorder: Option<Arc<dyn crate::HistoryRecorder>>,
+    /// Hand control back to the session at a safe boundary, preserving tool results.
+    turn_yield: Option<CancellationToken>,
 }
 
 impl AgentRunner {
@@ -127,6 +129,7 @@ impl AgentRunner {
             inbox: None,
             history_sink: None,
             history_recorder: None,
+            turn_yield: None,
         }
     }
 
@@ -165,6 +168,22 @@ impl AgentRunner {
     pub fn with_history_recorder(mut self, recorder: Arc<dyn crate::HistoryRecorder>) -> Self {
         self.history_recorder = Some(recorder);
         self
+    }
+
+    pub fn with_turn_yield(mut self, signal: CancellationToken) -> Self {
+        self.turn_yield = Some(signal);
+        self
+    }
+
+    async fn yield_turn(&self, messages: &[Message], tx: &mpsc::Sender<Result<AgentEvent, AgentError>>) -> bool {
+        if !self.turn_yield.as_ref().is_some_and(CancellationToken::is_cancelled) {
+            return false;
+        }
+        self.remember_history(messages);
+        // This is an internal handoff, not Stop: the session already owns the
+        // next user prompt and the engine suppresses completion notifications.
+        let _ = tx.send(Ok(AgentEvent::Done { reason: DoneReason::Complete })).await;
+        true
     }
 
     async fn record_message(&self, message: &Message) -> Result<(), AgentError> {
@@ -296,6 +315,7 @@ impl AgentRunner {
         let ceiling = self.config.max_steps.unwrap_or(usize::MAX);
         for _step in 0..ceiling {
             if cancel.is_cancelled() { return Err(AgentError::Cancelled); }
+            if self.yield_turn(&messages, tx).await { return Ok(()); }
 
             if self.goal_id.is_some() && self.active_goal()?.is_none() {
                 if let Some(tasks) = &self.tasks { tasks.cancel_foreground(); }
@@ -357,6 +377,7 @@ impl AgentRunner {
             self.remember_history(&messages);
 
             if calls.is_empty() {
+                if self.yield_turn(&messages, tx).await { return Ok(()); }
                 if let Some(inbox) = &self.inbox && !inbox.is_empty() { continue; }
                 if let Some(tasks) = &self.tasks {
                     let notifications = tasks.notifications();
@@ -446,6 +467,7 @@ impl AgentRunner {
             }
             messages.push(Message::tool_results(results));
             self.remember_history(&messages);
+            if self.yield_turn(&messages, tx).await { return Ok(()); }
         }
 
         // Only reachable when a ceiling was configured — the default runs

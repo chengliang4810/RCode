@@ -4159,7 +4159,7 @@ impl DocHost {
     /// put them.
     ///
     /// - Idle: send the head as the next turn (and loop — the agent is free).
-    /// - Turn in flight: hold. The turn-end watcher comes back for it.
+    /// - Turn in flight: steer eligible text, or hold until the turn ends.
     ///
     /// One at a time by design: each send changes the status this reads.
     pub async fn drain_queue(&self, handle: &Arc<ChatDocHandle>) {
@@ -4216,9 +4216,18 @@ impl DocHost {
             // the turn too, and the composer queues on the same reading. Taking
             // `AwaitingInput` for idle would send the follow-up as a fresh turn
             // and abandon the question.
-            if sessions.turn_in_flight(&handle.chat_id) {
-                return; // All queued messages wait, including rows from older clients.
-            }
+            let send = if sessions.turn_in_flight(&handle.chat_id) {
+                if head.hold_for_turn_end
+                    || !head.attachments.is_empty()
+                    || !sessions.live_run_steerable(&handle.chat_id)
+                    || sessions.defers_to_turn_end(&handle.chat_id, None)
+                {
+                    return;
+                }
+                QueueSend::Steer
+            } else {
+                QueueSend::NextTurn
+            };
             // A row from another device names its images by `pending://` ref
             // while the bytes chase it over the peer link. Hold it (in order)
             // until they land — UploadCommit re-drains — rather than handing
@@ -4229,7 +4238,6 @@ impl DocHost {
                 self.arm_attachment_wait(handle);
                 return;
             }
-            let send = QueueSend::NextTurn;
             // Take it only once we know it is going out — a row that stays in
             // the queue on a failed send is recoverable; a vanished one is not.
             let Ok(Some(item)) = handle.doc.take_queued(&head.id) else {
