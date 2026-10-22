@@ -3,6 +3,7 @@ import 'dart:math' as math;
 import 'dart:ui';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../data/workspace_controller.dart';
 import '../l10n.dart';
@@ -39,6 +40,9 @@ class WorkspaceShellState extends State<WorkspaceShell>
   bool _layoutSyncScheduled = false;
   bool _transferringSession = false;
   bool _coveringRoute = false;
+  bool _sidebarVisible = true;
+  final _searchFocus = FocusNode();
+  final _newDraftFocus = FocusNode();
   String? _phoneChat;
   MaterialPageRoute<void>? _phoneRoute;
 
@@ -59,7 +63,97 @@ class WorkspaceShellState extends State<WorkspaceShell>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _searchFocus.dispose();
+    _newDraftFocus.dispose();
     super.dispose();
+  }
+
+  bool _keyboardAvailable(BuildContext routeContext) =>
+      mounted &&
+      ModalRoute.of(routeContext)?.isCurrent != false &&
+      !_coveringRoute &&
+      !_transferringSession;
+
+  bool get _controlShortcuts =>
+      Theme.of(context).platform != TargetPlatform.iOS &&
+      Theme.of(context).platform != TargetPlatform.macOS;
+
+  Widget _keyboardCommands(BuildContext routeContext, Widget child) =>
+      CallbackShortcuts(
+        bindings: _keyboardAvailable(routeContext)
+            ? {
+                const SingleActivator(
+                  LogicalKeyboardKey.keyN,
+                  meta: true,
+                  includeRepeats: false,
+                ): _newSession,
+                if (_controlShortcuts)
+                  const SingleActivator(
+                    LogicalKeyboardKey.keyN,
+                    control: true,
+                    includeRepeats: false,
+                  ): _newSession,
+                const SingleActivator(
+                  LogicalKeyboardKey.keyF,
+                  meta: true,
+                  shift: true,
+                  includeRepeats: false,
+                ): _showSearch,
+                if (_controlShortcuts)
+                  const SingleActivator(
+                    LogicalKeyboardKey.keyF,
+                    control: true,
+                    shift: true,
+                    includeRepeats: false,
+                  ): _showSearch,
+                if (_wide) ...{
+                  const SingleActivator(
+                    LogicalKeyboardKey.keyB,
+                    meta: true,
+                    includeRepeats: false,
+                  ): _toggleSidebar,
+                  if (_controlShortcuts)
+                    const SingleActivator(
+                      LogicalKeyboardKey.keyB,
+                      control: true,
+                      includeRepeats: false,
+                    ): _toggleSidebar,
+                },
+              }
+            : const {},
+        child: Focus(autofocus: true, skipTraversal: true, child: child),
+      );
+
+  void _toggleSidebar() {
+    if (!_wide || _coveringRoute || _transferringSession) return;
+    setState(() => _sidebarVisible = !_sidebarVisible);
+  }
+
+  Future<void> _showSearch() async {
+    if (_coveringRoute || _transferringSession) return;
+    final route = _phoneRoute;
+    if (!_wide && route != null && route.isActive) {
+      final navigator = Navigator.of(context);
+      navigator.popUntil(
+        (candidate) => candidate == route || candidate.isFirst,
+      );
+      navigator.pop();
+      await route.completed;
+      if (!mounted) return;
+    }
+    setState(() {
+      _tab = 2;
+      _sidebarVisible = true;
+    });
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted &&
+          ModalRoute.of(context)?.isCurrent != false &&
+          !_coveringRoute &&
+          _tab == 2 &&
+          (!_wide || _sidebarVisible)) {
+        _searchFocus.requestFocus();
+      }
+    });
   }
 
   Future<void> openSession(String id) async {
@@ -80,7 +174,8 @@ class WorkspaceShellState extends State<WorkspaceShell>
     final navigator = Navigator.of(context);
     final previous = _phoneRoute;
     final route = MaterialPageRoute<void>(
-      builder: (_) => widget.sessionBuilder(id),
+      builder: (routeContext) =>
+          _keyboardCommands(routeContext, widget.sessionBuilder(id)),
     );
     setState(() {
       _phoneChat = id;
@@ -141,10 +236,20 @@ class WorkspaceShellState extends State<WorkspaceShell>
   }
 
   Future<void> _newSession() async {
+    if (_coveringRoute || _transferringSession) return;
     if (_wide) {
       setState(() {
         _selectedChat = null;
         _tab = 0;
+      });
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted &&
+            ModalRoute.of(context)?.isCurrent != false &&
+            _wide &&
+            _selectedChat == null &&
+            !_coveringRoute) {
+          _newDraftFocus.requestFocus();
+        }
       });
       return;
     }
@@ -157,6 +262,7 @@ class WorkspaceShellState extends State<WorkspaceShell>
           builder: (_) => NewSessionPage(
             workspace: widget.workspace,
             preferences: widget.preferences,
+            autofocus: true,
           ),
         ),
       );
@@ -168,6 +274,7 @@ class WorkspaceShellState extends State<WorkspaceShell>
   }
 
   Future<void> _settings() async {
+    if (_coveringRoute) return;
     _coveringRoute = true;
     try {
       await Navigator.of(context).push(
@@ -326,16 +433,20 @@ class WorkspaceShellState extends State<WorkspaceShell>
   );
 
   @override
-  Widget build(BuildContext context) => LayoutBuilder(
+  Widget build(BuildContext context) {
+    final view = View.of(context);
+    final size = view.physicalSize / view.devicePixelRatio;
+    final wide = size.width >= 840 && size.height >= 520;
+    if (!_layoutKnown || _wide != wide) {
+      _layoutKnown = true;
+      _wide = wide;
+      _scheduleLayoutSync();
+    }
+    return _keyboardCommands(context, _layout(context));
+  }
+
+  Widget _layout(BuildContext context) => LayoutBuilder(
     builder: (context, constraints) {
-      final view = View.of(context);
-      final size = view.physicalSize / view.devicePixelRatio;
-      final wide = size.width >= 840 && size.height >= 520;
-      if (!_layoutKnown || _wide != wide) {
-        _layoutKnown = true;
-        _wide = wide;
-        _scheduleLayoutSync();
-      }
       if (_wide) {
         final width = math.min(360.0, constraints.maxWidth * .36);
         return Scaffold(
@@ -346,57 +457,114 @@ class WorkspaceShellState extends State<WorkspaceShell>
               Expanded(
                 child: Row(
                   children: [
-                    SizedBox(
-                      width: width,
-                      child: Column(
-                        children: [
-                          Expanded(
-                            child: SessionsPage(
-                              key: ValueKey('wide-sessions-${_tab == 2}'),
-                              workspace: widget.workspace,
-                              preferences: widget.preferences,
-                              onOpen: openSession,
-                              currentChatId: _selectedChat,
-                              embedded: true,
-                              search: _tab == 2,
-                            ),
+                    ExcludeFocus(
+                      excluding: !_sidebarVisible,
+                      child: Offstage(
+                        offstage: !_sidebarVisible,
+                        child: SizedBox(
+                          width: width,
+                          child: Column(
+                            children: [
+                              Expanded(
+                                child: SessionsPage(
+                                  key: ValueKey('wide-sessions-${_tab == 2}'),
+                                  workspace: widget.workspace,
+                                  preferences: widget.preferences,
+                                  onOpen: openSession,
+                                  currentChatId: _selectedChat,
+                                  embedded: true,
+                                  search: _tab == 2,
+                                  searchFocusNode: _searchFocus,
+                                ),
+                              ),
+                              SafeArea(
+                                top: false,
+                                child: Padding(
+                                  padding: const EdgeInsets.fromLTRB(
+                                    12,
+                                    2,
+                                    12,
+                                    8,
+                                  ),
+                                  child: Row(
+                                    children: [
+                                      IconButton(
+                                        key: const Key('sidebar-hide'),
+                                        tooltip: context.tr(
+                                          '隐藏侧栏',
+                                          'Hide sidebar',
+                                        ),
+                                        onPressed: _toggleSidebar,
+                                        icon: const Icon(Icons.menu_open),
+                                      ),
+                                      IconButton(
+                                        key: const Key('sidebar-settings'),
+                                        tooltip: context.tr('设置', 'Settings'),
+                                        onPressed: _settings,
+                                        icon: const Icon(
+                                          Icons.settings_outlined,
+                                        ),
+                                      ),
+                                      IconButton(
+                                        key: const Key('sidebar-search'),
+                                        tooltip: context.tr('搜索', 'Search'),
+                                        onPressed: () {
+                                          if (_tab == 2) {
+                                            setState(() => _tab = 0);
+                                          } else {
+                                            unawaited(_showSearch());
+                                          }
+                                        },
+                                        isSelected: _tab == 2,
+                                        icon: const Icon(Icons.search),
+                                      ),
+                                      const Spacer(),
+                                      IconButton(
+                                        key: const Key('sidebar-new'),
+                                        tooltip: context.tr(
+                                          '新会话',
+                                          'New Session',
+                                        ),
+                                        onPressed: _newSession,
+                                        icon: const Icon(Icons.add),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ),
+                            ],
                           ),
-                          SafeArea(
-                            top: false,
-                            child: Padding(
-                              padding: const EdgeInsets.fromLTRB(12, 2, 12, 8),
-                              child: Row(
-                                children: [
-                                  IconButton(
-                                    key: const Key('sidebar-settings'),
-                                    tooltip: context.tr('设置', 'Settings'),
-                                    onPressed: _settings,
-                                    icon: const Icon(Icons.settings_outlined),
-                                  ),
-                                  IconButton(
-                                    key: const Key('sidebar-search'),
-                                    tooltip: context.tr('搜索', 'Search'),
-                                    onPressed: () => setState(
-                                      () => _tab = _tab == 2 ? 0 : 2,
-                                    ),
-                                    isSelected: _tab == 2,
-                                    icon: const Icon(Icons.search),
-                                  ),
-                                  const Spacer(),
-                                  IconButton(
-                                    key: const Key('sidebar-new'),
-                                    tooltip: context.tr('新会话', 'New Session'),
-                                    onPressed: _newSession,
-                                    icon: const Icon(Icons.add),
-                                  ),
-                                ],
+                        ),
+                      ),
+                    ),
+                    ExcludeFocus(
+                      excluding: _sidebarVisible,
+                      child: Offstage(
+                        offstage: _sidebarVisible,
+                        child: SizedBox(
+                          width: 48,
+                          child: Align(
+                            alignment: Alignment.topCenter,
+                            child: SafeArea(
+                              bottom: false,
+                              child: IconButton(
+                                key: const Key('sidebar-show'),
+                                tooltip: context.tr('显示侧栏', 'Show sidebar'),
+                                onPressed: _toggleSidebar,
+                                icon: const Icon(Icons.menu),
                               ),
                             ),
                           ),
-                        ],
+                        ),
                       ),
                     ),
-                    VerticalDivider(width: 1, color: context.colors.hairline),
+                    SizedBox(
+                      width: _sidebarVisible ? 1 : 0,
+                      child: VerticalDivider(
+                        width: 1,
+                        color: context.colors.hairline,
+                      ),
+                    ),
                     Expanded(
                       child: _phoneRoute != null || _transferringSession
                           ? const SizedBox.shrink()
@@ -406,6 +574,7 @@ class WorkspaceShellState extends State<WorkspaceShell>
                               workspace: widget.workspace,
                               preferences: widget.preferences,
                               embedded: true,
+                              focusNode: _newDraftFocus,
                               onCreated: openSession,
                             )
                           : KeyedSubtree(
@@ -429,21 +598,31 @@ class WorkspaceShellState extends State<WorkspaceShell>
               child: IndexedStack(
                 index: _tab,
                 children: [
-                  SessionsPage(
-                    workspace: widget.workspace,
-                    preferences: widget.preferences,
-                    onOpen: openSession,
+                  ExcludeFocus(
+                    excluding: _tab != 0,
+                    child: SessionsPage(
+                      workspace: widget.workspace,
+                      preferences: widget.preferences,
+                      onOpen: openSession,
+                    ),
                   ),
-                  SettingsPage(
-                    workspace: widget.workspace,
-                    preferences: widget.preferences,
-                    onOpen: openSession,
+                  ExcludeFocus(
+                    excluding: _tab != 1,
+                    child: SettingsPage(
+                      workspace: widget.workspace,
+                      preferences: widget.preferences,
+                      onOpen: openSession,
+                    ),
                   ),
-                  SessionsPage(
-                    workspace: widget.workspace,
-                    preferences: widget.preferences,
-                    onOpen: openSession,
-                    search: true,
+                  ExcludeFocus(
+                    excluding: _tab != 2,
+                    child: SessionsPage(
+                      workspace: widget.workspace,
+                      preferences: widget.preferences,
+                      onOpen: openSession,
+                      search: true,
+                      searchFocusNode: _searchFocus,
+                    ),
                   ),
                 ],
               ),
@@ -460,7 +639,13 @@ class WorkspaceShellState extends State<WorkspaceShell>
               height: 66,
               backgroundColor: context.colors.background,
               indicatorColor: context.colors.elevated,
-              onDestinationSelected: (index) => setState(() => _tab = index),
+              onDestinationSelected: (index) {
+                if (index == 2) {
+                  unawaited(_showSearch());
+                } else {
+                  setState(() => _tab = index);
+                }
+              },
               destinations: [
                 NavigationDestination(
                   icon: const Icon(Icons.chat_bubble_outline),

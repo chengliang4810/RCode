@@ -254,6 +254,7 @@ class SessionsPage extends StatefulWidget {
     this.folderId,
     this.folderTitle,
     this.embedded = false,
+    this.searchFocusNode,
   });
 
   final WorkspaceController workspace;
@@ -265,6 +266,7 @@ class SessionsPage extends StatefulWidget {
   final String? folderId;
   final String? folderTitle;
   final bool embedded;
+  final FocusNode? searchFocusNode;
 
   @override
   State<SessionsPage> createState() => _SessionsPageState();
@@ -893,6 +895,7 @@ class _SessionsPageState extends State<SessionsPage> {
                   child: TextField(
                     key: const Key('session-search'),
                     controller: _query,
+                    focusNode: widget.searchFocusNode,
                     onChanged: (_) => setState(() {}),
                     autofocus: !widget.embedded,
                     decoration: InputDecoration(
