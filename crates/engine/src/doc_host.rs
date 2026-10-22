@@ -34,6 +34,9 @@ use crate::{EngineError, new_id, now_ms};
 /// Debounce window for local snapshot saves after a doc change.
 const SNAPSHOT_DEBOUNCE_MS: u64 = 1_000;
 
+/// Bound lazy tool outputs and frozen transcripts before returning them over RPC.
+const TOOL_BLOB_MAX_BYTES: usize = 8 * 1024 * 1024;
+
 /// An edit client renews every 20s. Sixty seconds tolerates two missed
 /// heartbeats without turning a vanished client into an invisible permanent
 /// lock. Expiry fails closed into ReviewRequired rather than releasing.
@@ -5003,21 +5006,26 @@ impl DocHost {
         if !valid {
             return Err(EngineError::Other(format!("bad blob ref: {blob_ref}")));
         }
+        let (chat, part) = blob_ref.split_once('/').expect("validated above");
         let Some(edge) = self.inner.config.edge.clone() else {
-            return Err(EngineError::Other("offline: no edge configured".into()));
+            let host = self.clone();
+            let chat = chat.to_owned();
+            let part = part.to_owned();
+            return tokio::task::spawn_blocking(move || host.fetch_local_tool_blob(&chat, &part))
+                .await
+                .map_err(|_| EngineError::Other("local tool output read failed".into()))?;
         };
         let bearer = edge.bearer().await?;
         // `valid` above guarantees the split; re-split to encode the part
         // segment for transport (PART_RE allows `#`, which a raw URL would
         // truncate as a fragment — the 2026-08-10 silent-collision bug).
-        let (chat, part) = blob_ref.split_once('/').expect("validated above");
         let url = format!(
             "{}/blob/{}/{}",
             edge.url.trim_end_matches('/'),
             chat,
             encode_part_segment(part)
         );
-        let res = self
+        let mut res = self
             .inner
             .http
             .get(&url)
@@ -5033,12 +5041,143 @@ impl DocHost {
                 res.status().as_u16()
             )));
         }
-        res.text().await.map_err(|e| {
+        if res
+            .content_length()
+            .is_some_and(|len| len > TOOL_BLOB_MAX_BYTES as u64)
+        {
+            return Err(tool_blob_too_large());
+        }
+        let mut body = Vec::new();
+        while let Some(chunk) = res.chunk().await.map_err(|e| {
             EngineError::Other(format!(
                 "sidecar body read failed: {}",
                 describe_http_error(e)
             ))
-        })
+        })? {
+            if chunk.len() > TOOL_BLOB_MAX_BYTES.saturating_sub(body.len()) {
+                return Err(tool_blob_too_large());
+            }
+            body.extend_from_slice(&chunk);
+        }
+        String::from_utf8(body).map_err(|_| EngineError::Other("tool output is not UTF-8".into()))
+    }
+
+    /// Inspect existing local data only: fetching an unknown reference must not
+    /// create a new document, start sync, or turn a blob key into a file path.
+    fn local_blob_doc(&self, doc_id: &str) -> Result<Option<Arc<SessionDoc>>, EngineError> {
+        self.ensure_not_deleted(doc_id)?;
+        if let Some(handle) = lock(&self.inner.handles).get(doc_id).cloned() {
+            return Ok(Some(handle.doc.clone()));
+        }
+        let Some(bytes) = self.inner.store.load_snapshot(doc_id)? else {
+            return Ok(None);
+        };
+        let raw = loro::LoroDoc::new();
+        raw.import(&bytes)
+            .map_err(|_| EngineError::Other("local tool document is invalid".into()))?;
+        for (_, update) in self.inner.store.pending_chat_updates(doc_id)? {
+            raw.import(&update)
+                .map_err(|_| EngineError::Other("local tool document update is invalid".into()))?;
+        }
+        Ok(Some(Arc::new(SessionDoc::from_doc(raw))))
+    }
+
+    fn fetch_local_tool_blob(&self, chat_id: &str, part_id: &str) -> Result<String, EngineError> {
+        let missing = || EngineError::Other("tool output is not available locally".into());
+        let doc = self.local_blob_doc(chat_id)?.ok_or_else(missing)?;
+        if doc.chat_id().as_deref() != Some(chat_id) {
+            return Err(missing());
+        }
+        let blob_ref = format!("{chat_id}/{part_id}");
+        for entry in doc.read_entries()?.into_iter().rev() {
+            for part in entry.parts.into_iter().rev() {
+                let MessagePart::Tool {
+                    id,
+                    output,
+                    diff,
+                    output_ref,
+                    output_bytes,
+                    diff_ref,
+                    subagent_ref,
+                    subagent_status,
+                    ..
+                } = part
+                else {
+                    continue;
+                };
+                if subagent_ref.as_deref() == Some(part_id)
+                    && subagent_status != Some(SubagentStatus::Running)
+                {
+                    let child = self.local_blob_doc(part_id)?.ok_or_else(missing)?;
+                    if child.chat_id().as_deref() != Some(part_id) {
+                        return Err(missing());
+                    }
+                    return bounded_tool_json(&join_continuation_entries(child.read_entries()?));
+                }
+                let wants_diff = diff_ref.as_deref() == Some(blob_ref.as_str())
+                    || part_id.strip_suffix(".diff") == Some(id.as_str());
+                let wants_output =
+                    output_ref.as_deref() == Some(blob_ref.as_str()) || part_id == id;
+                if !wants_diff && !wants_output {
+                    continue;
+                }
+                if let Some(sessions) = self.sessions()
+                    && let Some(rcode_proto::AgentEvent::ToolResult { output, diff, .. }) =
+                        sessions.journal_tool_result(chat_id, &id)?
+                {
+                    if wants_diff && let Some(diff) = diff {
+                        return bounded_tool_json(&diff);
+                    }
+                    if wants_output && let Some(output) = output {
+                        return bounded_tool_text(output);
+                    }
+                }
+                if wants_diff && let Some(diff) = diff {
+                    return bounded_tool_json(&diff);
+                }
+                if wants_output
+                    && let Some(output) = output
+                    && (output_ref.is_none() || output_bytes == Some(output.len() as u64))
+                {
+                    return bounded_tool_text(output);
+                }
+                // Migration saved the original fat lineage before stripping
+                // outputs; old imported sessions may have no local journal.
+                if let Some(rollback) = self.local_blob_doc(&format!("{chat_id}.pre-chat2"))? {
+                    if rollback.chat_id().as_deref() != Some(chat_id) {
+                        return Err(missing());
+                    }
+                    for old in rollback
+                        .read_entries()?
+                        .into_iter()
+                        .rev()
+                        .flat_map(|e| e.parts)
+                    {
+                        if let MessagePart::Tool {
+                            id: old_id,
+                            output,
+                            diff,
+                            output_ref,
+                            ..
+                        } = old
+                            && old_id == id
+                        {
+                            if wants_diff && let Some(diff) = diff {
+                                return bounded_tool_json(&diff);
+                            }
+                            if wants_output
+                                && output_ref.is_none()
+                                && let Some(output) = output
+                            {
+                                return bounded_tool_text(output);
+                            }
+                        }
+                    }
+                }
+                return Err(missing());
+            }
+        }
+        Err(missing())
     }
 
     /// §2.2 writer discipline: we host a chat iff its workspace row's `deviceId` is
@@ -6065,6 +6204,310 @@ fn encode_part_segment(part_id: &str) -> String {
         }
     }
     out
+}
+
+fn tool_blob_too_large() -> EngineError {
+    EngineError::Other("tool output exceeds the 8 MiB limit".into())
+}
+
+fn bounded_tool_text(text: String) -> Result<String, EngineError> {
+    if text.len() > TOOL_BLOB_MAX_BYTES {
+        return Err(tool_blob_too_large());
+    }
+    Ok(text)
+}
+
+fn bounded_tool_json(value: &impl Serialize) -> Result<String, EngineError> {
+    struct Bounded(Vec<u8>);
+    impl std::io::Write for Bounded {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            if bytes.len() > TOOL_BLOB_MAX_BYTES.saturating_sub(self.0.len()) {
+                return Err(std::io::Error::other("tool output exceeds size limit"));
+            }
+            self.0.extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut out = Bounded(Vec::new());
+    serde_json::to_writer(&mut out, value).map_err(|_| tool_blob_too_large())?;
+    String::from_utf8(out.0).map_err(|_| EngineError::Other("tool output is not UTF-8".into()))
+}
+
+#[cfg(test)]
+mod tool_blob_tests {
+    use super::*;
+    use rcode_proto::{AgentEvent, ToolCall, ToolDiff};
+
+    fn host() -> (
+        tempfile::TempDir,
+        DocHost,
+        Arc<crate::run_journal::RunJournal>,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(DocsStore::open(dir.path()).unwrap());
+        let host = DocHost::new(
+            store,
+            DocHostConfig {
+                device_id: "host".into(),
+                default_harness: HarnessId::Mock,
+                edge: None,
+            },
+        );
+        let journal =
+            Arc::new(crate::run_journal::RunJournal::open(dir.path().join("journals")).unwrap());
+        host.set_sessions(SessionsEngine::new(
+            "host".into(),
+            journal.clone(),
+            Arc::new(crate::registry::HarnessRegistry::new()),
+        ));
+        (dir, host, journal)
+    }
+
+    fn entry(parts: Vec<MessagePart>) -> SessionMessageEntry {
+        SessionMessageEntry {
+            id: "entry".into(),
+            role: MessageRole::Assistant,
+            parts,
+            created_at: 1,
+            device_id: "host".into(),
+            status: Some(MessageStatus::Complete),
+            continuation_of: None,
+            duration_ms: None,
+            excluded: false,
+        }
+    }
+
+    fn tool() -> MessagePart {
+        let mut parts = Vec::new();
+        rcode_doc::fold_event_into_parts(
+            &mut parts,
+            &AgentEvent::ToolCall {
+                id: "tool#1".into(),
+                call: ToolCall::Exec {
+                    command: "cargo test".into(),
+                },
+            },
+        );
+        parts.pop().unwrap()
+    }
+
+    fn save(host: &DocHost, id: &str, parts: Vec<MessagePart>) {
+        let doc = SessionDoc::init(id).unwrap();
+        doc.push_message(&entry(parts)).unwrap();
+        host.inner
+            .store
+            .save_snapshot(id, &doc.export_snapshot().unwrap())
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn local_tool_blob_reads_full_journal_result_and_rejects_unindexed_refs() {
+        let (_dir, host, journal) = host();
+        let mut part = tool();
+        if let MessagePart::Tool {
+            output,
+            output_ref,
+            output_bytes,
+            diff_ref,
+            ..
+        } = &mut part
+        {
+            *output = Some("summary".into());
+            *output_ref = Some("chat/tool#1".into());
+            *output_bytes = Some(4000);
+            *diff_ref = Some("chat/tool#1.diff".into());
+        }
+        save(&host, "chat", vec![part]);
+        let full = "first line\nall remaining output\n".repeat(300);
+        let diff = ToolDiff {
+            path: "a.rs".into(),
+            old_text: Some("old".into()),
+            new_text: "new".into(),
+        };
+        journal
+            .append(
+                "chat",
+                &AgentEvent::ToolResult {
+                    id: "tool#1".into(),
+                    is_error: false,
+                    output: Some(full.clone()),
+                    diff: Some(diff.clone()),
+                },
+            )
+            .unwrap();
+        journal
+            .append(
+                "chat",
+                &AgentEvent::ToolResult {
+                    id: "unindexed".into(),
+                    is_error: false,
+                    output: Some("hidden".into()),
+                    diff: None,
+                },
+            )
+            .unwrap();
+        assert_eq!(host.fetch_tool_blob("chat/tool#1").await.unwrap(), full);
+        assert_eq!(
+            host.fetch_tool_blob("chat/tool#1.diff").await.unwrap(),
+            serde_json::to_string(&diff).unwrap()
+        );
+        assert!(host.fetch_tool_blob("chat/unindexed").await.is_err());
+        assert!(host.fetch_tool_blob("missing/tool#1").await.is_err());
+        assert!(host.fetch_tool_blob("chat/../../private").await.is_err());
+        assert!(
+            lock(&host.inner.handles).is_empty(),
+            "reads cannot create/open handles"
+        );
+        host.shutdown_workers().await;
+    }
+
+    #[tokio::test]
+    async fn local_tool_blob_reads_only_related_frozen_child_transcripts() {
+        let (_dir, host, _) = host();
+        let mut part = tool();
+        if let MessagePart::Tool {
+            subagent_ref,
+            subagent_status,
+            ..
+        } = &mut part
+        {
+            *subagent_ref = Some("child".into());
+            *subagent_status = Some(SubagentStatus::Done);
+        }
+        save(&host, "chat", vec![part.clone()]);
+        save(
+            &host,
+            "child",
+            vec![MessagePart::Text {
+                id: "t0".into(),
+                text: "finished child output".into(),
+            }],
+        );
+        save(
+            &host,
+            "unrelated",
+            vec![MessagePart::Text {
+                id: "t0".into(),
+                text: "other output".into(),
+            }],
+        );
+        let result: Vec<SessionMessageEntry> =
+            serde_json::from_str(&host.fetch_tool_blob("chat/child").await.unwrap()).unwrap();
+        assert_eq!(result[0].parts[0].id(), "t0");
+        assert!(host.fetch_tool_blob("chat/unrelated").await.is_err());
+        if let MessagePart::Tool {
+            subagent_status, ..
+        } = &mut part
+        {
+            *subagent_status = Some(SubagentStatus::Running);
+        }
+        save(&host, "chat", vec![part]);
+        assert!(
+            host.fetch_tool_blob("chat/child").await.is_err(),
+            "live docs are not frozen blobs"
+        );
+        host.shutdown_workers().await;
+    }
+
+    #[tokio::test]
+    async fn local_tool_blob_uses_legacy_lineage_and_enforces_payload_limit() {
+        let (_dir, host, journal) = host();
+        let mut thin = tool();
+        if let MessagePart::Tool {
+            output,
+            output_ref,
+            output_bytes,
+            ..
+        } = &mut thin
+        {
+            *output = Some("summary".into());
+            *output_ref = Some("chat/tool#1".into());
+            *output_bytes = Some(1000);
+        }
+        save(&host, "chat", vec![thin]);
+        let mut fat = tool();
+        if let MessagePart::Tool { output, .. } = &mut fat {
+            *output = Some("legacy full output".into());
+        }
+        let rollback = SessionDoc::init("chat").unwrap();
+        rollback.push_message(&entry(vec![fat])).unwrap();
+        host.inner
+            .store
+            .save_snapshot("chat.pre-chat2", &rollback.export_snapshot().unwrap())
+            .unwrap();
+        assert_eq!(
+            host.fetch_tool_blob("chat/tool#1").await.unwrap(),
+            "legacy full output"
+        );
+        journal
+            .append(
+                "chat",
+                &AgentEvent::ToolResult {
+                    id: "tool#1".into(),
+                    is_error: false,
+                    output: Some("x".repeat(TOOL_BLOB_MAX_BYTES + 1)),
+                    diff: None,
+                },
+            )
+            .unwrap();
+        assert!(
+            host.fetch_tool_blob("chat/tool#1")
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("8 MiB")
+        );
+        assert!(bounded_tool_json(&"x".repeat(TOOL_BLOB_MAX_BYTES)).is_err());
+        host.shutdown_workers().await;
+    }
+
+    #[tokio::test]
+    async fn edge_tool_blob_keeps_encoded_route_and_bounds_http_body() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        for oversized in [false, true] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = vec![0; 4096];
+                let read = socket.read(&mut request).await.unwrap();
+                let request = String::from_utf8_lossy(&request[..read]);
+                assert!(request.starts_with("GET /blob/chat/tool%231 HTTP/1.1"));
+                let response = if oversized {
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        TOOL_BLOB_MAX_BYTES + 1
+                    )
+                } else {
+                    "HTTP/1.1 200 OK\r\nContent-Length: 6\r\nConnection: close\r\n\r\nremote".into()
+                };
+                socket.write_all(response.as_bytes()).await.unwrap();
+            });
+            let dir = tempfile::tempdir().unwrap();
+            let host = DocHost::new(
+                Arc::new(DocsStore::open(dir.path()).unwrap()),
+                DocHostConfig {
+                    device_id: "host".into(),
+                    default_harness: HarnessId::Mock,
+                    edge: Some(EdgeConfig::with_static_token(
+                        format!("http://{addr}"),
+                        "test-token",
+                    )),
+                },
+            );
+            let result = host.fetch_tool_blob("chat/tool#1").await;
+            if oversized {
+                assert!(result.unwrap_err().to_string().contains("8 MiB"));
+            } else {
+                assert_eq!(result.unwrap(), "remote");
+            }
+            server.await.unwrap();
+            host.shutdown_workers().await;
+        }
+    }
 }
 
 #[cfg(test)]

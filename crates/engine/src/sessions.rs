@@ -275,6 +275,22 @@ pub struct SessionsEngine {
 }
 
 impl SessionsEngine {
+    /// Read a full local result for the authenticated lazy-output RPC. The
+    /// caller checks the part against the chat document before using it.
+    pub(crate) fn journal_tool_result(
+        &self,
+        chat_id: &str,
+        part_id: &str,
+    ) -> Result<Option<AgentEvent>, EngineError> {
+        for event in self.inner.journal.events_rev(chat_id)? {
+            let (_, event) = event?;
+            if matches!(&event, AgentEvent::ToolResult { id, .. } if id == part_id) {
+                return Ok(Some(event));
+            }
+        }
+        Ok(None)
+    }
+
     pub fn new(
         device_id: String,
         journal: Arc<RunJournal>,
