@@ -44,12 +44,25 @@ impl ClientConfig {
 ///
 /// A client carries the bearer its host expects; it has no account session
 /// or refresh token.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum Credentials {
     /// The bearer is `userId@orgId`.
     Paired { user_id: String, org_id: String },
     /// Fully offline, deterministic dataset with a simulated host.
     Demo(DemoOptions),
+    /// Direct engine access. The platform stores this secret in its key store.
+    Direct { api_key: String },
+}
+
+impl std::fmt::Debug for Credentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Direct { .. } => f.write_str("Direct { api_key: <redacted> }"),
+            Self::Paired { user_id, org_id } => f.debug_struct("Paired")
+                .field("user_id", user_id).field("org_id", org_id).finish(),
+            Self::Demo(options) => f.debug_tuple("Demo").field(options).finish(),
+        }
+    }
 }
 
 impl Credentials {
@@ -59,6 +72,7 @@ impl Credentials {
 
     pub fn org_id(&self) -> &str {
         match self {
+            Credentials::Direct { .. } => "direct",
             Credentials::Paired { org_id, .. } => org_id,
             Credentials::Demo(_) => "demo",
         }
@@ -66,6 +80,7 @@ impl Credentials {
 
     pub fn user_id(&self) -> &str {
         match self {
+            Credentials::Direct { .. } => "direct",
             Credentials::Paired { user_id, .. } => user_id,
             Credentials::Demo(_) => "demo",
         }

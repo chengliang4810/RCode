@@ -36,6 +36,7 @@ impl TokenProvider {
         use crate::config::Credentials;
         let mode = match credentials {
             Credentials::Demo(_) => Mode::Demo,
+            Credentials::Direct { api_key } => Mode::Paired { bearer: api_key.clone() },
             Credentials::Paired { user_id, org_id } => Mode::Paired {
                 bearer: if org_id.is_empty() {
                     user_id.clone()
@@ -71,5 +72,14 @@ mod tests {
         };
         let tokens = TokenProvider::new(&credentials);
         assert_eq!(tokens.bearer().await.unwrap(), "wing@acme");
+    }
+
+    #[tokio::test]
+    async fn direct_credentials_keep_the_opaque_key_and_redact_debug_output() {
+        let credentials = crate::config::Credentials::Direct { api_key: "FixtureKey12".into() };
+        assert_eq!(TokenProvider::new(&credentials).bearer().await.unwrap(), "FixtureKey12");
+        assert!(!format!("{credentials:?}").contains("FixtureKey12"));
+        assert_eq!(credentials.user_id(), "direct");
+        assert_eq!(credentials.org_id(), "direct");
     }
 }
