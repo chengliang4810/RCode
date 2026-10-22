@@ -531,10 +531,7 @@ pub fn apply_keymap(
 /// The settings sections (ARCHITECTURE.md routes).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SettingsSection {
-    /// Former Devices page: one device row with a copy-id and a rename, which
-    /// in a single-identity build had nothing behind it (no pairing, no other
-    /// devices to list). Kept as a route alias so a remembered
-    /// `ui-settings.json` still opens Settings.
+    /// Local external access and remote execution hosts.
     Devices,
     /// Which harnesses the composer offers (enable/disable toggles) —
     /// labeled "Providers".
@@ -567,11 +564,12 @@ pub enum SettingsSection {
 
 impl SettingsSection {
     /// Sections shown in Settings. `Agents` is a legacy Accounts route alias.
-    pub const ALL: [SettingsSection; 15] = [
+    pub const ALL: [SettingsSection; 16] = [
         SettingsSection::General,
         SettingsSection::Appearance,
         SettingsSection::Notifications,
         SettingsSection::Shortcuts,
+        SettingsSection::Devices,
         SettingsSection::Harnesses,
         SettingsSection::Skills,
         SettingsSection::Commands,
@@ -590,15 +588,12 @@ impl SettingsSection {
     fn canonical(self) -> Self {
         match self {
             Self::Agents => Self::Harnesses,
-            // The Devices page is gone; an old route or a remembered section
-            // lands on General instead of a page this build does not have.
-            Self::Devices => Self::General,
             other => other,
         }
     }
 
     fn visible_in_nav(self) -> bool {
-        !matches!(self, Self::Agents | Self::Devices)
+        !matches!(self, Self::Agents)
             && (self != Self::Appshots || crate::appshots::is_desktop())
     }
 
@@ -1890,6 +1885,7 @@ pub struct Shell {
     notifications_page: Option<Entity<NotificationsPage>>,
     shortcuts_page: Option<Entity<ShortcutsPage>>,
     providers_page: Option<Entity<ProvidersPage>>,
+    devices_page: Option<Entity<settings::devices::DevicesPage>>,
     skills_page: Option<Entity<skills::SkillsPage>>,
     commands_page: Option<Entity<commands::CommandsPage>>,
     subagents_page: Option<Entity<subagents::SubagentsPage>>,
@@ -2350,6 +2346,7 @@ impl Shell {
             notifications_page: None,
             shortcuts_page: None,
             providers_page: None,
+            devices_page: None,
             skills_page: None,
             commands_page: None,
             subagents_page: None,
@@ -4855,6 +4852,10 @@ impl Shell {
     // ---- routes / settings ----
 
     fn set_route(&mut self, route: Route, cx: &mut Context<Self>) {
+        if let Some(page) = &self.devices_page {
+            page.update(cx, |page, cx| page.set_active(
+                matches!(route, Route::Settings(SettingsSection::Devices)), cx));
+        }
         if matches!(
             self.route,
             Route::Settings(SettingsSection::Personalization)
@@ -5533,9 +5534,14 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         match section {
-            // `Devices` and `Agents` canonicalize away before this point; the
-            // arm exists so the match stays exhaustive if one is ever shown.
-            SettingsSection::Devices => Empty.into_any_element(),
+            SettingsSection::Devices => {
+                if self.devices_page.is_none() {
+                    let state = self.state.clone();
+                    self.devices_page = Some(cx.new(|cx| settings::devices::DevicesPage::new(state, cx)));
+                }
+                self.devices_page.as_ref().map(|page| page.clone().into_any_element())
+                    .unwrap_or_else(|| Empty.into_any_element())
+            }
             // `Agents` canonicalizes to `Harnesses` before this point.
             SettingsSection::Agents | SettingsSection::Harnesses => {
                 if self.providers_page.is_none() {
