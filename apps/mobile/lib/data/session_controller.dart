@@ -44,6 +44,7 @@ class SessionController extends ChangeNotifier {
   StreamSubscription<dynamic>? _transcript;
   final Map<String, JsonMap> _echoes = {};
   final Map<String, JsonMap> _attempts = {};
+  final Map<String, Completer<JsonMap>> _commandWaiters = {};
   Timer? _cacheDebounce;
 
   bool get connected => workspace.connected;
@@ -87,6 +88,12 @@ class SessionController extends ChangeNotifier {
         if (disposed || generation != _generation) return;
         final state = jsonMap(value);
         commands = jsonMaps(state['commands']);
+        for (final command in commands) {
+          if (command['status'] != 'pending') {
+            final waiter = _commandWaiters.remove(command['id']);
+            waiter?.complete(command);
+          }
+        }
         contextUsage = state['contextUsage'] == null
             ? null
             : jsonMap(state['contextUsage']);
@@ -338,9 +345,7 @@ class SessionController extends ChangeNotifier {
   }
 
   Future<void> interrupt() async {
-    await call('RelayCommand', {
-      'entry': _command({'kind': 'interrupt'}),
-    });
+    await _submitControl({'kind': 'interrupt'});
   }
 
   Future<void> respond(
@@ -348,15 +353,47 @@ class SessionController extends ChangeNotifier {
     List<JsonMap> answers, {
     bool dismissed = false,
   }) async {
-    await call('RelayCommand', {
-      'entry': _command({
-        'kind': 'respondInput',
-        'requestId': requestId,
-        'answer': dismissed
-            ? {'kind': 'dismissed'}
-            : {'kind': 'questions', 'answers': answers},
-      }),
+    await _submitControl({
+      'kind': 'respondInput',
+      'requestId': requestId,
+      'answer': dismissed
+          ? {'kind': 'dismissed'}
+          : {'kind': 'questions', 'answers': answers},
     });
+  }
+
+  Future<void> _submitControl(JsonMap payload) async {
+    final entry = _command(payload);
+    await call('RelayCommand', {'entry': entry});
+    // Relay acknowledgement means the host evaluated the command. A typed
+    // rejection is still an RPC success, so only its authoritative ledger
+    // status can dismiss a question or confirm a Stop.
+    JsonMap? outcome = commands
+        .where(
+          (command) =>
+              command['id'] == entry['id'] && command['status'] != 'pending',
+        )
+        .firstOrNull;
+    if (outcome == null) {
+      final ready = Completer<JsonMap>();
+      _commandWaiters[entry['id'] as String] = ready;
+      try {
+        outcome = await ready.future.timeout(
+          const Duration(seconds: 15),
+          onTimeout: () {
+            throw const RpcException('unconfirmed', 'operation_unconfirmed');
+          },
+        );
+      } finally {
+        _commandWaiters.remove(entry['id']);
+      }
+    }
+    if (outcome['status'] != 'applied') {
+      throw RpcException(
+        '${outcome['status']}',
+        '${outcome['resolution'] ?? 'operation_rejected'}',
+      );
+    }
   }
 
   Future<void> setConfig(JsonMap next) => workspace.mutate({
@@ -514,6 +551,10 @@ class SessionController extends ChangeNotifier {
     ++_generation;
     workspace.removeListener(_workspaceChanged);
     _cacheDebounce?.cancel();
+    for (final waiter in _commandWaiters.values) {
+      waiter.completeError(const RpcException('closed', 'session_closed'));
+    }
+    _commandWaiters.clear();
     unawaited(_transcript?.cancel());
     for (final subscription in _subscriptions) {
       unawaited(subscription.cancel());
