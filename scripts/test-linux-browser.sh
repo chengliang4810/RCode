@@ -36,7 +36,24 @@ export DISPLAY=":$display_number"
 export XDG_RUNTIME_DIR="$runtime"
 export RCODE_BROWSER_NATIVE_POINTER=1
 openbox >"$output/openbox.log" 2>&1 &
-processes+=("$!")
+openbox_pid=$!
+processes+=("$openbox_pid")
+# Starting the fixture while the window manager is still claiming the display
+# can race its initial mapping/reparenting. Wait for Openbox's EWMH handshake.
+wm_ready=false
+for _ in $(seq 1 100); do
+  if xprop -root _NET_SUPPORTING_WM_CHECK 2>/dev/null | grep -Eq 'window id # 0x[1-9a-fA-F][0-9a-fA-F]*'; then
+    wm_ready=true
+    break
+  fi
+  if ! kill -0 "$openbox_pid" 2>/dev/null; then break; fi
+  sleep .1
+done
+if [ "$wm_ready" != true ]; then
+  echo "Openbox did not become ready within 10 seconds" >&2
+  cat "$output/openbox.log" >&2
+  exit 1
+fi
 record_fixture() {
   local mode="$1" capture_window="${2:-}" fixture_pid video_pid
   mkdir -p "$output/$mode"
