@@ -30,6 +30,6 @@ cargo test --locked -p rcode-ui --lib attachments
 
 The protocol, upload and UI tests cover event serialization, file validation,
 import idempotence, cache policy and rendering state. They do not exercise a
-live image-generation provider. iOS has `GeneratedImageTests` and transcript
-layout cases that require Xcode/simulator validation; see the
-[iOS README](../apps/ios/README.md).
+live image-generation provider. Flutter attachment and transcript widget checks
+run from `apps/mobile`; native iOS plugin behavior still requires Xcode/device
+validation. See the [mobile README](../apps/mobile/README.md).

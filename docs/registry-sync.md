@@ -34,8 +34,9 @@ persists progress, and reconnects with backoff when protocol probes time out.
 The HTTP seam supports row fetch and batch push with the same merge semantics.
 
 An endpoint must implement these protocols before remote clients can use it.
-This repository does not provide a deployable registry service. Mobile pairing
-requirements are described in the [iOS README](../apps/ios/README.md).
+This repository does not provide a deployable registry service. Direct desktop
+and Flutter clients use the engine RPC listener and do not need that separate
+registry endpoint. Mobile pairing requirements are described in the [mobile README](../apps/mobile/README.md).
 
 ## Validation
 

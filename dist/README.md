@@ -47,8 +47,9 @@ Devices**. That page also enables a desktop's external listener and generates a
 12-character key on first enable. Custom keys follow the rules above. Remote
 client disconnects do not stop accepted runs; quitting the desktop that hosts
 the engine does stop its engine. Use the headless service for a persistent host.
-The direct WebSocket protocol is also available to mobile clients; physical iOS
-device compilation and execution have not been verified.
+The [Flutter mobile app](../apps/mobile/README.md) uses the same protocol on
+Android and iOS. Widget and real engine integration checks have passed; Android
+packaging is being checked, while Xcode and physical iOS remain unverified.
 
 ## macOS
 

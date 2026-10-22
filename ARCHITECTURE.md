@@ -63,16 +63,21 @@ is on another drive. See [Windows development](docs/reference/windows-developmen
   host drains the ledger and records processed commands to prevent duplicate
   execution during replay and recovery.
 
-The code also contains chat2 and registry transport clients, relay framing and
-mobile pairing interfaces. They are transport components, not a bundled hosting
-service. Local desktop operation does not require a remote transport endpoint.
+The code also contains chat2 and registry transport clients and relay framing;
+those protocols require a compatible registry endpoint. Direct desktop and
+Flutter mobile clients instead use the authenticated RPC listener on a desktop
+or headless engine, without a separate registry service. Local desktop operation
+does not require a remote transport endpoint.
 See [chat2](docs/chat2-sync.md), [registry](docs/registry-sync.md) and
-[iOS setup](apps/ios/README.md) for their implementation boundaries.
+[mobile setup](apps/mobile/README.md) for their implementation boundaries.
 
 ## 3. Cargo workspace
 
-The workspace contains `apps/rcode` and these 25 crates. The native iOS shell is
-in `apps/ios` and calls the Rust mobile surface through generated UniFFI bindings.
+The workspace contains `apps/rcode` and these 25 crates. `apps/mobile` is a
+Flutter application for Android and iOS. Dart owns its pages and authenticated
+RPC client; portable Rust visual and math engines are exposed through a C ABI.
+The required Flutter platform runners remain in `apps/mobile/android` and
+`apps/mobile/ios`.
 
 | Directory | Responsibility |
 | --- | --- |
@@ -92,7 +97,7 @@ in `apps/ios` and calls the Rust mobile surface through generated UniFFI binding
 | `crates/github` | Public GitHub resource access for marketplaces and updates |
 | `crates/preview` | Local HTTP service discovery and preview proxy |
 | `crates/client` | Client state, subscriptions, session data and offline demo fixtures |
-| `crates/mobile` | Rust mobile API, transcript/layout integration and UniFFI surface |
+| `crates/mobile` | Portable mobile rendering, layout APIs and Flutter visual/math C ABI |
 | `crates/text` | Text measurement and line layout |
 | `crates/syntax` | Syntax highlighting |
 | `crates/markdown` | Markdown parsing and layout data |

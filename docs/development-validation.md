@@ -35,4 +35,4 @@ GitHub Release 使用普通发布；版本名中的 `beta` 不决定 prerelease 
 
 ## 移动端
 
-iOS 包含离线演示、Rust 核心和 TestFlight 流程。在线配对需要另行提供实现注册表和会话传输协议的主机。本仓库包含客户端与测试基础设施，不提供可部署的远端服务。构建及可选在线测试见 [iOS README](../apps/ios/README.md)。
+移动端统一为 `apps/mobile` 下的 Flutter 应用，兼容 Android 和 iOS，通过 API 密钥连接桌面或 headless 引擎。Flutter 界面测试、真实引擎与 Dart 控制器集成、Rust visual/math 已在本机通过；Android APK 正在构建验收，Xcode 与 iOS 实机未验证。构建和真实引擎测试命令见 [移动端 README](../apps/mobile/README.md)。

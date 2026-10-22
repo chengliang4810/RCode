@@ -58,6 +58,12 @@ the edited row retains its place in the queue.
 
 Desktop defaults to automatic steering when supported; iOS defaults to holding
 messages until turn end. Both expose a persisted Queue/Steer preference.
+Desktop's **Settings → General → Send while running** selects **Steer** (the
+default) or **Queue**, taking effect on subsequent submissions without a restart.
+Native steering finishes the current model/tool step, preserves its tool results,
+and hands the correction to the next model request. Stop discards corrections
+already accepted by the runtime but not yet consumed. Attachments and providers
+without mid-turn steering remain queued until the turn ends.
 Cmd/Ctrl+Enter on desktop submits content, saves an active edit, or activates
 the most recently added queue row when the composer is empty. Command+Return on
 iOS activates the queue head. A blocked shortcut target is never skipped and an
@@ -83,7 +89,8 @@ numbers. Older hosts retain the existing command-send path.
 - Device-routing tests race local and remote consumers over the same row.
 - Desktop tests cover action selection, modifier submission, optimistic echo,
   settings compatibility and transcript anchoring.
-- `apps/ios/RCodeTests/QueueEditTests.swift` covers queued-message editing.
-  Run the iOS Xcode test suite on macOS for native validation.
+- `apps/mobile/test` covers Flutter queue controls and preserved edit context;
+  the `rcode-engine` `flutter_direct` integration test exercises queue leases
+  through the shipping Dart controllers against an authenticated engine.
 
 Failed automatic dispatch pauses the queue before restoring its head, so the restore cannot trigger another delivery attempt. Fix the host configuration or connection, then explicitly send a queued row or a new prompt to resume. New queued turns use the current chat configuration.

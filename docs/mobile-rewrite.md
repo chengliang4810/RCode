@@ -1,85 +1,54 @@
-# iOS rewrite — Rust core, UIKit shell
+# Flutter mobile application
 
-The iOS app is rebuilt from scratch around one rule: **Rust decides what to
-paint and where; the platform only paints, scrolls and handles gestures.** The
-same Rust library will back the Android app.
+`apps/mobile` contains one Flutter application for Android and iOS. It replaces
+the former native app. The small `apps/mobile/ios` Runner remains responsible
+for Flutter startup, plugin registration and platform clipboard access; all
+application pages and navigation are Dart widgets. The original implementation
+and its tests remain available in Git history.
 
-## Why
+## Application layers
 
-The SwiftUI app hosted SwiftUI inside every transcript cell, self-sized rows by
-measuring hosted views, re-decoded the whole Loro doc and rebuilt every row per
-streamed token, and re-rendered the whole session screen on each token. Home
-re-rendered every row on any registry frame. The sync layer was a hand port of
-crates that already exist in Rust.
-
-## Layers
-
-```
-crates/text      rcode-text      pretext-style text engine: UAX#14 segmentation,
-                                 rustybuzz measurement on the bundled Geist faces
-                                 (platform fallback for uncovered glyphs), cached
-                                 segment widths, pure-arithmetic line layout
-crates/markdown  rcode-markdown  block model + append-incremental reparse
-                                 (extracted from the desktop; desktop re-exports it)
-crates/client    rcode-client    engine-free viewer device: registry + chat2 rooms
-                                 (rcode-sync), docs (rcode-doc), relay RPCs, auth,
-                                 view models (front page ordering = desktop sidebar:
-                                 pins, sections, recency), demo dataset
-crates/mobile    rcode-mobile    UniFFI facade (Swift today, Kotlin later) + the
-                                 transcript layout engine: rows → measured display
-                                 lists, prefix-sum offsets, visible-range queries
-apps/ios                          UIKit shell: tab bar + glass, virtualized
-                                 transcript painter (CoreText at Rust positions),
-                                 composer, sheets
-```
-
-## Transcript pipeline
-
-1. `rcode-client` applies chat2 rows to the session doc and republishes an
-   immutable snapshot; unchanged entries stay pointer-equal.
-2. The layout engine (background thread) turns changed entries into rows
-   (one per top-level markdown block / tool group / user message), parses
-   markdown incrementally, and lays each row out with `rcode-text` at the
-   viewport width. A row's output is a **display list**: text runs (UTF-16
-   ranges + style id + exact x/baseline), boxes (code/quote/table/bubble),
-   link hit rects, horizontal scrollers.
-3. Heights are exact before a row is ever shown; offsets live in a prefix-sum
-   tree, so `visible(y0, y1)` is a binary search. No estimates, no self-sizing.
-4. Swift draws each run with CoreText at the Rust-computed position, so
-   measurement and rendering can never disagree about line breaks.
-
-## Data path per streamed token
-
-The session doc's `subscribe_root` observer marks only the touched entry maps;
-`rcode-client` re-decodes those entries and republishes a snapshot in which
-every other entry is the same `Arc`. The layout thread reuses rows for
-pointer-equal entries, re-parses only the streaming tail block
-(`IncrementalParser`), re-measures only that row, and rebuilds the prefix sums.
-Swift receives one coalesced "frame ready" per display frame; if the visible
-tail row changed, its new display model is built off the main thread and swapped
-in while the old one keeps painting. Newly appended text fades in (veil) on a
-separate layer, split at the exact glyph offset.
-
-## Verification
-
-| What | Where |
+| Layer | Responsibility |
 | --- | --- |
-| Paint/measure agreement at 7 widths, streaming ≡ full parse, prefix reuse, toggles, mentions | `cargo test -p rcode-mobile --lib layout` |
-| Layout timing (3,300 rows) | `cargo test --release -p rcode-mobile --lib bench_layout -- --ignored --nocapture` |
-| Line breaks vs CoreText on the same font bytes | `RCodeTests/LineBreakAccuracyTests`, `crates/text/tests/coretext.rs` |
-| Demo end-to-end (send → echo → reply, questions, queue, offline host) | `crates/client/tests/demo.rs`, `RCodeUITests/SessionFlowTests` |
-| Live sync against an in-process edge | `crates/client/tests/live.rs` |
-| Opt-in integration against a provisioned registry/session endpoint | `RCodeUITests/LiveStackTests` (setup in `apps/ios/README.md`) |
-| Frame pacing (hitch ratio, idle + streaming) | `-lab -bench`, `RCodeUITests/ScrollPerformanceTests` |
+| `lib/data` | Authenticated WebSocket RPC, reconnect, secure credentials, workspace subscriptions, incremental transcripts, command recovery, uploads and queue edit leases |
+| `lib/ui` | Pairing, sessions/search/sections, project and model selection, conversations, composer, tools, questions, queue and settings |
+| `lib/visual` | Flutter display-list painting and gestures for the portable Luau renderer; mathematical SVG rendering |
+| `lib/theme.dart`, `assets/fonts` | Shared light/dark palette, Geist and Geist Mono |
+| `lib/preferences.dart`, `lib/wallpaper.dart` | Appearance, math, notification and grouping preferences, retained drafts and wallpaper effects |
+| `lib/notifications.dart` | Permission handling and local notifications from connected workspace updates |
+| `native`, `crates/mobile` | Owned C ABI for the existing Rust visual and math engines, Android/iOS build integration |
+| `android`, `ios` | Required Flutter platform runners, permissions and packaging |
 
-Reference numbers (M-series Mac, iPhone 17 Pro simulator): cold layout of
-3,300 rows 30 ms; width change 0.42 ms; display list 0.8 µs/row; streamed
-token 0.19 ms; display-link flings through 3,300 rows — 0 hitches idle
-(671 frames) and while streaming (536 frames).
+Phone navigation uses Sessions, Settings and Search tabs. Tablets use a sidebar
+and conversation split. The page layout, 62-point session rows, typography,
+colors, composer shape, selection flows and operations follow the original app.
+Platform blur, scrolling and keyboard behavior use Flutter's platform adapters.
 
-## Build
+The Dart client uses the same direct RPC endpoint as a remote desktop client.
+Accepted commands belong to the engine: closing the mobile view, losing the
+socket or suspending the application does not cancel the remote run. Reopening
+restores authoritative transcript and command state. An unconfirmed send retries
+with the same command and message identities.
 
-`scripts/ios/build-core.sh` (run by the Xcode "Rust core" phase) builds
-`rcode-mobile` for the active platform with the `mobile` cargo profile (always
-optimized), and regenerates the committed UniFFI bindings in
-`apps/ios/RCode/Core/Generated/`.
+Credentials are kept in the platform secure store. Transcripts and drafts use
+host-scoped local caches. Signing out removes the saved pairing and its caches.
+The application does not execute the coding agent locally.
+
+## Build and validation
+
+See [the mobile README](../apps/mobile/README.md) for toolchains, Android/iOS
+commands and the authenticated Dart-to-engine test. `macos.yml` now validates
+Flutter on Linux, builds an Android APK, and builds the Flutter iOS simulator
+application. The manually dispatched TestFlight workflow archives the Flutter
+Runner with the existing `com.rcode.ios` identity.
+
+On the current Windows development host, Flutter unit/widget regressions, the
+real authenticated engine/Dart integration, and Rust visual/math tests have
+passed. Android APK compilation is being checked separately. The iOS Runner,
+Xcode simulator build, device signing and TestFlight upload have **not** been
+run on this host. CI wiring is not evidence of a successful remote build.
+
+Notifications are local while the application receives workspace events. Direct
+headless mode has no background APNs/FCM delivery service; notification settings
+do not promise delivery after the operating system suspends or kills the app.
+The remote engine continues its accepted work independently.

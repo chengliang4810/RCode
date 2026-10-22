@@ -1,5 +1,10 @@
 # Mobile transcript and interaction polish
 
+Historical implementation and simulator measurements from the former native
+iOS app. Its sources and tests now live in Git history. The current Android/iOS
+application is Flutter; see [the mobile implementation](mobile-rewrite.md).
+These measurements do not validate the replacement.
+
 The transcript uses a native `UITableView` for row reuse, height resolution,
 scroll gestures, and animated offsets, with `UIHostingConfiguration` for the
 existing SwiftUI message content. The earlier mixed lazy/eager layout passed
@@ -56,9 +61,10 @@ selection or dismissal. The menu itself now owns its glass surface and morph.
 ## Reproduce and test
 
 ```sh
-DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
-xcodebuild -project apps/ios/RCode.xcodeproj -scheme RCode \
-  -destination 'platform=iOS Simulator,name=iPhone 17 Pro' test
+cd apps/mobile
+flutter test --no-pub --concurrency=1
+# On macOS, build the current Flutter simulator runner:
+flutter build ios --debug --simulator --no-codesign
 ```
 
 `RCodeTests/TranscriptFollowTests` checks follow state independently of layout.
