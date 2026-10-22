@@ -8507,7 +8507,8 @@ impl Transcript {
                     .left(px(if worked_secs.is_some() {
                         0.0
                     } else {
-                        ACTIVITY_TRUNK_X - 7.0
+                        // The 14px SVG's collapsed stroke starts at x=5.4px.
+                        -5.4
                     }))
                     .top(px(2.0))
                     .size(px(14.0))
