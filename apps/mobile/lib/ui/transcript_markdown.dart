@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:flutter_highlight/flutter_highlight.dart';
 import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
+import 'package:highlight/highlight.dart' as hl;
 import 'package:markdown/markdown.dart' as md;
 import 'package:url_launcher/url_launcher.dart';
 
@@ -176,44 +176,46 @@ class CodeBlock extends StatelessWidget {
           SingleChildScrollView(
             scrollDirection: Axis.horizontal,
             padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
-            child: known.contains(lang)
-                ? HighlightView(
-                    text,
-                    language: lang,
-                    padding: EdgeInsets.zero,
-                    textStyle: TextStyle(
-                      fontFamily: 'GeistMono',
-                      fontSize: 13,
-                      height: 1.5,
-                      color: c.text,
-                    ),
-                    theme: {
-                      'root': TextStyle(
-                        backgroundColor: c.codeBackground,
-                        color: c.text,
-                      ),
+            child: SelectableText.rich(
+              known.contains(lang)
+                  ? _highlightCode(text, lang, {
                       'keyword': TextStyle(color: c.accent),
                       'string': TextStyle(color: c.success),
                       'comment': TextStyle(color: c.tertiary),
                       'number': TextStyle(color: c.warning),
                       'title': TextStyle(color: c.accent),
                       'built_in': TextStyle(color: c.accent),
-                    },
-                  )
-                : SelectableText(
-                    text,
-                    style: TextStyle(
-                      fontFamily: 'GeistMono',
-                      fontSize: 13,
-                      height: 1.5,
-                      color: c.text,
-                    ),
-                  ),
+                    })
+                  : TextSpan(text: text),
+              textScaler: MediaQuery.textScalerOf(context),
+              style: TextStyle(
+                fontFamily: 'GeistMono',
+                fontSize: 13,
+                height: 1.5,
+                color: c.text,
+              ),
+            ),
           ),
         ],
       ),
     );
   }
+}
+
+TextSpan _highlightCode(
+  String text,
+  String language,
+  Map<String, TextStyle> styles,
+) {
+  TextSpan span(hl.Node node) => TextSpan(
+    text: node.value,
+    style: styles[node.className],
+    children: node.children?.map(span).toList(),
+  );
+  final nodes = hl.highlight.parse(text, language: language).nodes;
+  return nodes == null
+      ? TextSpan(text: text)
+      : TextSpan(children: nodes.map(span).toList());
 }
 
 class _MathInlineSyntax extends md.InlineSyntax {

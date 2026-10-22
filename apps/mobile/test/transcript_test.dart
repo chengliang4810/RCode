@@ -140,6 +140,67 @@ void main() {
   );
 
   testWidgets(
+    'highlighted code supports partial selection and system text scaling',
+    (tester) async {
+      const code = 'final count = 2;\nprint(count);';
+      Widget tree(double scale) => app(
+        MediaQuery(
+          data: MediaQueryData(textScaler: TextScaler.linear(scale)),
+          child: const Scaffold(
+            body: Align(
+              alignment: Alignment.topLeft,
+              child: SizedBox(
+                width: 360,
+                child: CodeBlock(text: code, language: 'dart'),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpWidget(tree(1));
+      final selectable = find.descendant(
+        of: find.byType(CodeBlock),
+        matching: find.byType(SelectableText),
+      );
+      final styled = tester.widget<SelectableText>(selectable).textSpan!;
+      expect(styled.toPlainText(), code);
+      expect(
+        styled.children!.whereType<TextSpan>().any(
+          (span) => span.style?.color != null,
+        ),
+        isTrue,
+      );
+      final editable = find.descendant(
+        of: selectable,
+        matching: find.byType(EditableText),
+      );
+      final originalHeight = tester.getSize(editable).height;
+      await tester.longPressAt(
+        tester.getTopLeft(editable) + const Offset(20, 10),
+      );
+      await tester.pumpAndSettle();
+      final selection = tester
+          .widget<EditableText>(editable)
+          .controller
+          .selection;
+      expect(selection.isCollapsed, isFalse);
+      expect(selection.textInside(code), 'final');
+      await tester.pumpWidget(tree(2));
+      await tester.pumpAndSettle();
+      expect(
+        tester.widget<SelectableText>(selectable).textScaler?.scale(13),
+        26,
+      );
+      expect(
+        tester.getSize(editable).height,
+        greaterThan(originalHeight * 1.8),
+      );
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox());
+    },
+  );
+
+  testWidgets(
     'adjacent tools collapse together and an unconfirmed message can retry',
     (tester) async {
       SharedPreferences.setMockInitialValues({});
