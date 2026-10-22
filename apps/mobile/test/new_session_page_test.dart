@@ -46,8 +46,9 @@ class ReconnectWorkspace extends PageWorkspace {
   Future<dynamic> call(String method, [JsonMap params = const {}]) async {
     if (method == 'ListHarnesses') {
       catalogLoads++;
-      if (!online)
+      if (!online) {
         throw const RpcException('disconnected', 'server_disconnected');
+      }
     }
     return super.call(method, params);
   }
