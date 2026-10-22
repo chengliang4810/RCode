@@ -186,22 +186,20 @@ pub async fn serve_authenticated_listener(
 }
 
 async fn revoked(mut api_key: watch::Receiver<Option<String>>, accepted: Option<String>) {
-    loop {
-        if *api_key.borrow_and_update() != accepted {
-            return;
-        }
-        if api_key.changed().await.is_err() {
-            return;
-        }
+    // Every policy revision revokes this handshake, even if rapid toggles
+    // coalesce back to the original value before this task is scheduled.
+    if *api_key.borrow() != accepted || api_key.has_changed().unwrap_or(true) {
+        return;
     }
+    let _ = api_key.changed().await;
 }
 
 async fn serve_authenticated_socket(
     stream: TcpStream,
     service: Arc<dyn RpcService>,
-    api_key: watch::Receiver<Option<String>>,
+    mut api_key: watch::Receiver<Option<String>>,
 ) {
-    let accepted_key = api_key.borrow().clone();
+    let accepted_key = api_key.borrow_and_update().clone();
     let expected = accepted_key.clone();
     #[allow(clippy::result_large_err)]
     let authenticate = move |req: &HandshakeRequest, response: HandshakeResponse| {

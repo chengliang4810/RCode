@@ -170,6 +170,28 @@ async fn rotation_and_disabling_revoke_existing_connections() {
 }
 
 #[tokio::test]
+async fn a_rapid_disable_and_reenable_still_revokes_the_original_connection() {
+    let server = server().await;
+    let client = connect_ws_authenticated(&server.url, FIRST_KEY)
+        .await
+        .unwrap();
+    let mut watching = client.subscribe_scoped("Watch", json!({})).await.unwrap();
+    watching.recv().await.unwrap();
+    // No await between updates: watch receivers can observe just the latest
+    // value, but the previously authenticated connection must still end.
+    server.key.send_replace(None);
+    server.key.send_replace(Some(FIRST_KEY.into()));
+    assert!(
+        tokio::time::timeout(Duration::from_secs(2), watching.recv())
+            .await
+            .unwrap()
+            .is_none()
+    );
+    wait_for(|| client.is_connected()).await;
+    echo(&client).await;
+}
+
+#[tokio::test]
 async fn reconnect_restores_new_calls_without_replaying_an_accepted_write() {
     let server = server().await;
     let client = Arc::new(
