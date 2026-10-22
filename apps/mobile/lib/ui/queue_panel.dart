@@ -28,8 +28,13 @@ class QueuePanel extends StatelessWidget {
           ),
         );
       } else if (action == 'up' || action == 'down') {
+        final current = session.queue.indexWhere((row) => row['id'] == id);
+        if (current < 0) return;
         await session.queueAction('MoveQueuedMessage', id, {
-          'toIndex': index + (action == 'up' ? -1 : 1),
+          'toIndex': (current + (action == 'up' ? -1 : 1)).clamp(
+            0,
+            session.queue.length - 1,
+          ),
         });
       } else {
         await session.queueAction(action, id);
@@ -37,7 +42,7 @@ class QueuePanel extends StatelessWidget {
     } catch (error) {
       if (context.mounted) {
         ScaffoldMessenger.of(context)
-            .showSnackBar(SnackBar(content: Text('$error')));
+            .showSnackBar(SnackBar(content: Text(context.errorText(error))));
       }
     }
   }
@@ -54,41 +59,40 @@ class QueuePanel extends StatelessWidget {
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          for (var i = 0; i < session.queue.length.clamp(0, 3); i++)
+          for (final (i, item) in session.queue.take(3).indexed)
             ListTile(
+              key: ValueKey('queued.${item['id']}'),
               dense: true,
               leading: Icon(
                 Icons.schedule,
                 size: 17,
                 color: context.colors.secondary,
               ),
-              subtitle: session.queue[i]['deliveryGate'] == null
+              subtitle: item['deliveryGate'] == null
                   ? null
                   : Text(
-                      jsonMap(session.queue[i]['deliveryGate'])['kind'] ==
-                              'editing'
+                      jsonMap(item['deliveryGate'])['kind'] == 'editing'
                           ? context.tr('正在编辑', 'Being edited')
                           : context.tr('需要检查后保存', 'Review and save required'),
                     ),
               title: Text(
-                visiblePrompt('${session.queue[i]['text'] ?? ''}'),
+                visiblePrompt('${item['text'] ?? ''}'),
                 maxLines: 2,
                 overflow: TextOverflow.ellipsis,
               ),
               trailing: PopupMenuButton<String>(
                 tooltip: context.tr('队列操作', 'Queue actions'),
-                onSelected: (action) =>
-                    _action(context, session.queue[i], action, i),
+                onSelected: (action) => _action(context, item, action, i),
                 itemBuilder: (_) => [
                   PopupMenuItem(
                     value: 'SendQueuedMessageNow',
-                    enabled: session.queue[i]['deliveryGate'] == null,
+                    enabled: item['deliveryGate'] == null,
                     child: Text(context.tr('立即发送', 'Send now')),
                   ),
                   if (session.working)
                     PopupMenuItem(
                       value: 'SteerQueuedMessageNow',
-                      enabled: session.queue[i]['deliveryGate'] == null,
+                      enabled: item['deliveryGate'] == null,
                       child: Text(context.tr('引导当前任务', 'Steer current turn')),
                     ),
                   PopupMenuItem(
@@ -124,25 +128,27 @@ class QueuePanel extends StatelessWidget {
                     builder: (_, _) => ListView.builder(
                       controller: scroll,
                       itemCount: session.queue.length,
-                      itemBuilder: (context, i) => ListTile(
-                        title: Text(
-                          visiblePrompt('${session.queue[i]['text'] ?? ''}'),
-                          maxLines: 2,
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                        onTap: () =>
-                            _action(context, session.queue[i], 'edit', i),
-                        trailing: IconButton(
-                          icon: const Icon(Icons.delete_outline),
-                          tooltip: context.tr('删除', 'Remove'),
-                          onPressed: () => _action(
-                            context,
-                            session.queue[i],
-                            'RemoveQueuedMessage',
-                            i,
+                      itemBuilder: (context, i) {
+                        final item = session.queue[i];
+                        return ListTile(
+                          title: Text(
+                            visiblePrompt('${item['text'] ?? ''}'),
+                            maxLines: 2,
+                            overflow: TextOverflow.ellipsis,
                           ),
-                        ),
-                      ),
+                          onTap: () => _action(context, item, 'edit', i),
+                          trailing: IconButton(
+                            icon: const Icon(Icons.delete_outline),
+                            tooltip: context.tr('删除', 'Remove'),
+                            onPressed: () => _action(
+                              context,
+                              item,
+                              'RemoveQueuedMessage',
+                              i,
+                            ),
+                          ),
+                        );
+                      },
                     ),
                   ),
                 ),
@@ -373,7 +379,7 @@ class _QueueEditorState extends State<QueueEditor> {
                     Padding(
                       padding: const EdgeInsets.only(bottom: 12),
                       child: Text(
-                        '$_error',
+                        context.errorText(_error),
                         style: TextStyle(color: context.colors.danger),
                       ),
                     ),

@@ -19,6 +19,39 @@ void main() {
     ];
   });
   tearDown(() => workspace.dispose());
+
+  testWidgets('an open queue menu keeps its original message identity', (
+    tester,
+  ) async {
+    final session = workspace.session('chat')..hydrated = true;
+    session.queue = [
+      {'id': 'first', 'text': 'First message'},
+      {'id': 'second', 'text': 'Second message'},
+    ];
+    await tester.pumpWidget(
+      app(
+        Scaffold(
+          body: ListenableBuilder(
+            listenable: session,
+            builder: (_, _) => QueuePanel(session: session),
+          ),
+        ),
+      ),
+    );
+    await tester.tap(find.byTooltip('Queue actions').first);
+    await tester.pumpAndSettle();
+    session.queue = [session.queue.last];
+    session.notifyListeners();
+    await tester.pump();
+    await tester.tap(find.text('Remove'));
+    await tester.pumpAndSettle();
+    expect(
+      workspace.calls.where((call) => call.method == 'RemoveQueuedMessage'),
+      isEmpty,
+    );
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox());
+  });
   test(
     'editing attachment lists replaces legacy trailers and retains app context',
     () {
@@ -39,7 +72,7 @@ void main() {
     (tester) async {
       final session = workspace.session('chat')..hydrated = true;
       workspace.handler = (method, params) async {
-        if (method == 'BeginQueuedMessageEdit')
+        if (method == 'BeginQueuedMessageEdit') {
           return {
             'outcome': 'acquired',
             'leaseId': 'lease',
@@ -47,10 +80,12 @@ void main() {
             'text': 'Before',
             'attachments': <String>[],
           };
-        if (method == 'FinishQueuedMessageEdit')
+        }
+        if (method == 'FinishQueuedMessageEdit') {
           return {
             'outcome': params['action'] == 'commit' ? 'committed' : 'released',
           };
+        }
         return {'ok': true};
       };
       await tester.pumpWidget(
