@@ -53,6 +53,38 @@ fn workspace_footer_row() -> gpui::Div {
         .gap(px(4.0))
 }
 
+/// Keep the displayed host equal to the execution target even while a remote
+/// registry is loading or after a host has been removed. Falling back to the
+/// first row would label a remote send as local.
+fn execution_device_rows(state: &AppState) -> Vec<(String, String)> {
+    let mut rows: Vec<_> = state
+        .devices
+        .iter()
+        .filter(|device| !matches!(device.platform.as_str(), "ios" | "android"))
+        .map(|device| (device.id.clone(), device.name.clone()))
+        .collect();
+    if let Some(local) = &state.local_device_id
+        && !rows.iter().any(|(id, _)| id == local)
+    {
+        rows.insert(
+            0,
+            (
+                local.clone(),
+                crate::l10n::localizer().text(TextKey::SettingsDevicesLocal),
+            ),
+        );
+    }
+    if let Some(selected) = state.effective_device_id()
+        && !rows.iter().any(|(id, _)| id == &selected)
+    {
+        rows.push((
+            selected,
+            crate::l10n::localizer().text(TextKey::SettingsDevicesUnavailable),
+        ));
+    }
+    rows
+}
+
 use crate::composer::{ComposerInput, ComposerInputEvent};
 use crate::motion;
 use crate::popover::{self, Loadable, MenuKey};
@@ -799,6 +831,7 @@ pub struct Pickers {
     compact_keyboard: bool,
     effort_bounds: Option<gpui::Bounds<gpui::Pixels>>,
     open: popover::Popup<PickerKind>,
+    device_select: crate::settings::widgets::SelectState,
     /// The harness/model picker's rail selection (all models vs the effective
     /// harness's list). Re-primed on every open.
     model_rail: ModelRail,
@@ -1100,6 +1133,7 @@ impl Pickers {
             data_dir,
             draft_owner,
             open,
+            device_select: Default::default(),
             model_rail: ModelRail::default(),
             setting_menu: None,
             setting_active: 0,
@@ -3615,12 +3649,47 @@ impl Pickers {
             &theme,
             cx,
         );
+        let devices = execution_device_rows(self.state.read(cx));
+        let selected_device = self.state.read(cx).effective_device_id();
+        let device_picker = if devices.len() > 1 {
+            let selected = devices
+                .iter()
+                .position(|(id, _)| Some(id.as_str()) == selected_device.as_deref())
+                .unwrap_or(0);
+            let options = devices
+                .iter()
+                .map(|(_, name)| crate::settings::widgets::SelectOption::new(name.clone()));
+            Some(
+                crate::settings::widgets::select(
+                    "picker-device",
+                    crate::l10n::localizer().text(TextKey::SettingsDevicesExecutionDevice),
+                    &theme,
+                    |this: &mut Pickers| &mut this.device_select,
+                )
+                .options(options, selected)
+                .menu_width(220.0)
+                .on_select(move |this, index, _, cx| {
+                    if let Some((id, _)) = devices.get(index) {
+                        this.state.update(cx, |state, cx| {
+                            state.auto_selected = true;
+                            state.select_device(id.clone(), cx);
+                        });
+                        this.remember_target(cx);
+                        cx.notify();
+                    }
+                })
+                .render(&self.device_select, cx),
+            )
+        } else {
+            None
+        };
         div()
             .flex_none()
             .flex()
             .flex_row()
             .items_center()
             .gap(px(4.0))
+            .children(device_picker)
             .child(attach_overlay_end(
                 project_chip,
                 &mut overlay,
@@ -6254,6 +6323,34 @@ impl Render for Pickers {
 mod tests {
     use super::*;
     use rcode_proto::{FolderEntry, Model, ModelOption, ModelOptionChoice, Space};
+
+    #[test]
+    fn execution_device_rows_preserve_an_unavailable_target_and_hide_viewers() {
+        let mut state = AppState::new();
+        state.local_device_id = Some("local".into());
+        state.selected_device = Some("removed-remote".into());
+        state.no_project = true;
+        state.devices = vec![
+            serde_json::from_value(serde_json::json!({
+                "id":"phone", "name":"Phone", "platform":"ios", "lastSeenAt":null
+            }))
+            .unwrap(),
+        ];
+        let rows = execution_device_rows(&state);
+        assert_eq!(
+            rows.iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>(),
+            ["local", "removed-remote"]
+        );
+        assert_eq!(
+            rows.iter()
+                .position(|(id, _)| Some(id.as_str()) == state.effective_device_id().as_deref()),
+            Some(1)
+        );
+        assert_eq!(
+            state.effective_device_id().as_deref(),
+            Some("removed-remote")
+        );
+    }
 
     struct ModelShortcutHost {
         focus_sub: Option<gpui::Subscription>,
