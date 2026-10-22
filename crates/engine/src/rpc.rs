@@ -1454,6 +1454,7 @@ fn forwardable(method: &str) -> bool {
             | methods::LIST_COMMANDS
             | methods::QUEUE_COMMAND
             | methods::WATCH_DOC_MESSAGES
+            | methods::FETCH_TOOL_BLOB
             // The queue lives on the chat doc, and only its host may send from
             // it — same addressing as the command ledger next door.
             | methods::WATCH_QUEUE
@@ -4169,6 +4170,7 @@ mod tests {
         assert!(!forwardable(methods::ENGINE_INFO));
         assert!(!forwardable(methods::ENGINE_READY));
         assert!(forwardable(methods::QUEUE_COMMAND));
+        assert!(forwardable(methods::FETCH_TOOL_BLOB));
         assert!(forwardable(methods::SEARCH_FILES));
         assert!(forwardable(methods::SEARCH_GIT_HISTORY));
         assert!(forwardable(methods::FETCH_ALL));
