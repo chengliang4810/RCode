@@ -51,6 +51,7 @@ pub struct DevicesPage {
     saving: bool,
     error: Option<String>,
     loaded_context: Option<usize>,
+    context_generation: u64,
     scroll: widgets::PageScroll,
     _load: Option<Task<()>>,
     _write: Option<Task<()>>,
@@ -116,6 +117,7 @@ impl DevicesPage {
             saving: false,
             error: None,
             loaded_context: None,
+            context_generation: 0,
             scroll: widgets::PageScroll::default(),
             _load: None,
             _write: None,
@@ -141,8 +143,12 @@ impl DevicesPage {
                 cx.background_executor()
                     .timer(std::time::Duration::from_secs(2))
                     .await;
-                let Ok((engine, context)) = page.update(cx, |page, cx| {
-                    (page.state.read(cx).engine().cloned(), page.context(cx))
+                let Ok((engine, context, generation)) = page.update(cx, |page, cx| {
+                    (
+                        page.state.read(cx).engine().cloned(),
+                        page.context(cx),
+                        page.context_generation,
+                    )
                 }) else {
                     return;
                 };
@@ -152,7 +158,7 @@ impl DevicesPage {
                 let result = engine.client().call("ListRemoteHosts", json!({})).await;
                 if page
                     .update(cx, |page, cx| {
-                        if page.context(cx) != context {
+                        if !page.is_current_context(context, generation, cx) {
                             return;
                         }
                         if let Ok(hosts) = result.and_then(|v| {
@@ -178,12 +184,50 @@ impl DevicesPage {
             .map(|engine| engine.client() as *const _ as usize)
     }
 
+    fn is_current_context(&self, context: Option<usize>, generation: u64, cx: &App) -> bool {
+        self.context(cx) == context
+            && self.loaded_context == context
+            && self.context_generation == generation
+    }
+
+    fn sync_context(&mut self, cx: &mut Context<Self>) {
+        let context = self.context(cx);
+        if self.loaded_context == context {
+            return;
+        }
+        self.loaded_context = context;
+        self.context_generation = self.context_generation.wrapping_add(1);
+        self._load = None;
+        self._write = None;
+        self._key_load = None;
+        let was_polling = self._poll.take().is_some();
+        self.access = None;
+        self.hosts.clear();
+        self.editor = None;
+        self.editor_generation = self.editor_generation.wrapping_add(1);
+        self.key_visible = false;
+        self.error = None;
+        self.loading = false;
+        self.set_saving(false, cx);
+        self.port
+            .update(cx, |input, cx| input.set_text("27655", cx));
+        self.key.update(cx, |input, cx| {
+            input.set_text("", cx);
+            input.set_masked(true, cx);
+        });
+        if was_polling {
+            self.set_active(true, cx);
+        }
+        cx.notify();
+    }
+
     fn load(&mut self, cx: &mut Context<Self>) {
+        self.sync_context(cx);
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             return;
         };
-        self.loaded_context = self.context(cx);
         let context = self.loaded_context;
+        let generation = self.context_generation;
         let port_revision = self.port.read(cx).edit_revision();
         let key_revision = self.key.read(cx).edit_revision();
         self.loading = true;
@@ -222,7 +266,7 @@ impl DevicesPage {
             }
             .await;
             page.update(cx, |page, cx| {
-                if page.context(cx) != context {
+                if !page.is_current_context(context, generation, cx) {
                     return;
                 }
                 page.loading = false;
@@ -297,6 +341,8 @@ impl DevicesPage {
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             return;
         };
+        let context = self.context(cx);
+        let generation = self.context_generation;
         self.set_saving(true, cx);
         self.error = None;
         self._write = Some(cx.spawn(async move |page, cx| {
@@ -321,6 +367,9 @@ impl DevicesPage {
             }
             .await;
             page.update(cx, |page, cx| {
+                if !page.is_current_context(context, generation, cx) {
+                    return;
+                }
                 page.set_saving(false, cx);
                 match result {
                     Ok((access, key)) => {
@@ -360,12 +409,17 @@ impl DevicesPage {
             let Some(engine) = self.state.read(cx).engine().cloned() else {
                 return;
             };
+            let context = self.context(cx);
+            let context_generation = self.context_generation;
             self._key_load = Some(cx.spawn(async move |page, cx| {
                 let result = engine
                     .client()
                     .call("GetRemoteHostApiKey", json!({"id":id}))
                     .await;
                 page.update(cx, |page, cx| {
+                    if !page.is_current_context(context, context_generation, cx) {
+                        return;
+                    }
                     let Some(editor) = page.editor.as_mut().filter(|e| e.generation == generation)
                     else {
                         return;
@@ -439,6 +493,8 @@ impl DevicesPage {
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             return;
         };
+        let context = self.context(cx);
+        let generation = self.context_generation;
         self.set_saving(true, cx);
         self.error = None;
         self._write = Some(cx.spawn(async move |page, cx| {
@@ -448,6 +504,9 @@ impl DevicesPage {
             }
             .await;
             page.update(cx, |page, cx| {
+                if !page.is_current_context(context, generation, cx) {
+                    return;
+                }
                 page.set_saving(false, cx);
                 match result.and_then(|v| {
                     serde_json::from_value(v)

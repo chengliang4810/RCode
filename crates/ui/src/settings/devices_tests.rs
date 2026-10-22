@@ -60,6 +60,57 @@ impl Server {
     }
 }
 
+fn server() -> Server {
+    let (out, requests) = mpsc::channel(64);
+    let (replies, inbound) = mpsc::channel(64);
+    Server {
+        requests,
+        replies,
+        engine: EngineHandle::from_test_client(RpcClient::new(out, inbound)),
+    }
+}
+
+fn finish_context_load(
+    server: &mut Server,
+    runtime: &tokio::runtime::Runtime,
+    cx: &mut TestAppContext,
+) {
+    let request = server.request(cx);
+    assert_eq!(request.method.as_deref(), Some("GetRemoteAccess"));
+    server.reply(
+        runtime,
+        &request,
+        json!({"enabled":false,"port":29666,"hasApiKey":false,"error":null}),
+    );
+    let request = server.request(cx);
+    assert_eq!(request.method.as_deref(), Some("ListRemoteHosts"));
+    server.reply(
+        runtime,
+        &request,
+        json!([{
+            "id":"new-host","name":"New host","url":"ws://127.0.0.1:29666",
+            "enabled":true,"connected":true,"error":null
+        }]),
+    );
+    cx.run_until_parked();
+}
+
+fn replace_engine(
+    window: WindowHandle<DevicesPage>,
+    engine: EngineHandle,
+    cx: &mut TestAppContext,
+) {
+    window
+        .update(cx, |page, _, cx| {
+            page.state.update(cx, |state, cx| {
+                state.set_test_engine(engine);
+                cx.notify();
+            });
+        })
+        .unwrap();
+    cx.run_until_parked();
+}
+
 fn setup(
     runtime: &tokio::runtime::Runtime,
     cx: &mut TestAppContext,
@@ -70,14 +121,8 @@ fn setup(
         crate::app_menus::init(cx);
         crate::composer::init(cx, crate::settings::ComposerSendBehavior::default());
     });
-    let (out, requests) = mpsc::channel(64);
-    let (replies, inbound) = mpsc::channel(64);
-    let engine = EngineHandle::from_test_client(RpcClient::new(out, inbound));
-    let mut server = Server {
-        requests,
-        replies,
-        engine: engine.clone(),
-    };
+    let mut server = server();
+    let engine = server.engine.clone();
     let window = cx.add_window(|_, cx| {
         let state = cx.new(|_| {
             let mut state = AppState::new();
@@ -309,4 +354,183 @@ fn closing_external_access_ignores_unsaved_invalid_port_and_key(cx: &mut TestApp
             .unwrap();
     }
     server.assert_idle(cx);
+}
+
+#[gpui::test]
+fn losing_the_engine_clears_sensitive_state_and_cancels_pending_operations(
+    cx: &mut TestAppContext,
+) {
+    let runtime = runtime();
+    let _guard = runtime.enter();
+    let (mut server, window) = setup(&runtime, cx);
+    window
+        .update(cx, |page, _, cx| {
+            page.key_visible = true;
+            page.key.update(cx, |input, cx| {
+                input.set_text("OldSecret123", cx);
+                input.set_masked(false, cx);
+            });
+            page.hosts = vec![host("old-host")];
+            page.edit_host(Some(host("old-host")), cx);
+        })
+        .unwrap();
+    let old_key = server.request(cx);
+    assert_eq!(old_key.method.as_deref(), Some("GetRemoteHostApiKey"));
+    window
+        .update(cx, |page, _, cx| page.save_access(true, false, cx))
+        .unwrap();
+    let old_write = server.request(cx);
+    window
+        .update(cx, |page, _, cx| {
+            page.state
+                .update(cx, |state, cx| state.prepare_runtime_replacement(cx));
+        })
+        .unwrap();
+    cx.run_until_parked();
+    window
+        .update(cx, |page, _, cx| {
+            assert!(page.loaded_context.is_none());
+            assert!(page.access.is_none());
+            assert!(page.hosts.is_empty());
+            assert!(page.editor.is_none());
+            assert!(page.key.read(cx).text().is_empty());
+            assert!(!page.key_visible);
+            assert_eq!(page.port.read(cx).text(), "27655");
+            assert!(!page.loading && !page.saving);
+            assert!(!page.key.read(cx).read_only && !page.port.read(cx).read_only);
+            assert!(page._load.is_none() && page._write.is_none() && page._key_load.is_none());
+        })
+        .unwrap();
+    server.reply(&runtime, &old_key, json!({"apiKey":"OldSecret123"}));
+    server.reply(
+        &runtime,
+        &old_write,
+        json!({"enabled":true,"port":27655,"hasApiKey":true,"error":null}),
+    );
+    server.assert_idle(cx);
+}
+
+#[gpui::test]
+fn old_access_and_key_completions_cannot_modify_a_new_engine_or_unlock_its_write(
+    cx: &mut TestAppContext,
+) {
+    let runtime = runtime();
+    let _guard = runtime.enter();
+    let (mut old, window) = setup(&runtime, cx);
+    window
+        .update(cx, |page, _, cx| page.edit_host(Some(host("old-host")), cx))
+        .unwrap();
+    let old_key = old.request(cx);
+    window
+        .update(cx, |page, _, cx| page.save_access(true, false, cx))
+        .unwrap();
+    let old_write = old.request(cx);
+    // Retain already-running callbacks outside the page to exercise the
+    // generation guards even when cancellation cannot remove the completion.
+    let _old_tasks = window
+        .update(cx, |page, _, _| (page._write.take(), page._key_load.take()))
+        .unwrap();
+    let mut new = server();
+    replace_engine(window, new.engine.clone(), cx);
+    finish_context_load(&mut new, &runtime, cx);
+    window
+        .update(cx, |page, _, cx| {
+            page.edit_host(None, cx);
+            page.editor
+                .as_ref()
+                .unwrap()
+                .key
+                .update(cx, |input, cx| input.set_text("NewHostKey12", cx));
+            page.key
+                .update(cx, |input, cx| input.set_text("NewDraft1234", cx));
+            page.save_access(true, false, cx);
+        })
+        .unwrap();
+    let new_write = new.request(cx);
+    old.reply(&runtime, &old_key, json!({"apiKey":"OldSecret123"}));
+    old.reply(
+        &runtime,
+        &old_write,
+        json!({"enabled":true,"port":27777,"hasApiKey":true,"error":null}),
+    );
+    let old_key_fetch = old.request(cx);
+    assert_eq!(
+        old_key_fetch.method.as_deref(),
+        Some("GetRemoteAccessApiKey")
+    );
+    old.reply(&runtime, &old_key_fetch, json!({"apiKey":"OldSecret123"}));
+    cx.run_until_parked();
+    window
+        .update(cx, |page, _, cx| {
+            assert!(page.saving);
+            assert!(page.key.read(cx).read_only);
+            assert!(!page.access.as_ref().unwrap().enabled);
+            assert_eq!(page.access.as_ref().unwrap().port, 29666);
+            assert_eq!(page.key.read(cx).text(), "NewDraft1234");
+            assert_eq!(
+                page.editor.as_ref().unwrap().key.read(cx).text(),
+                "NewHostKey12"
+            );
+            assert_eq!(page.hosts[0].id, "new-host");
+            assert!(page.error.is_none());
+        })
+        .unwrap();
+    new.reply(
+        &runtime,
+        &new_write,
+        json!({"enabled":true,"port":29666,"hasApiKey":true,"error":null}),
+    );
+    let request = new.request(cx);
+    assert_eq!(request.method.as_deref(), Some("GetRemoteAccessApiKey"));
+    new.reply(&runtime, &request, json!({"apiKey":"NewActive123"}));
+    cx.run_until_parked();
+    window
+        .update(cx, |page, _, cx| {
+            assert!(!page.saving);
+            assert!(page.access.as_ref().unwrap().enabled);
+            assert_eq!(page.key.read(cx).text(), "NewActive123");
+        })
+        .unwrap();
+}
+
+#[gpui::test]
+fn old_host_write_cannot_replace_the_new_registry_or_close_its_editor(cx: &mut TestAppContext) {
+    let runtime = runtime();
+    let _guard = runtime.enter();
+    let (mut old, window) = setup(&runtime, cx);
+    window
+        .update(cx, |page, _, cx| {
+            page.write_host("SaveRemoteHost", json!({"id":"old-host"}), true, cx);
+        })
+        .unwrap();
+    let old_write = old.request(cx);
+    let _old_task = window.update(cx, |page, _, _| page._write.take()).unwrap();
+    let mut new = server();
+    replace_engine(window, new.engine.clone(), cx);
+    finish_context_load(&mut new, &runtime, cx);
+    window
+        .update(cx, |page, _, cx| {
+            page.edit_host(None, cx);
+            page.editor
+                .as_ref()
+                .unwrap()
+                .name
+                .update(cx, |input, cx| input.set_text("New draft", cx));
+        })
+        .unwrap();
+    old.reply(&runtime, &old_write, json!({"id":"old-host"}));
+    let old_list = old.request(cx);
+    assert_eq!(old_list.method.as_deref(), Some("ListRemoteHosts"));
+    old.reply(&runtime, &old_list, json!([]));
+    cx.run_until_parked();
+    window
+        .update(cx, |page, _, cx| {
+            assert_eq!(page.hosts[0].id, "new-host");
+            assert_eq!(
+                page.editor.as_ref().unwrap().name.read(cx).text(),
+                "New draft"
+            );
+            assert!(page.error.is_none());
+        })
+        .unwrap();
 }
