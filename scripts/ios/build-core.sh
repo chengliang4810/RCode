@@ -49,7 +49,7 @@ LIB="$ROOT/target/$TARGET/$PROFILE/librcode_mobile.a"
 cp -p "$LIB" "$OUT/librcode_mobile.a"
 
 GEN="$OUT/gen"
-"$ROOT/target/mobile/uniffi-bindgen" generate --library "$LIB" --language swift --out-dir "$GEN" >/dev/null
+"$ROOT/target/mobile/uniffi-bindgen" generate --library "$LIB" --language swift --no-format --out-dir "$GEN" >/dev/null
 cp "$GEN/rcode_coreFFI.h" "$OUT/include/rcode_coreFFI.h"
 cp "$GEN/rcode_coreFFI.modulemap" "$OUT/include/module.modulemap"
 # Only touch the Swift file when it changed so Xcode doesn't recompile it.

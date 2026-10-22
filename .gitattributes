@@ -1,3 +1,4 @@
 crates/agent/src/prompts/subagents/*.md text eol=lf
 *.sh text eol=lf
 /dist/macos/*.entitlements text eol=lf
+apps/ios/RCode/Core/Generated/rcode_core.swift text eol=lf linguist-generated=true whitespace=-blank-at-eol

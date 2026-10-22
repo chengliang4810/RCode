@@ -215,7 +215,7 @@ jobs:
           cargo build --locked -p rcode-mobile --lib
           cargo build --locked -p rcode-mobile --bin uniffi-bindgen --features bindgen
           target/debug/uniffi-bindgen generate --library target/debug/librcode_mobile.so \
-            --language swift --out-dir "$RUNNER_TEMP/gen" >/dev/null
+            --language swift --no-format --out-dir "$RUNNER_TEMP/gen" >/dev/null
           diff -u apps/ios/RCode/Core/Generated/rcode_core.swift "$RUNNER_TEMP/gen/rcode_core.swift"
           # The simulator job links these headers instead of regenerating them.
           mkdir -p "$RUNNER_TEMP/ios-include"

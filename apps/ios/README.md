@@ -22,7 +22,7 @@ xcodebuild -project RCode.xcodeproj -scheme RCode \
 
 The RCode target's **Rust core** build phase runs `scripts/ios/build-core.sh`,
 which builds `crates/mobile` for the active platform (always optimized — the
-`mobile` cargo profile) and regenerates the ignored UniFFI bindings in
+`mobile` cargo profile) and refreshes the committed UniFFI bindings in
 `RCode/Core/Generated/`. `RCODE_SKIP_CORE=1` reuses the last built library
 when iterating on Swift only.
 
