@@ -56,6 +56,10 @@ class _RCodeAppState extends State<RCodeApp> with WidgetsBindingObserver {
     if (state == AppLifecycleState.resumed && widget.workspace.authenticated) {
       unawaited(widget.workspace.reconnect().catchError((_) {}));
     }
+    if (state == AppLifecycleState.paused ||
+        state == AppLifecycleState.inactive) {
+      unawaited(widget.workspace.flushCaches().catchError((_) {}));
+    }
   }
 
   @override
