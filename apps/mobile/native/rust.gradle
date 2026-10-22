@@ -1,0 +1,37 @@
+// Applied by android/app/build.gradle.kts. Native artifacts are built from
+// source before every APK/AAB build and never need to be checked into Git.
+def mobileRoot = project.file('../..')
+def repositoryRoot = project.file('../../../..')
+def nativeRoot = new File(mobileRoot, 'native')
+def nativeOutput = new File(mobileRoot, 'build/rust-jni')
+def windows = System.getProperty('os.name').toLowerCase().contains('windows')
+def sdkProperties = new Properties()
+def localProperties = rootProject.file('local.properties')
+if (localProperties.exists()) localProperties.withInputStream { sdkProperties.load(it) }
+def sdkRoot = sdkProperties.getProperty('sdk.dir') ?: System.getenv('ANDROID_SDK_ROOT') ?: System.getenv('ANDROID_HOME')
+def ndkRoot = System.getenv('ANDROID_NDK_HOME') ?: new File(sdkRoot, 'ndk/27.0.12077973').absolutePath
+def platforms = (project.findProperty('target-platform') ?: 'android-arm64,android-x64').toString().split(',')
+def selected = platforms.collect { it == 'android-arm64' ? 'arm64-v8a' : it == 'android-x64' ? 'x86_64' : null }.findAll { it != null }.unique()
+if (selected.isEmpty()) throw new GradleException('RCode mobile requires android-arm64 or android-x64.')
+
+android.defaultConfig.ndk.abiFilters.clear()
+android.defaultConfig.ndk.abiFilters.addAll(selected)
+android.sourceSets.main.jniLibs.srcDir(nativeOutput)
+
+def nativeTask = tasks.register('buildRCodeVisuals', Exec) {
+    inputs.file(new File(repositoryRoot, 'Cargo.lock'))
+    inputs.file(new File(repositoryRoot, 'Cargo.toml'))
+    inputs.dir(new File(repositoryRoot, 'crates'))
+    inputs.dir(nativeRoot)
+    inputs.property('abis', selected.join(','))
+    outputs.files(selected.collectMany { [new File(nativeOutput, "$it/librcode_mobile.so"), new File(nativeOutput, "$it/libc++_shared.so")] })
+    if (windows) {
+        commandLine('powershell.exe', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File',
+            new File(nativeRoot, 'build_android.ps1').absolutePath, '-Abis', selected.join(','),
+            '-NdkDirectory', ndkRoot, '-OutputDirectory', nativeOutput.absolutePath)
+    } else {
+        commandLine('bash', new File(nativeRoot, 'build_android.sh').absolutePath,
+            selected.join(','), ndkRoot, nativeOutput.absolutePath)
+    }
+}
+tasks.named('preBuild').configure { dependsOn(nativeTask) }
