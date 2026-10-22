@@ -194,7 +194,8 @@ if [[ ! "$simulator_udid" =~ ^[[:xdigit:]]{8}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[
   exit 1
 fi
 printf '%s\n' "$simulator_udid" >"$artifact_dir/simulator-udid.txt"
-run_bounded 180 xcrun simctl bootstatus "$simulator_udid" -b > >(tee "$artifact_dir/simulator-boot.log") 2>&1
+# A fresh runner can spend several minutes in iOS data migration before boot.
+run_bounded 600 xcrun simctl bootstatus "$simulator_udid" -b > >(tee "$artifact_dir/simulator-boot.log") 2>&1
 
 "$fixture_binary" >"$artifact_dir/fixture.log" 2>&1 &
 fixture_pid=$!
