@@ -4,8 +4,7 @@ Selected conversations show a context ring beneath the composer, including
 project-less and remote conversations. Hovering opens the anchored details;
 clicking does not pin them. The card shows a single row with capacity and used/total counts
 plus a percentage, followed by a progress bar. Chinese counts use compact units,
-for example `13.4万/100万 (13.4%)`. It updates with the replicated context snapshot. Missing
-measurements display an explicit waiting/unavailable state instead of 0%.
+for example `13.4万/100万 (13.4%)`. It updates with the replicated context snapshot. The ring appears after recorded context data is available.
 The new-conversation page shows no ring. Moving away from both the ring and card
 closes the panel, with a short grace period for crossing their eight-pixel gap.
 The panel uses the same backdrop blur and trigger-based positioning as session statistics.
@@ -16,16 +15,12 @@ at a full circle while the details preserve over-capacity measurements. A faint
 track means the harness has not reported enough data to calculate a percentage.
 Measured zero is displayed as 0.0% in the details.
 
-The host normalizes context occupancy separately from billing `Usage` events:
-
-| Harness | Measurement |
-| --- | --- |
-| Claude Code | Latest parent assistant message's input plus cache-read/cache-creation tokens; capacity from that model's result metadata. Aggregate result billing and child agents are excluded. |
-| Codex | Latest model call (`tokenUsage.last`), with `modelContextWindow`; never the cumulative thread total. |
-| OpenCode | Latest parent assistant message's total, or input/output/cache counts; capacity from the advertised provider/model catalog. Empty in-progress placeholders do not clear a measurement. |
-| ACP (Devin, Grok, Hermes, pi) | `usage_update.used` and advertised capacity when the agent reports them. |
-| Cursor | The pinned SDK exposes billed per-turn counts, not context occupancy. The shared control shows unavailable. |
-| Mock / older hosts | Unavailable until a context snapshot is supplied. |
+Native Agent reports context occupancy separately from billing `Usage` events.
+The runner takes the latest model call's normalized input-token usage; model
+adapters include cached input in that value. Capacity comes from the selected
+model configuration and its context-window options. A conversation without a
+measurement does not display a context ring; the new-conversation page has none.
+Mock conversations need an explicit context snapshot to display a measurement.
 
 `AgentEvent::ContextUsage` updates one atomic `meta.contextUsage` value in the
 session document. Partial measurements preserve known fields; a zero capacity is
@@ -40,8 +35,8 @@ additive field; old hosts decode as unavailable. Thin-document rebuilding also
 preserves the snapshot. UI rendering reads the in-memory state, with no polling,
 provider calls, filesystem access, or new remote endpoint.
 
-Validation covers adapter normalization, compaction to zero, cache accounting,
+Validation covers model usage normalization, compaction to zero, cache accounting,
 subagent isolation, snapshot and incremental import, thin rebuilds, context-only
-watch updates, reconnects, and old/new watch compatibility. Screenshots use the
-native desktop attached to a viewing engine; a separate host sends deterministic
-Claude protocol fixtures through a local relay. The measurements are test data.
+watch updates, reconnects, and old/new watch compatibility. Native acceptance should check measured usage, compaction, chat switching and
+hover/focus behavior on each supported platform. Deterministic test counters do
+not establish accuracy for every live provider.

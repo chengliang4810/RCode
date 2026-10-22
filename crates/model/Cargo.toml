@@ -8,8 +8,7 @@ publish.workspace = true
 # Provider-independent model protocol: request/response DTOs, the streaming-first
 # model interface, and the HTTP/SSE/retry transport underneath it.
 #
-# Ported from the original project's `model` (Apache-2.0); see THIRD_PARTY_NOTICES.md and
-# docs/design/native-agent-rewrite.md.
+# Ported from the original project's `model` (Apache-2.0); see THIRD_PARTY_NOTICES.md.
 [dependencies]
 async-trait.workspace = true
 futures.workspace = true

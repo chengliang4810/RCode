@@ -38,7 +38,7 @@ set `GPUI_FXC_PATH` to the Windows SDK's `fxc.exe`.
 | --- | --- |
 | Application data | `%USERPROFILE%\.rcode` — the same `~/.rcode` name every platform uses, resolved from `USERPROFILE` alone so a Git Bash launch and an Explorer launch pick the same directory. `RCODE_DATA_DIR` overrides it for a single launch. |
 | Data on another drive | Write the path of an existing directory into `%USERPROFILE%\.rcode\location`. The config root (device id, lock, `providers.json`, settings) stays put; the stores, clones, scratch folders, caches and worktrees move there. A pointer that names a missing directory stops the app with that path in the message instead of starting on an empty workspace. Delete the file to go back to one directory. |
-| Provider credentials and endpoints | `providers.json` inside the data root. |
+| Provider credentials and endpoints | `providers.json` inside the config root. |
 | Skills | `<project>/.agents/skills` for a project's, `%USERPROFILE%\.rcode\skills` for the user's. |
 
 An OS file lock prevents engines from sharing a profile; `engine.lock.pid` is

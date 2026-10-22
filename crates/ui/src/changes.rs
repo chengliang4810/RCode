@@ -1,4 +1,4 @@
-//! The right-pane "Changes" content (feature-inventory §1.11): a unified-diff
+//! The right-pane "Changes" content (ARCHITECTURE.md): a unified-diff
 //! viewer over `WatchCheckoutDiffs`.
 //!
 //! - pure patch parser: `diff --git` sections → file/hunk/line/notice rows,

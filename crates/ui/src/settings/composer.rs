@@ -48,7 +48,7 @@ pub struct ComposerDefaults {
     /// Last non-default model option picks (option id → choice id), per
     /// harness and model id. Model-scoped because each pick was validated
     /// against that model's catalog row, so it stays safe to send before the
-    /// catalog reloads (the Claude harness appends `[1m]` to any model id).
+    /// catalog reloads.
     pub model_options_by_model: HashMap<HarnessId, HashMap<String, ModelOptions>>,
     /// Every model label ever seen (id → label), fed from catalog loads.
     /// The chip's fallback while a harness's list is still loading — a

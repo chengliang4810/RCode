@@ -115,9 +115,8 @@ fn assemble(dir: &std::path::Path, device_id: &str) -> EngineCore {
     EngineCore::assemble(dir, registry(), HarnessId::Mock, None).expect("engine core assembles")
 }
 
-/// The in-process room: an in-memory registry server speaking the DO's JSON
-/// WS protocol (what the RegistryRoom DO does over the wire), with both
-/// engines' hosts wired to it via the test seam.
+/// The in-process registry server speaks the JSON WebSocket protocol, with
+/// both engines connected through the test transport seam.
 async fn bridge(
     a: &EngineCore,
     b: &EngineCore,

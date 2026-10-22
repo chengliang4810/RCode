@@ -4,38 +4,16 @@ The agent's checklist is a tray above the composer, not just a `Todo · 2/5 done
 chip in the transcript. It follows the latest checklist of the selected chat and
 shows what is being worked on without scrolling.
 
-Screenshots: [`docs/screenshots/todo-panel/`](screenshots/todo-panel/).
-
 ## Data
 
-Every harness that plans writes the *whole* list on each update, so the panel
-needs no history, only the latest `ToolCall::Todo` part.
+Native Agent's `TodoWrite` tool supplies the full checklist on each update.
+The event adapter emits `ToolCall::Todo`; the transcript fold and `latest_todo`
+projection select the most recent list. An empty list clears the panel.
 
-| Harness | Source | In-progress |
-| --- | --- | --- |
-| Claude | `TodoWrite` | `in_progress` |
-| OpenCode | `todowrite` | `in_progress` |
-| ACP (Gemini, Cursor, Devin, ...) | `plan` update, id `LIVE_PLAN_TOOL_ID` | `in_progress` |
-| Codex | `turn/plan/updated` (`update_plan`), id `LIVE_PLAN_TOOL_ID` | `inProgress` |
-| Codex | legacy `todoList` item | not exposed |
-| Cursor | `updateTodos` | `status` string, when present |
-
-`TodoItem` is `{ text, done, status? }` (`crates/proto/src/agent.rs`).
-
-- `done` is unchanged and stays authoritative for completion.
-- `status` (`pending | inProgress | completed`) is additive and serde-defaulted. It
-  is written **only for an in-progress item**, so every other item serializes
-  byte-for-byte as before and old builds, iOS and the TS edge
-  (`session-doc`) ignore it. A missing or unrecognised value derives from
-  `done`; an unknown future status never fails the whole tool call.
-- Use `TodoItem::new(text, status)` to keep `done` and `status` consistent and
-  `item.status()` to read the effective value.
-- `cancelled` (OpenCode) decodes as pending: it is not done and not being worked on.
-
-The ACP and Codex plan updates reuse one tool id, so the fold refreshes the same
-part in place within a segment and appends a new one in the next segment. The
-engine's stale-echo filter exempts that id, and "latest part wins" is the panel's
-contract (`latest_todo`). An empty list clears the panel.
+`TodoItem` is `{ text, done, status? }` (`crates/proto/src/agent.rs`). Completion
+uses `done`; `status` carries the in-progress state when present. Missing or
+unknown status falls back to `done`. `TodoItem::new` keeps those fields
+consistent, and `item.status()` returns the effective state.
 
 ## Behaviour
 
@@ -85,7 +63,7 @@ the first todo.
 
 ```sh
 cargo test --locked -p rcode-proto todo_item_tests
-cargo test --locked -p rcode-harness            # normalizers: claude, opencode, acp, codex, cursor
+cargo test --locked -p rcode-harness --lib      # native tool-event mapping
 cargo test --locked -p rcode-doc todo
 cargo test --locked -p rcode-ui --lib todo_panel
 ```

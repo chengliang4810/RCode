@@ -31,8 +31,8 @@ pub const APPSHOT_MARKER: &str =
 pub const PENDING_REF_PREFIX: &str = "pending://";
 /// use-attachments.ts MAX_ATTACHMENT_BYTES.
 pub const MAX_ATTACHMENT_BYTES: usize = 24 * 1024 * 1024;
-/// Base64 chars per UploadChunk (≈510KB binary; clears Cloudflare's 1MiB WS
-/// cap with envelope headroom, `% 4 == 0` so slices decode independently).
+/// Base64 chars per UploadChunk (about 510 KB binary), leaving envelope
+/// headroom within a 1 MiB frame budget. Slices decode independently.
 pub const UPLOAD_CHUNK_B64_CHARS: usize = 680_000;
 
 /// Append the attachment trailer (no-op without paths).

@@ -31,7 +31,7 @@ pub use device_room::{
 pub use server::{serve_connection, serve_ws_listener};
 
 /// RPC method names — single source of truth for both ends.
-/// Full surface: docs/research/feature-inventory.md §2.
+/// Keep callers and service dispatch aligned with these constants.
 pub mod methods {
     pub const WATCH_PREVIEWS: &str = "WatchPreviews";
     pub const LIST_HARNESSES: &str = "ListHarnesses";
@@ -177,7 +177,7 @@ pub mod methods {
     pub const WATCH_SESSIONS: &str = "WatchSessions";
     /// Spaces registry (device+folder pairs) from the workspace doc.
     pub const WATCH_SPACES: &str = "WatchSpaces";
-    /// Entity mutations against the workspace doc (feature-inventory §2 DataRpc).
+    /// Entity mutations against the workspace doc (ARCHITECTURE.md DataRpc).
     /// Params are tagged `{op: createChat|createSpace|renameSpace|deleteSpace|
     /// renameChat|setChatArchived|deleteChat|renameDevice|markChatSeen, …}`.
     pub const MUTATE: &str = "Mutate";
@@ -194,7 +194,7 @@ pub mod methods {
     /// engine behind its windows would leave that process unusable.
     pub const STOP_ENGINE: &str = "StopEngine";
     pub const AUTH_STATUS: &str = "AuthStatus";
-    // AuthRpc mutations (feature-inventory §2 AuthRpc; IPC-only).
+    // AuthRpc mutations (ARCHITECTURE.md AuthRpc; IPC-only).
     pub const SIGN_IN: &str = "SignIn";
     pub const SIGN_IN_HEADLESS: &str = "SignInHeadless";
     pub const COMPLETE_SIGN_IN: &str = "CompleteSignIn";
@@ -288,7 +288,7 @@ pub mod methods {
     /// Store an agent's HTML page and show it inline in that chat's live
     /// turn (`show_visual`). Local only: the calling agent runs on this device.
     pub const PUBLISH_VISUAL: &str = "PublishVisual";
-    /// Lazy full-tool-output fetch from the R2 sidecar by doc-resident ref
+    /// Optional endpoint fetch of full tool output by document reference
     /// (chat2-sync A3). Edge-direct from any device — never relay-forwarded.
     pub const FETCH_TOOL_BLOB: &str = "FetchToolBlob";
     // Updates (ControlRpc, relay-forwardable — a device reports/applies its own

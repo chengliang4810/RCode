@@ -1,6 +1,5 @@
-//! rcode — headed by default; `rcode headless` runs the engine alone. Both start
-//! local-only without credentials. `rcode login` and `rcode logout` select the
-//! profile used by the next engine start without mutating a live runtime.
+//! rcode — headed by default; `rcode headless` runs the engine alone.
+//! Both use local storage and the configured in-process Native Agent.
 
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
@@ -15,7 +14,7 @@ use clap::{Parser, Subcommand};
 #[command(
     name = "rcode",
     version,
-    about = "Multi-device controller for coding agents"
+    about = "Native coding agent"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -82,23 +81,14 @@ fn edge_url_from_env() -> String {
         .unwrap_or_default()
 }
 
-/// mimalloc, macOS only: libmalloc never returns the streaming churn's
-/// high-water pages, so transient allocation became permanent RSS
-/// (docs/memory-plan.md §1). Pinned to mimalloc v2 in the workspace manifest —
-/// the crate's default v3 has the same pathology (churn retained as permanent
-/// RSS, ~6x glibc's growth on identical workloads, no idle recovery). Linux
-/// measured flat on glibc, so it keeps the system allocator.
+/// Use mimalloc v2 on macOS to reduce retained streaming/render allocations.
+/// Other platforms use their system allocator.
 #[cfg(target_os = "macos")]
 #[global_allocator]
 static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-/// glibc gives threads their own arenas (up to 8 × cores) and on free returns
-/// only the top of each heap, so churn freed mid-heap stays resident: a
-/// headless engine held 6.6GB in 129 arenas after a day. `malloc_trim` also
-/// releases the free pages inside every arena, so long-running modes call it
-/// once a minute. Capping arenas instead (`M_ARENA_MAX=2`) reclaimed less and
-/// cost ~6x the engine's CPU in arena-lock contention while chats streamed
-/// (docs/memory-plan.md).
+/// Release unused glibc arena pages once a minute in long-running modes.
+/// Trimming avoids imposing a small arena count on concurrent streaming work.
 #[cfg(all(target_os = "linux", target_env = "gnu"))]
 fn spawn_malloc_trimmer() {
     const PERIOD: std::time::Duration = std::time::Duration::from_secs(60);
@@ -299,9 +289,8 @@ fn data_roots() -> rcode_engine::DataRoots {
     }
 }
 
-/// The env-resolved engine configuration shared by `headless`, `login`,
-/// `logout`, and `status` — one resolution so the CLI auth commands always
-/// operate on the exact session the daemon will load.
+/// Resolve the storage roots, local IPC and optional transport configuration
+/// used by the engine and CLI status commands.
 fn engine_config_from_env() -> rcode_engine::EngineConfig {
     // An explicit RCODE_EDGE_TOKEN (user@org) opts an offline runtime into the
     // edge rooms and relays; a bare start stays local-only.

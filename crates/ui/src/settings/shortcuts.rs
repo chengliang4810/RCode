@@ -1,4 +1,4 @@
-//! Settings → Shortcuts (feature-inventory §1.4): a table of the rebindable
+//! Settings → Shortcuts (ARCHITECTURE.md): a table of the rebindable
 //! bindings — click a combo to record (Esc cancels), live conflict detection,
 //! per-row Reset and Restore defaults. Changes emit [`ShortcutsEvent`]; the
 //! shell persists them and re-applies the app keymap.

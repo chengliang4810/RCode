@@ -36,8 +36,7 @@ pub enum Indicator {
 }
 
 /// A `Working`/`AwaitingInput` session older than this is treated as dead — a
-/// crashed backend must never show an eternal "Working" (feature-inventory
-/// §1.12). Engines heartbeat sessions well inside this window.
+/// crashed backend must never show an eternal "Working" (ARCHITECTURE.md). Engines heartbeat sessions well inside this window.
 pub const SESSION_STALE_MS: i64 = 45_000;
 
 /// Staleness-checked indicator for a session row. Pure.
@@ -173,11 +172,6 @@ pub fn sort_chats(chats: &mut [Chat]) {
 // ---------------------------------------------------------------------------
 
 /// What the window shows while the engine is coming up. Pure.
-///
-/// This used to carry `SignIn` and `OrgGate` as well: a signed-out runtime
-/// showed a login card, and one whose account had no organization showed a
-/// picker. There is no account anymore, so neither could be reached, and both
-/// went with the cloud.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GatePhase {
     /// Booting / probing — splash covers this.

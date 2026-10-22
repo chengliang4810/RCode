@@ -69,7 +69,7 @@ separate layer, split at the exact glyph offset.
 | Line breaks vs CoreText on the same font bytes | `RCodeTests/LineBreakAccuracyTests`, `crates/text/tests/coretext.rs` |
 | Demo end-to-end (send → echo → reply, questions, queue, offline host) | `crates/client/tests/demo.rs`, `RCodeUITests/SessionFlowTests` |
 | Live sync against an in-process edge | `crates/client/tests/live.rs` |
-| Real stack (wrangler dev edge + headless engine, mock harness) | `RCodeUITests/LiveStackTests` |
+| Opt-in integration against a provisioned registry/session endpoint | `RCodeUITests/LiveStackTests` (setup in `apps/ios/README.md`) |
 | Frame pacing (hitch ratio, idle + streaming) | `-lab -bench`, `RCodeUITests/ScrollPerformanceTests` |
 
 Reference numbers (M-series Mac, iPhone 17 Pro simulator): cold layout of

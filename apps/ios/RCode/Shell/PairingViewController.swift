@@ -2,12 +2,8 @@ import UIKit
 
 /// Pair this device with the host its user runs.
 ///
-/// This screen used to start a WorkOS web-auth session against a fixed edge:
-/// the system sheet returned a code, the app exchanged it for an access/refresh
-/// pair, and the host was a constant in this file. RCode has no account and no
-/// hosted service — the host is one the user runs and reaches through a tunnel
-/// they set up, and the bearer is one that host was told to expect — so the
-/// screen asks for both and stores them.
+/// The user supplies a reachable protocol endpoint and the bearer it expects.
+/// The screen stores both for the Rust client's pairing configuration.
 final class PairingViewController: UIViewController {
     private let app: AppModel
     private let status = UILabel()

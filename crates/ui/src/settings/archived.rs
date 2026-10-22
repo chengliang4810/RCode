@@ -1,4 +1,4 @@
-//! Settings → Archived (feature-inventory §1.5): archived chats across
+//! Settings → Archived (ARCHITECTURE.md): archived chats across
 //! devices, with Unarchive (Mutate setChatArchived false) and a confirmed
 //! Delete all (Mutate deleteChat per archived chat).
 

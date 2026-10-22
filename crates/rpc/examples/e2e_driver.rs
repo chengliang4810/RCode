@@ -1,17 +1,11 @@
-//! Two-device e2e smoke driver (`scripts/e2e-smoke.sh` runs it).
+//! Opt-in two-engine RPC/transport driver.
 //!
-//! Connects to two running headless engines over their localhost IPC ports and proves
-//! the cross-device command plane end to end against a real edge:
+//! Connects to two running headless engines over local IPC. Both engines must
+//! already be configured against a separately provided registry/session/relay
+//! endpoint. It creates a mock chat, sends through the second engine and checks
+//! that the host's assistant transcript and session state reach that client.
 //!
-//! 1. `LocalDevice` on both — distinct device ids;
-//! 2. `Mutate createChat` on A (A hosts the chat, mock harness config);
-//! 3. waits until the chat row syncs A → edge → B (`WatchChats` on B);
-//! 4. `QueueCommand` a Run on **B** — the doc path: B commits the command into its
-//!    replica, nudges A's device room, A's host executor drains and runs it;
-//! 5. waits on **B** until the assistant entry lands `complete` with the mock
-//!    transcript (A → edge → B), and the session-status row round-trips.
-//!
-//! Prints `PASS`/`FAIL` lines; exits nonzero on failure.
+//! Prints PASS/FAIL lines and exits nonzero on failure.
 
 use std::time::{Duration, Instant};
 

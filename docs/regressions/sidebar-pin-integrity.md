@@ -33,7 +33,6 @@ cargo test --locked -p rcode-proto --lib
 cargo test --locked -p rcode-doc --lib
 cargo test --locked -p rcode-engine --lib
 cargo test --locked -p rcode-ui --lib -- --test-threads=1
-cd edge && npm run typecheck && npm test
 ```
 
-Run `RCodeTests/PinnedSessionsTests` on an iOS simulator for Swift key parity, dense insertion, membership, persistence and ignored old preferences. Registry tests cover independent concurrent moves, move/unpin races, duplicated delivery, restarts and capacity overflow. Workerd tests verify single-pin writes and unchanged session activity on real SQLite. Native UI and RPC tests cover filtered movement, drag gaps, empty targets, animated returns, successful-drop animation suppression, serialization, failures, timeouts and late acknowledgements.
+Run `RCodeTests/PinnedSessionsTests` on an iOS simulator for Swift key parity, dense insertion, membership, persistence and ignored old preferences. Registry tests cover independent concurrent moves, move/unpin races, duplicated delivery, restarts and capacity overflow. Native UI and RPC tests cover filtered movement, drag gaps, empty targets, animated returns, successful-drop animation suppression, serialization, failures, timeouts and late acknowledgements.

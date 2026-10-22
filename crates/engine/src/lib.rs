@@ -1,9 +1,8 @@
-//! rcode-engine — the headless backend: sessions engine, doc host + command executor,
-//! run journal + crash recovery, and the IPC RPC server.
+//! rcode-engine — the headless backend: sessions, document hosting, command
+//! execution, run journals, recovery and the IPC RPC server.
 //!
-//! Spec: ARCHITECTURE.md §5 and docs/research/feature-inventory.md §3. M2 surface:
-//! sessions + docs + commands + minimal IPC. Terminals, repos/diffs, uploads, auth,
-//! agent accounts, and the device-room host land in later milestones.
+//! The engine also owns workspace files, repositories/worktrees, diffs, terminals,
+//! uploads, provider settings and local preview services. See `ARCHITECTURE.md` §5.
 
 use std::io::Write;
 use std::path::Path;
@@ -580,7 +579,7 @@ impl Engine {
     }
 
     /// Resolve the local auth configuration for headed and headless modes.
-    /// Local-only: no network, no WorkOS, a fixed device identity.
+    /// Local identity with persistence and optional configured transport.
     pub async fn build_auth(config: &EngineConfig) -> Auth {
         let mut auth_config = AuthConfig::new(config.roots.config().to_path_buf());
         if let Some(token) = &config.edge_token {

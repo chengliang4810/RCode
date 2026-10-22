@@ -1,7 +1,7 @@
 //! EngineRpc — the engine-side `RpcService`: sessions + docs + the workspace-doc
 //! entity surface.
 //!
-//! Methods (feature-inventory §2):
+//! Methods (ARCHITECTURE.md):
 //! - `ListHarnesses` → `[HarnessDescriptor]`
 //! - `ListModels {harness}` → `[Model]`
 //! - `QueueCommand {chatId, command}` → `{commandId}` (durable doc command)
@@ -32,7 +32,7 @@
 //!   `ReadAttachmentChunk {path, offset}` → `{name, mimeType, data, nextOffset,
 //!   done}` (path-jailed to the uploads dir + workspace-known chat cwds).
 //!
-//! ## Device-addressed routing (`targetDeviceId`, feature-inventory §2.1)
+//! ## Device-addressed routing (`targetDeviceId`, ARCHITECTURE.md)
 //!
 //! ControlRpc methods are relay-forwardable: params may carry `targetDeviceId`. When it
 //! names another device, the call is forwarded verbatim over that device's relay DO via
@@ -615,7 +615,7 @@ struct FetchToolBlobParams {
     blob_ref: String,
 }
 
-/// The Mutate surface (feature-inventory §2 DataRpc), tagged by `op`.
+/// The Mutate surface (ARCHITECTURE.md DataRpc), tagged by `op`.
 #[derive(Debug, Deserialize)]
 #[serde(tag = "op", rename_all = "camelCase")]
 enum MutateParams {
@@ -1347,7 +1347,7 @@ fn forward_deadline(method: &str) -> std::time::Duration {
     }
 }
 
-/// ControlRpc methods that honor `targetDeviceId` (feature-inventory §2.1). Extend this
+/// ControlRpc methods that honor `targetDeviceId` (ARCHITECTURE.md). Extend this
 /// list (plus [`is_stream_method`] for streams) to make more of the surface
 /// device-addressable — the handlers themselves need no changes.
 fn forwardable(method: &str) -> bool {

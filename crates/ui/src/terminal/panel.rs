@@ -684,7 +684,7 @@ impl TerminalPanel {
     }
 
     /// The chat's host device when it differs from the connected engine's own —
-    /// the PTY lives on the chat's device (feature-inventory §2.1 "terminals
+    /// the PTY lives on the chat's device (ARCHITECTURE.md "terminals
     /// live on the chat's host device"), so every terminal RPC for a remote
     /// chat needs the `targetDeviceId` passthrough. Without it the local
     /// engine checks the chat's cwd against its OWN filesystem and fails with

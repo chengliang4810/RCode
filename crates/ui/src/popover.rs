@@ -1,6 +1,6 @@
 //! Popover / menu primitives: an anchored floating layer with the `menu-in`
 //! animation, outside-click dismissal, and pure keyboard-navigation + search
-//! reducers shared by every picker and menu (feature-inventory §1.12 popovers).
+//! reducers shared by every picker and menu (ARCHITECTURE.md popovers).
 //!
 //! gpui pattern (examples/popover.rs at the pinned rev): the trigger element
 //! conditionally children a `deferred(anchored().child(content))` — deferred

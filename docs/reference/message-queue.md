@@ -83,8 +83,7 @@ numbers. Older hosts retain the existing command-send path.
 - Device-routing tests race local and remote consumers over the same row.
 - Desktop tests cover action selection, modifier submission, optimistic echo,
   settings compatibility and transcript anchoring.
-- `apps/ios/RCodeTests/MessageQueueTests.swift` covers projection, policy,
-  attachment text, action acknowledgements and keyboard submission. Run with
-  the iOS Xcode test suite on macOS.
+- `apps/ios/RCodeTests/QueueEditTests.swift` covers queued-message editing.
+  Run the iOS Xcode test suite on macOS for native validation.
 
 Failed automatic dispatch pauses the queue before restoring its head, so the restore cannot trigger another delivery attempt. Fix the host configuration or connection, then explicitly send a queued row or a new prompt to resume. New queued turns use the current chat configuration.

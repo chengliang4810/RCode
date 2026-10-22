@@ -1,25 +1,13 @@
-`resource-stream.jsonl` contains sanitized deltas from a successful Haiku
-profiling response: an 80-section Rust ownership tutorial with code fences.
-Only text/reasoning deltas and the successful completion marker are retained;
-account, session, timestamp and usage metadata are omitted.
+# Development fixtures
 
-The assistant text is 51,769 bytes, SHA-256
-`c1809f92c26c682c6f035478f7ca63980e25fb5e97ea7746dcb41ecd7dbb0a25`.
-Reasoning contributes another 853 bytes. The production transcript's part
-separators bring the combined short reply to 52,624 bytes.
+- `resource-stream.jsonl`: sanitized text/reasoning deltas from an 80-section Rust
+  ownership response. Account, session, timestamp and usage metadata are omitted.
+- `runway-short-stream.jsonl`: a synthetic reply split into 24-character chunks.
+- `transcript-selection-stream.jsonl`: a synthetic reply split into six-character
+  chunks for streaming-selection cases.
+- `preview-server/`: the Vite dependency used by the native preview fixture.
+  Install it with `npm ci --prefix scripts/fixtures/preview-server`.
 
-The former CLI replay tooling and its `RCODE_REPLAY_*` controls are retired.
-These sanitized streams remain historical inputs for UI replay and measurement;
-see [the profiling report](../../docs/performance-resource-usage.md) for the
-original results and [current validation](../../docs/development-validation.md).
-
-`preview-server/` pins the Vite dependency used by the macOS native preview
-fixture. Install it with `npm ci --prefix scripts/fixtures/preview-server`.
-
-`runway-short-stream.jsonl` is a synthetic short reply in 24-character chunks.
-It keeps the own-send runway active through completion. Use a 400 ms replay
-delay for the [runway performance comparison](../../docs/performance-runway-scroll.md).
-
-`transcript-selection-stream.jsonl` is a synthetic short reply in six-character
-chunks. A 1200 ms replay delay leaves time to expand/collapse a long prompt and
-select live text. See the [native regression recordings](../../docs/transcript-selection-regressions.md).
+These data files are inputs, not executable validation commands. Current build
+and platform checks are listed in
+[development validation](../../docs/development-validation.md).

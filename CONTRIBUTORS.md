@@ -2,7 +2,7 @@
 
 Thanks for helping build RCode. This guide covers how to set up, what a good
 pull request looks like, and the handful of rules that keep a local-first,
-multi-device app working across versions.
+application working across its desktop, headless and mobile surfaces.
 
 ## Before you start
 
@@ -51,7 +51,7 @@ dev build its own so the two never share state:
 RCODE_DATA_DIR=~/.rcode-dev RCODE_IPC_PORT=27700 cargo run -p rcode
 ```
 
-Useful knobs for exercising the UI without a real agent or account:
+Useful knobs for exercising the UI with deterministic agent output:
 
 | Variable | Effect |
 | --- | --- |
@@ -98,9 +98,8 @@ cargo test --locked -p rcode-preview
 
 ### Compatibility across versions
 
-RCode runs on several devices at once, and they update independently. A UI may
-talk to an older local daemon, and a chat may be hosted on a remote device
-running an older engine. So:
+A UI and its local daemon may use different builds. Shared client and engine
+protocols, as well as persisted documents, need explicit compatibility rules:
 
 - New fields on wire and document types (`rcode-proto`, `rcode-doc`) must be
   optional or `#[serde(default)]`. Older peers must still parse newer frames,
@@ -110,15 +109,12 @@ running an older engine. So:
   degrade when a peer lacks them; they don't fail.
 - Never rename or repurpose persisted keys, RPC method names, or document
   fields. Add new ones instead.
-- Some infrastructure (Cloudflare worker, R2 buckets) keeps its old `comet`
-  name on purpose. Don't rename it.
+### Agent and providers
 
-### Agent harnesses
-
-- New harness integrations follow the existing drivers in `crates/harness`.
-  Installs are explicit user actions and are documented in
-  [crates/harness/README.md](crates/harness/README.md).
-- Only drive agent CLIs in ways their terms of service allow.
+- `NativeHarness` connects the engine to the in-process agent; `MockHarness`
+  supplies deterministic test events. See [the harness guide](crates/harness/README.md).
+- Provider protocols belong in `crates/model`; agent tools and loop behavior
+  belong in `crates/agent`. Keep engine adaptation in `crates/harness`.
 
 ## UI changes
 

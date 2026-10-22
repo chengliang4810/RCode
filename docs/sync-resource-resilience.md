@@ -137,23 +137,14 @@ that pull. Receipt retirement still
 requires command acceptance and snapshot persistence. Failed reads retain the
 durable job and use the existing transport recovery deadlines.
 
-New hosts advertise `nudgeAck=1`. The edge persists a wake before sending it and
-keeps it until the host confirms local durable admission. An opaque token fences
-old ACKs against newer wakes for the same chat. Delivery uses a 64-receipt window
-and a five-second alarm for retry. A reconnect starts a fresh window.
+Hosts advertise `nudgeAck=1` when they support durable wake admission. The
+host stores a receipt before acknowledging it; tokens distinguish newer wakes
+from earlier acknowledgements. Reconciliation scans owned chat IDs in resumable
+pages. The sender's command/outbox remains the source of truth; a wake is a
+notification to look for work.
 
-The edge keeps at most 4096 distinct queued chat wakes. At capacity it returns 503
-without discarding accepted work, and persists an overflow reconciliation marker.
-The host accepts that marker durably, waits for registry synchronization, and
-scans owned chat IDs in resumable pages of 32. The sender's command/outbox remains
-the source of truth; a wake is only a notification to look for work.
-
-Deploying the edge before or after the engine is supported: old edges omit tokens,
-and old hosts receive legacy delivery without ACK requirements (in pages rather
-than a full replay burst). Legacy hosts retain their former best-effort guarantee;
-they cannot acknowledge or process the new reconciliation marker. No deployment
-is performed by this change. Database changes are additive; downgrading loses
-the new delivery/resource guarantees.
+Relay-side persistence, retry scheduling and capacity policy belong to the
+configured endpoint. Local mock tests do not establish those remote guarantees.
 
 ## Diagnostics and validation
 
@@ -168,13 +159,10 @@ Relevant checks:
 
 ```
 cargo test --locked -p rcode-engine --test sync_resources -- --nocapture
-cargo test --locked -p rcode-engine --lib --test session_publication --test restart_resume --test local_profiles --test born_chat2_race --test codex_subagents --test message_queue --test transcript_salvage
+cargo test --locked -p rcode-engine --lib --test restart_resume --test local_profiles --test born_chat2_race --test side_chats --test message_queue --test transcript_salvage
 cargo test --locked -p rcode-sync --lib
 cargo test --locked -p rcode-rpc --test device_room
 cargo check --locked -p rcode-ui
-cd edge
-npm run typecheck
-npm test
 ```
 
 The resource regression lowers RLIMIT_NOFILE to 256 only in an isolated child,

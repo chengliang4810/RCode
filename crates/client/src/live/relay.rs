@@ -19,9 +19,8 @@ use crate::{lock, now_ms};
 
 /// Default unary deadline (engine forward DEFAULT); long ones below.
 const CALL_TIMEOUT: Duration = Duration::from_secs(30);
-/// Raw bytes per UploadChunk slice (≈680k base64 chars — under Cloudflare's
-/// 1 MiB WS message cap with envelope headroom; a multiple of 3 so slices
-/// encode independently).
+/// Raw bytes per UploadChunk slice (about 680 KB base64), leaving envelope
+/// headroom within a 1 MiB frame budget. Multiples of three encode independently.
 const UPLOAD_SLICE_BYTES: usize = 510_000;
 const UPLOAD_PARALLEL: usize = 3;
 /// A device with presence older than this reads Dark (no dial) once the

@@ -81,8 +81,6 @@ impl HttpTransport for ReqwestTransport {
         request: HttpRequest,
         cancellation: CancellationToken,
     ) -> ModelResult<HttpResponse> {
-        // Ported adjustment: the emscripten/Cloudflare branch (and its `super::cloudflare`
-        // module) is not ported; this is the sole production transport.
         let response = tokio::select! {
             biased;
             _ = cancellation.cancelled() => return Err(ModelError::cancelled()),

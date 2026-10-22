@@ -1,13 +1,12 @@
-//! chat2 wire frames — the codec a Durable Object used to speak
-//! (`chat-frames.ts`). Binary WS frames: `[type u8][headerLen u32 LE][header
-//! JSON][payload]`. Headers are tiny JSON; payloads are opaque bytes (Loro
-//! updates, checkpoint frontiers, presence ephemera). The TypeScript half went
-//! with the cloud surface, so these layout tests are the contract now rather
-//! than one side of it.
+//! chat2 binary WebSocket frame codec.
+//!
+//! Layout: `[type u8][headerLen u32 LE][header JSON][payload]`. Headers contain
+//! IDs and progress metadata; payloads contain opaque Loro updates, checkpoint
+//! frontiers or ephemeral presence data. Codec tests pin this layout.
 
 use serde::{Deserialize, Serialize};
 
-/// Frame type bytes (shared client/server space; mirror `FRAME` in TS).
+/// Frame type bytes shared by the transport client and test servers.
 pub mod frame_type {
     pub const HELLO: u8 = 0x01;
     pub const STATE: u8 = 0x02;
@@ -42,8 +41,8 @@ pub fn encode(kind: u8, header: &impl Serialize, payload: &[u8]) -> Vec<u8> {
     out
 }
 
-/// `None` = malformed. Unknown type bytes are NOT rejected here (unlike the
-/// DO): the client tolerates future server frame types by skipping them.
+/// `None` = malformed. Unknown kinds are preserved so the client can skip
+/// frames it does not implement.
 pub fn decode(bytes: &[u8]) -> Option<WireFrame> {
     if bytes.len() < 5 {
         return None;

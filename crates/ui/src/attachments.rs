@@ -1,4 +1,4 @@
-//! Attachments (feature-inventory §1.7/§1.8): the composer's staged images,
+//! Attachments (ARCHITECTURE.md/§1.8): the composer's staged images,
 //! the chunked upload to the chat's host device, the plain-text attachment-ref
 //! transport that rides the prompt, the transcript read-back cache, and the
 //! full-size preview lightbox.
@@ -30,13 +30,9 @@ use rcode_rpc::methods;
 
 /// use-attachments.ts `MAX_ATTACHMENT_BYTES`.
 pub const MAX_ATTACHMENT_BYTES: u64 = 24 * 1024 * 1024;
-/// Base64 chars per `UploadChunk`, sized against the relay's hard ceiling:
-/// Cloudflare caps a WebSocket message at 1 MiB, and a chunk rides one relay
-/// frame (JSON envelope + uleb header add ~150 bytes) — 680 000 chars ≈
-/// 510 KB binary leaves ~35% headroom. Multiple of 4 so a slice of the
-/// whole-file base64 stays independently decodable. The old 60 000 (45 KB)
-/// made a 3 MB screenshot ~70 sequential round trips — each one a stall
-/// opportunity on a flaky link.
+/// Base64 chars per `UploadChunk`: about 510 KB binary, leaving headroom for
+/// the JSON envelope and relay header within a 1 MiB frame budget. A multiple
+/// of four keeps slices of the whole-file base64 independently decodable.
 pub const UPLOAD_CHUNK_B64_CHARS: usize = 680_000;
 /// state.ts `MAX_ATTACHMENT_READ_CHUNKS` — bounds the read-back loop.
 const MAX_READ_CHUNKS: usize = 1_000;
@@ -1621,8 +1617,7 @@ mod tests {
 
     #[test]
     fn upload_chunk_fits_the_relay_frame_ceiling() {
-        // Cloudflare caps a WebSocket message at 1 MiB; the chunk rides one
-        // relay frame with a small JSON envelope + uleb header.
+        // Budget one MiB for the chunk, JSON envelope and relay header.
         assert!(UPLOAD_CHUNK_B64_CHARS + 1_024 < 1_048_576);
         // A slice of the whole-file base64 must stay independently decodable.
         assert_eq!(UPLOAD_CHUNK_B64_CHARS % 4, 0);

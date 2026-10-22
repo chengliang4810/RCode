@@ -1,5 +1,5 @@
 //! A minimal in-process edge for live-mode tests: one TCP port that routes
-//! WebSocket upgrades by path, like the Worker:
+//! WebSocket upgrades by path:
 //!
 //! - `/registry/{org}/ws` → proxied to rcode-sync's `MockRegistryServer`
 //!   (the SAME merge fn as production);
@@ -495,7 +495,7 @@ fn relay_error(code: &str) -> Vec<u8> {
     json!({ "error": code }).to_string().into_bytes()
 }
 
-/// DeviceRoom semantics (device-room.ts), as in rcode-rpc's fake.
+/// Relay routing semantics shared with the rcode-rpc test fake.
 async fn serve_relay(ws: Ws, device: String, query: HashMap<String, String>, shared: Arc<Shared>) {
     use rcode_rpc::device_room::{
         CLIENT_CLOSED, CLIENT_GONE, HOST_CLOSED, HOST_OFFLINE, RELAY_KIND,

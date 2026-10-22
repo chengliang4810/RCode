@@ -8477,8 +8477,8 @@ impl Transcript {
             reduce_motion,
         );
         let toggle_id = row_id.clone();
-        // A quiet summary sits above the activity rail; its chevron occupies
-        // the same gutter as the rounded task-tree elbows below it.
+        // Align the leading disclosure with the prose edge rather than the
+        // indented activity rail below it.
         let title = div()
             .min_w_0()
             .h(px(TOOL_LABEL_LINE_HEIGHT))

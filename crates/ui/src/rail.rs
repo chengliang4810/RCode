@@ -1,4 +1,4 @@
-//! MessageRail (feature-inventory §1.8): a left vertical minimap of the user's
+//! MessageRail (ARCHITECTURE.md): a left vertical minimap of the user's
 //! prompts. The active tick brightens, hover grows the tick and shows a preview
 //! card (prompt + reply opening), click smooth-scrolls the transcript to that
 //! row. Hidden below a 48rem container width.

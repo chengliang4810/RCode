@@ -1,303 +1,168 @@
 # RCode — Architecture
 
-RCode — a multi-device controller for coding agents (Claude Code / Codex) — is a ground-up
-native rewrite in Rust with a gpui UI. The first version is derived from
-[zeronsh/zeron](https://github.com/zeronsh/zeron). RCode is maintained independently from that
-project and does not track its later changes. Fresh app; no backwards compatibility required.
+RCode is a native coding agent under active development. The agent runs in the
+application process, executes tools on the host, and sends model requests to the
+provider configured by the user. The desktop UI uses GPUI; the engine and agent
+are Rust. Sessions and application state persist locally.
 
-This is the inherited design document. The accounts and the hosted cloud are gone from this build
-(`RCode` runs local-only, with the edge dialled by `RCODE_EDGE_URL`/`RCODE_EDGE_TOKEN` when someone
-self-hosts one), so read the auth, edge and sync passages below as the design the code still
-carries rather than as what a default install does.
+## 1. Runtime and storage
 
-**Pillars (from the goal):**
-- Optional sync uses Loro CRDT docs (loro-mirror model) through Cloudflare Durable Objects; the same docs persist locally when sync is disabled.
-- Durable Objects stay **TypeScript** (decision + evidence: `docs/research/durable-objects-language.md`).
-  Everything device-side is Rust.
-- Feature parity with the original app **except token-usage display** (poor fit for CRDTs; excluded).
-- Frontend is **gpui** (pinned Zed rev). Virtualization + markdown techniques ported from
-  **mugen + pretext** (`docs/research/mugen-pretext.md`).
-- One binary, **headed or headless**. Smooth transitions/animations matching the original
-  (catalog in `docs/research/feature-inventory.md` §1.12).
-
-## 1. Topology (unchanged shape, new materials)
-
-```
-gpui UI ─ in-proc/localhost RPC ─ engine A ══ DeviceRoom DO relay ══ engine B ─ RPC ─ gpui UI
-                    │       optional edge Worker: auth, rooms, R2        │
-                    └── optional chat2 sync ──  ChatRoom DO (per chat) ──┘
-                                          └─ Workspace registry room ────┘
+```text
+GPUI desktop UI ── typed RPC ── Engine ── NativeHarness ── Agent loop ── Model provider
+                                  │                         │
+                            Local persistence          Tools / MCP
+                                  │
+                       Documents, journals, uploads
 ```
 
-- **Engine = backend** (was `@rcode/backend`): runs agents, owns auth, terminals, repos/worktrees,
-  diff sync, doc hosting. Pure Rust daemon, fully functional headless.
-- **UI = viewport** (was Electron): gpui app rendering engine state. Talks the same typed RPC whether the engine is in-process or a separate daemon. Organized around **spaces** — (device, folder) pairs. The sidebar is the data: an attention-sorted Sessions list, filtered by a searchable spaces dropdown ("All spaces" included) that also hosts space management. The horizontal tabs are a **device-local viewport** onto that list (`ui-settings.json` `openTabs`, cross-space): closing a tab is local-only — archiving is an explicit sidebar action — and a sidebar click (re)opens a session as a tab. The new-session canvas carries a space picker (defaulting to the sidebar filter, else the last selected space); new sessions are minted onto the picked space's device via relay-forwardable RPCs.
-- **Edge (TypeScript, ported from the original app `apps/edge`)**: Worker + ChatRoom DO (per chat, the
-  chat2 row protocol; the legacy SessionRoom DO remains deployed only for pre-cutover clients —
-  no current client dials it) + DeviceRoom DO (per device) + R2 attachments + WorkOS JWKS auth.
-  Absorbs the old `apps/server` responsibilities (WorkOS code exchange/refresh, orgs) so
-  **Postgres, the Hono server, and the WebRTC/signaling stack are all gone**.
+`apps/rcode` builds one binary:
 
-### Headed / headless
-Single binary `rcode`:
-- `rcode` — headed. If a local engine daemon is already listening on the IPC port, connect to it;
-  otherwise run the engine **in-process** (RPC over an in-memory duplex — same protocol, zero
-  serialization shortcuts, so the boundary stays honest) **and serve that same engine on the IPC
-  port**. The embedded engine is not private: any other viewport can attach to the running app
-  without it first being restarted as a daemon. Binding is best-effort — if the port is taken the
-  window still opens, having lost only the ability to host peers.
-- `rcode headless` — engine only. It serves the IPC port, so any viewport (or another device, when
-  an edge is configured and the relay is up) can drive it while it runs. A VPS can run this while
-  a laptop's UI drives it.
+- `rcode` opens the desktop UI. It connects to an existing local engine when
+  available; otherwise it starts an engine in the process and serves its IPC
+  interface. Both paths use the same typed RPC protocol.
+- `rcode headless` runs the engine without a UI.
+- `rcode status` and `rcode sync` inspect the engine and transport state.
+- `rcode daemon` manages the headless service through launchd or systemd on
+  supported platforms. `rcode update` checks and installs application updates.
+
+The engine uses Tokio. GPUI work crosses the async boundary through
+`gpui_tokio`; filesystem, model and transport work belongs outside UI rendering.
 
 ### Storage: two roots, one profile
 
-Two directories decide where everything lands, and they are the same directory until the user
-points the data root elsewhere from Settings:
+The config root defaults to `~/.rcode`. `RCODE_DATA_DIR` overrides this root for
+one launch. Its `location` file can point to a separate, existing data directory;
+without a pointer the config and data roots are the same.
 
-- The **config root** (`~/.rcode` on every platform) holds what identifies the installation and
-  what a reader needs to find it: the device id, the engine lock, provider credentials, UI
-  settings and logs — and the `location` pointer itself. `RCODE_DATA_DIR` overrides it for one
-  launch, which is how a development build runs beside an installed one (the pointer travels
-  with whichever root is in use).
-- The **data root** holds what grows with use: the profile stores (documents, journals,
-  attachments), cloned repositories, scratch folders, caches and worktrees (`RCODE_WORKTREES_DIR`
-  overrides that last one). It is named by the `location` pointer, or is the config root when
-  there is no pointer.
+- **Config root:** device identity, engine lock, `providers.json`, application
+  settings, logs and the `location` pointer.
+- **Data root:** profile stores, documents, journals, uploads, cloned
+  repositories, scratch directories, caches and worktrees.
+  `RCODE_WORKTREES_DIR` can override the worktree directory.
 
-There is one profile shape: an identity (`org_id`/`user_id`) and the store root derived from it,
-`{data_root}/orgs/{org_id}/{user_id}/`, with attachments under its `uploads/`. Identity comes from
-the bearer's organization when there is one, otherwise `RCODE_ORG_ID`/`RCODE_USER_ID`, otherwise
-the `dev-org`/`dev-user` defaults. The `Local`/`Synced`/`Development` scopes this section used to
-describe went with the cloud; a runtime that has one shape does not need an enum to say so.
+`EngineProfile` resolves an immutable store boundary for the running engine.
+Stores use `{data_root}/orgs/{org_id}/{user_id}/`, with attachments in `uploads/`.
+The identity fields are storage and protocol keys; the default local identity
+comes from `RCODE_ORG_ID` / `RCODE_USER_ID` or `dev-org` / `dev-user`.
+Provider settings are loaded from the config root, including when the data root
+is on another drive. See [Windows development](docs/reference/windows-development.md).
 
-`AuthState` (`SignedOut`, `NeedsOrganization`, `SignedIn`) is live credential state and may change
-at any time, but the engine never re-resolves an open store because it changed — no refresh or
-revocation swaps databases under a running runtime.
+## 2. Data model and command execution
 
-The store layout keeps the shape older releases wrote, because transcripts persist absolute paths
-into it. The first store opened after an upgrade claims the old `{config_root}/uploads/` cache in
-`{config_root}/legacy-uploads-owner.json`; the owner may read it as a compatibility fallback while
-every new attachment is staged under its own `uploads/` root, and another identity never receives
-the fallback.
+- **Session documents** in `crates/doc` use Loro for transcript entries,
+  structured parts, metadata and the durable command ledger. Text bodies use
+  Loro text containers. Tool display payloads are bounded separately from the
+  full event data retained in local run journals.
+- **Workspace registry** uses `RegistryDoc`: keyed device, space, chat and
+  session rows with field clocks. In local mode, writes apply directly to the
+  stored rows. This registry is a row table, not a Loro session document.
+- **Persistence** in `crates/sync::DocsStore` stores snapshots, progress and
+  processed commands in SQLite. The engine coordinates persistence with its
+  document cache and session lifecycle.
+- **Commands** carry send, steer, interrupt and user-input responses. The owning
+  host drains the ledger and records processed commands to prevent duplicate
+  execution during replay and recovery.
 
-Device-scoped state stays in the config root, outside any store: `device-id`, repository
-registration, provider credentials and UI settings. Every store on the machine shares it, and none
-of it contains another store's transcripts or attachments.
-
-#### Remote workspace file trust boundary
-
-Devices authenticated to the same account are trusted peers for remote workspace control. A peer may send relay-forwarded workspace file requests to the device that owns a checkout; the owning engine resolves the target and enforces workspace-relative path, containment, symlink, and write-conflict checks before touching its filesystem.
-
-Ignored-file visibility is not an authorization boundary. A remote peer may request ignored entries and then read or write them, including potentially sensitive files such as `.env`, when `includeIgnored` is enabled. `.git` remains unavailable regardless of that option. RCode intentionally does not maintain a filename denylist because it would be incomplete and could imply a security guarantee it cannot provide.
-
-If authenticated devices must no longer trust one another with the full workspace, that policy must be enforced by the owning engine for remote requests. Hiding entries only in the UI is not a security control.
-
-One piece of product work is intentionally deferred: a supported self-hosted backend contract
-covering room APIs, authorization, persistence, and blob storage. The endpoint and bearer
-overrides remain deployment seams, not a promised compatibility surface.
-
-## 2. Data model — all Loro
-
-Two persistent doc kinds. When sync is enabled, session docs ride the chat2 row protocol (loro updates as append-only rows + Range-resumable checkpoints, ChatRoom DO) and the registry rides its own row-frame protocol; a runtime with no edge configured persists the same docs without joining rooms:
-
-1. **Session doc** (per chat) — the transcript + durable command queue. Schema is a Rust port of
-   `packages/session-doc` (same container names/shapes so the edge's tail materializer keeps
-   working): `meta` map, `messages` list (parts as list-of-maps with **LoroText bodies** — the
-   measured 1.03× oplog shape; never LWW value rewrites), `commands` list with ledger rules 1–3
-   (append-only per-device entries; host-only outcomes; dedupe/TTL/supersede evaluation).
-   Continuation splitting at 256KB, render-only tool parts (full inputs stay in the host's local
-   run journal), tail/diff sidecars. Constants carried over (`STREAM_COMMIT_MS=120`,
-   `DO_FLUSH_MS=5s`, compaction at 8MB, retain 30d, tail 64).
-
-2. **Workspace registry doc** (per profile) — the `registry1` snapshot stores spaces (id, deviceId, path, name?, gitDetected, checkoutId, repositoryId), the chats index (id, deviceId, title, archived, cwd, branch, checkoutId, spaceId, lastSeenAt, lastMessagePreview/At, config), devices, session-status rows, and checkout-diff summary pointers. A space is a device+folder pair in the active profile; the owning device's `SpacesSync` stamps git presence so branch pickers and the diff sidebar can gate without another RPC, plus a repository identity (the trunk's root commit, so renames, transfers and remote spellings don't split a repository; a shallow or empty history falls back to the normalized origin remote, then a device-scoped common-git-dir hash) that groups clones and worktrees of one repository in the sidebar's project mode. A runtime with no edge keeps the registry entirely in its profile store; one with an edge joins `/registry/{orgId}/ws`, backed by the private per-user room `reg1/{orgId}/{userId}`, where rows are never visible to every member of an organization.
-
-   Writer discipline: each device writes its own device and session-status rows, rows for chats it hosts, and git stamps for spaces it owns. Creates, renames, archives, and seen marks are LWW sets accepted from any device. `deleteSpace` tombstones the space and every chat/session row in it in one commit. Presence uses ephemeral room frames rather than durable heartbeat writes.
-
-   *Why one registry and not N tiny docs:* the sidebar needs one subscription for the whole list (grouping, resort animations, unseen markers). Its rows contain indexes rather than transcripts, so one local snapshot and, when enabled, one room connection remain bounded and cheap.
-
-3. **Mirror layer** (`rcode-doc` crate) — Rust equivalent of loro-mirror: typed structs for the
-   schema, **incremental** application of `doc.subscribe` diffs into cached state (no full
-   re-hydration per change — this is also what fixes the original app's known O(transcript) re-projection
-   inefficiency, remaining-work item 1a), and a diff-reconcile write path (evaluate `lorosurgeon`
-   0.2.x as a dep; our schema is small enough to hand-roll if it doesn't fit). The UI renders
-   mirror state directly with per-entry change notifications — the "endgame" the TS
-   implementation documented but never reached.
-
-### Command plane
-Send/steer/interrupt/respondInput = durable command entries in the session doc (`QueueCommand`),
-executed by the chat's **host** device (executor gated on chat ownership; mark-processed BEFORE
-execute; steer with no live run dispatches as the next turn). Offline sends queue in the doc.
-This is the original app's proven design, kept verbatim.
+The code also contains chat2 and registry transport clients, relay framing and
+mobile pairing interfaces. They are transport components, not a bundled hosting
+service. Local desktop operation does not require a remote transport endpoint.
+See [chat2](docs/chat2-sync.md), [registry](docs/registry-sync.md) and
+[iOS setup](apps/ios/README.md) for their implementation boundaries.
 
 ## 3. Cargo workspace
 
-```
-rcode/
-  Cargo.toml                 # workspace
-  crates/
-    proto/        rcode-proto    # wire types: AgentEvent, ToolCall, RunRequest, Model,
-                                 # entities, RPC envelopes (serde; ndjson framing);
-                                 # `view` = the pure derivations both frontends share
-                                 # (sort orders, staleness gating, grouping, boot gate)
-    doc/          rcode-doc      # session-doc + workspace-registry schemas, mirror layer,
-                                 # parts fold, continuations, command ledger, sidecars
-    sync/         rcode-sync     # loro room client (join/VV backfill/fragments/backoff),
-                                 # ephemeral presence, DocsStore (SQLite snapshots +
-                                 # processed-command ledger)
-    harness/      rcode-harness  # Harness trait + native (in-process ReAct loop) and
-                                 # mock; steering mailbox, requestInput, model catalog
-    engine/       rcode-engine   # sessions engine (pub/sub, run journal, recovery, stall
-                                 # watchdog), doc host + command executor, repos/worktrees,
-                                 # checkout-diff sync, terminals (portable-pty), uploads,
-                                 # device-room host/peers, identity, storage roots
-    rpc/          rcode-rpc      # UiRpc/ControlRpc: typed req/resp/stream over WS (tokio-
-                                 # tungstenite) + in-memory transport; device-room virtual
-                                 # sockets ({s,k,to,from} frames)
-    theme/        rcode-theme    # source-neutral theme schema + built-in/custom registry,
-                                 # validation, provenance, and local VS Code compiler
-    ui/           rcode-ui       # gpui app: shell, sidebar, conversation, composer,
-                                 # terminal view, diff pane, settings, animation kit
-  apps/
-    rcode/                       # the binary (headed default, `headless` subcommand)
-  edge/                          # TypeScript Worker + DOs (ported from apps/edge,
-                                 # + auth-exchange routes absorbed from apps/server)
-  docs/                          # this file + research reports
-```
+The workspace contains `apps/rcode` and these 25 crates. The native iOS shell is
+in `apps/ios` and calls the Rust mobile surface through generated UniFFI bindings.
 
-Engine async runtime: **tokio** throughout; the UI bridges via `gpui_tokio` (`Tokio::spawn`
-futures surfaced as gpui `Task`s). In-process mode runs the engine on its own tokio runtime
-thread; the UI never blocks on it.
+| Directory | Responsibility |
+| --- | --- |
+| `crates/agent` | ReAct loop, tools, compaction, skills, commands, subagents and goals |
+| `crates/model` | Provider protocols and streaming HTTP/SSE transport |
+| `crates/harness` | NativeHarness, MockHarness, provider settings and engine adaptation |
+| `crates/engine` | Sessions, document hosting, recovery, files, Git, terminals and RPC services |
+| `crates/proto` | Shared entities, agent events, requests, capabilities and view derivations |
+| `crates/doc` | Session schemas, transcript projection, registry rows and command ledger |
+| `crates/sync` | SQLite persistence and chat2/registry transport clients |
+| `crates/rpc` | Typed request/response/subscription transport and device relay codec |
+| `crates/ui` | GPUI desktop shell, composer, transcript, settings, files, browser and terminals |
+| `crates/presentation` | Shared localization resources and display formatting |
+| `crates/theme` | Theme families, palettes, imports and surface preferences |
+| `crates/mcp` | MCP connections and tool integration |
+| `crates/plugins` | Plugin contributions, installation and marketplace catalogs |
+| `crates/github` | Public GitHub resource access for marketplaces and updates |
+| `crates/preview` | Local HTTP service discovery and preview proxy |
+| `crates/client` | Client state, subscriptions, session data and offline demo fixtures |
+| `crates/mobile` | Rust mobile API, transcript/layout integration and UniFFI surface |
+| `crates/text` | Text measurement and line layout |
+| `crates/syntax` | Syntax highlighting |
+| `crates/markdown` | Markdown parsing and layout data |
+| `crates/veil` | Streaming text opacity transitions |
+| `crates/visual` | Sandboxed Luau visuals and native view models |
+| `crates/visual-gpu` | GPU rendering support for visuals |
+| `crates/zatex` | LaTeX math parsing and layout; package name `zatex` |
+| `crates/update` | Application update discovery, download and installation |
 
-## 4. UI plan (gpui) — parity + smoothness
+`Cargo.toml` is the authority for workspace membership and dependencies.
 
-Reference: `docs/research/gpui.md`, `docs/research/mugen-pretext.md`,
-feature spec `docs/research/feature-inventory.md` §1.
+## 4. Desktop and presentation
 
-- **Deps**: `gpui` + `gpui_platform` pinned to one Zed rev (Apache-2.0). **We do not use Zed's
-  GPL crates** (`markdown`, `ui`, `theme`, `editor`) — markdown, components, and theme are ours.
-- **Transcript**: gpui `list()` + `ListState::new(n, ListAlignment::Bottom, overdraw)` (sum-tree
-  offsets, follow-tail). On top of it, port the mugen behaviors that gpui doesn't give us:
-  - stick-to-bottom **spring** with feed-forward tracking of streaming growth; interrupt from
-    *user input* (wheel-up / drag), re-engage within a 70px band; own-send re-engages + smooth
-    scrolls;
-  - **block-granularity rows** (one row = one markdown block / tool group, not one message) with
-    stable ids `msgId#blockId`; live turn stays unsplit, re-splits on persist; optimistic echo
-    rows share the client-minted id so persistence never flickers;
-  - row height memoization keyed by (row id, content length, width) so a streamed token
-    re-measures one row;
-  - scroll-anchor absorption for above-viewport height changes.
-- **Markdown** (`rcode-ui::markdown`): `pulldown-cmark` parsing on `background_spawn` with
-  coalescing (Zed's proven pattern), block-level incremental re-parse of the streaming tail
-  (incremark's O(delta) idea: only re-parse from the last stable block boundary), monochrome
-  theme where **numbers drive layout, colors are paint**. Code blocks: monospace, no wrap ⇒
-  height = lines × line-height (layout independent of highlight); syntax highlighting via
-  `synoptic`/`syntect`-class tokenizer run time-sliced in the background, colors applied as text
-  runs (paint-only). Streaming **fade-in veil** on newly appended text via `with_animation`
-  opacity (paint-layer, never affects layout). `prefers-reduced-motion` honored.
-- **Composer**: hand-rolled gpui text input (start from Zed's `examples/input.rs`: IME, selection,
-  clipboard, key actions), compact↔expanded auto-flip by measured text width, auto-grow 76–260px,
-  Enter/Shift+Enter, Send→Steer→Stop morph, drafts + attachments per chat, drag-drop/paste
-  images, QuestionPanel (paged, 1-9 keys, 220ms auto-advance) replacing the composer while input
-  is requested. Pickers (harness/model, traits, repo w/ folder browser, branch w/ worktree
-  toggle) as gpui popovers with `menu-in` scale/fade.
-- **Terminal**: `alacritty_terminal` (vte state machine, MIT/Apache) + `portable-pty` on the
-  engine side; custom gpui grid element; tabs w/ drag-reorder (150ms sliding transforms), height
-  drag 160px–55vh, 12ms input coalescing / 80ms resize debounce, 1MB replay, detach ≠ close.
-- **Diff pane**: unified-patch parser → virtualized file/hunk/line rows, per-file collapse
-  (180ms height tween), time-sliced highlight, 200ms width transition on the pane itself.
-- **Animation kit** (`rcode-ui::motion`): small helpers over gpui `Animation` reproducing the
-  the original app catalog — `fade-in` (0.5s, cubic-bezier(0.16,1,0.3,1), translateY 4→0), `splash-out`,
-  `pulse` staggered cell wave (boot splash + loaders), `gradient-spin-pulse` matrix
-  spinner (WorkingIndicator + rotating flavour word), `menu-in`/`dialog-in` scale-fades, 200ms
-  ease-out width/height transitions for sidebar/panes, sidebar-resort **slide animation**
-  (we own the list, so animate row positions directly — the View Transitions equivalent, 260ms
-  cubic-bezier(0.22,1,0.36,1)), reduced-motion switch.
-- **Theme**: independent light/dark resolved variants, theme-owned semantic/syntax/terminal
-  palettes, optional interaction-accent overlays, and a device-local surface preference that
-  resolves each variant's recommended frost/opaque treatment without changing theme selection.
-  Forced frost derives contrast-checked tints from mapped theme surfaces. Local VS Code
-  file/package compilation and imported/linked custom families retain last-known-good
-  persistence. Colors remain paint-only; hairline borders and bundled Geist/Geist Mono remain
-  shared presentation foundations.
+The GPUI UI renders engine projections through typed subscriptions. The sidebar
+indexes conversations and projects; open tabs and viewport preferences belong
+to the local device. Closing a tab and archiving a conversation are separate
+operations.
 
-## 5. Engine plan
+The transcript uses virtualized rows, cached layout and incremental streaming
+updates. Markdown, syntax highlighting, math and Luau visuals have dedicated
+Rust components. The composer holds drafts, attachments, model/reasoning
+selection and interactive questions. Session statistics include aggregate and
+per-turn token usage, cache usage and output speed.
 
-Direct ports of the original app behaviors (spec: feature-inventory §3):
-- **Sessions engine**: per-session broadcast hub; on-disk run journal (resumable `seq` replay,
-  crash auto-resume); persistent steerable sessions (steering mailbox at step/turn boundary; idle
-  reaper; 10min stall watchdog); recovery stamps `aborted`.
-- **Doc host**: per-chat handle (join room, VV backfill, write user entries + stream assistant
-  segments at 120ms commits, drain commands host-only with processed-ledger idempotence, publish
-  diff sidecar, presence); warm-open recent chats (14d/cap 30); nudge-driven cold open; SQLite
-  snapshot store.
-- **Harness** (research pending — `docs/research/harness.md`): trait mirroring the original app's
-  `HarnessShape`; Claude Code via `claude` CLI stream-json in/out (control protocol for
-  AskUserQuestion→requestInput (tools execute directly), resume, steering); Codex via app-server JSON-RPC or
-  `codex exec --json`; model/reasoning/option catalogs ported from `packages/harness`.
-- **Repos/diffs**: git2 or `git` subprocess (subprocess — matches the original app, avoids libgit2 edge
-  cases); worktrees under `~/.rcode/worktrees`; fs watchers (`notify`) + 2min repair; diff
-  capture (patch + numstat + untracked, 3MiB cap, sha256) → workspace registry summary + DO diff
-  sidecar.
-- **Agent accounts**: credential-slot swap (macOS Keychain via `security-framework`, files
-  elsewhere), plan labels, usage probes, paste-code/browser-poll OAuth flows.
-- **Auth**: WorkOS through edge routes (`/auth/exchange`, `/auth/refresh`, orgs); loopback
-  callback server headed, paste-code headless; dev mode (no key ⇒ bearer = configured user id).
+Files provide text editing, Markdown and image previews. The terminal uses an
+engine-side PTY and a GPUI terminal view. Changes are presented as file/hunk/line
+diffs. Browser tabs and project previews use platform-specific browser support;
+project preview discovery currently has macOS and Linux implementations.
 
-## 6. Edge plan (TypeScript, `edge/`)
+Themes resolve light/dark variants, semantic palettes, custom imports and an
+independent surface preference. English and Simplified Chinese application text
+comes from `rcode-presentation`; protocol values remain separate from labels.
 
-Port `apps/edge` nearly verbatim (it is already Loro-native and smoke-tested: session room
-w/ hibernation + two-level compaction + daily alarm backups, device room byte relay + nudges +
-sidecar slots, R2 attachments, JWKS auth). Additions:
-1. Private per-user registry rooms (`/registry/{orgId}/ws` → `reg1/{orgId}/{userId}`) with authenticated row sync and ephemeral device presence.
-2. `/auth/*` routes absorbed from `apps/server` (WorkOS API key in Worker secret).
-3. Drop `/seed` migration path and legacy sync anything (fresh app).
-Hibernation hygiene: no idle timers (flush timer only while dirty), auto-response ping/pong —
-per `docs/research/durable-objects-language.md`.
+See [themes](docs/theme-system.md), [localization](docs/design/i18n-coverage.md),
+[session statistics](docs/session-statistics.md),
+[preview networking](docs/preview-networking.md) and [Appshots](docs/appshots.md).
 
-## 7. Parity exclusions & deliberate changes
+## 5. Agent and engine
 
-- **Excluded**: token-usage display (profile heatmap, lifetime stats, per-message token columns,
-  `WatchUsage`). Rate-limit meters on agent accounts are *kept* (separate concern; probed from
-  CLIs, not CRDT-synced).
-- **Changed**: Postgres entity sync/server → workspace registry + edge; Electron/React/mugen → gpui with
-  ported techniques; Node harness SDKs → subprocess protocols; WebRTC → device-room relay (the original app
-  had already made this move); mobile app → out of scope for this repo.
-- **Kept verbatim**: session-doc schema shape + constants, command ledger rules, edge DO design,
-  render-parts privacy policy, UX behaviors and animation timings.
+`NativeHarness` adapts engine requests to `rcode-agent`, which runs the ReAct
+loop over `rcode-model`. `MockHarness` supplies canned events for tests.
+Provider configuration supports OpenAI Chat Completions, OpenAI Responses and
+Anthropic Messages. The Providers settings page edits the same revision-checked
+store read by runs.
 
-## 8. Milestones
+The native loop streams model output, executes requested tools, appends their
+results and continues until an answer, cancellation or failure. It accepts prior
+conversation history and supports context compaction. `AskUserQuestion` uses the
+engine/UI interaction path; tools execute directly without a permission-tier
+selector.
 
-Status legend: ✅ shipped · 🟡 shipped with named gaps (see `docs/PARITY.md`).
+Skills, custom commands, subagent definitions, hooks, plugin contributions and
+MCP tools are assembled for a run. Built-in subagents are `general-purpose` and
+`Explore`. Explicit goal commands manage continued work and goal state. The
+engine owns durable transcripts, run journals, command execution, terminals,
+workspace operations, Git worktrees and recovery.
 
-- ✅ **M0 Scaffold** — workspace builds; `proto`/`doc` crates with ledger + parts + continuation
-  unit tests; gpui hello-window runs.
-- ✅ **M1 Doc + sync core** — `rcode-doc` mirror over loro 1.13; room client syncs with the edge
-  running under `wrangler dev`; Rust⇄edge⇄Rust convergence test (M1 exit: two Rust peers converge
-  through a real SessionRoom DO, tail endpoint serves).
-- ✅ **M2 Engine core** — Claude harness end-to-end headless: `rcode headless` + dev auth runs a
-  turn, journal + doc writes, recovery test.
-- ✅ **M3 UI core** — shell (sidebar/panes/header), transcript (virtualized, markdown, streaming,
-  stick-to-bottom), composer (send/steer/stop, question panel); local chat fully usable headed.
-- ✅ **M4 Multi-device** — device-room host/client virtual sockets, remote device control, workspace
-  registry sync, WorkOS auth + org gate, presence. Proven live by `scripts/e2e-smoke.sh`:
-  two headless engines against a real edge — B queues a run into the chat doc, the durable
-  nudge wakes host A, A executes (mock harness), transcript + session status sync back to B.
-- 🟡 **M5 Full surface** — terminals, diff pane, repo/branch/folder pickers + worktrees,
-  agent accounts UI, settings (devices/shortcuts/archived), Codex harness. Gaps: composer
-  attachment UI (engine upload RPCs exist), Cursor harness.
-- 🟡 **M6 Polish** — wire reconciliation (proto AuthState on the wire, `LocalDevice`),
-  two-device e2e smoke, keyboard map, clippy/fmt sweep, Linux packaging
-  (`scripts/package-linux.sh` + release profile), macOS bundling config (`dist/macos/`,
-  not executed — needs a Mac). Gaps: prefers-reduced-motion, engine hardening
-  (instance lock, watchdogs), edge production deploy.
+`AuthStatus` carries the local storage identity through the shared `AuthState`
+wire shape. The running engine keeps its resolved identity and store boundary.
 
-## 9. Open questions (tracked, non-blocking)
+Details: [harness](crates/harness/README.md),
+[main prompt](docs/main-system-prompt.md), [commands](docs/custom-commands.md),
+[completion](docs/harness-skill-completion.md),
+[subagents](docs/subagent-prompts.md), [goals](docs/goal-mode-and-agent-tools.md)
+and [plugins](docs/plugin-marketplaces.md).
 
-1. loro-protocol Rust client ⇄ TS edge interop — verify at M1; fallback is a ~300-line hand-rolled
-   client (the frame protocol is small and we control both ends).
-2. `lorosurgeon` fit for the mirror write path vs hand-rolled reconcile.
-3. Cursor harness (the original app has it; CLI surface for Rust TBD) — parity item, scheduled after Codex.
-4. Text shaping performance for analytic row heights: gpui measures shaped text natively (Rust ⇒
-   cheap), so we start with gpui `list()` measurement + memoization rather than porting pretext's
-   full analytic kernel; revisit only if cold-open of huge transcripts measures slow.
+## 6. Development validation
+
+Use [development validation](docs/development-validation.md) for current commands
+and `scripts/ci/` for the checks run by CI. Platform browser, GPU, PTY, capture and
+iOS behavior require validation on the corresponding operating system. Source
+structure and local mock transport tests do not establish remote-service or
+real-provider acceptance.

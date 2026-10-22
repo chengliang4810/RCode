@@ -1,5 +1,4 @@
-//! CheckoutDiffSync — checkout-scoped working-tree diff production (feature-inventory
-//! §3.5; port of the original app's `checkout-diff-sync.ts` + `git-metadata-sync.ts`).
+//! CheckoutDiffSync — checkout-scoped working-tree diff production (ARCHITECTURE.md; port of the original app's `checkout-diff-sync.ts` + `git-metadata-sync.ts`).
 //!
 //! Chats do not own working-tree state: a concrete Git checkout does. This service
 //! groups this device's chats by their canonical checkout identity (`chat.cwd` →

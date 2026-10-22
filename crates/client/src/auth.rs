@@ -1,10 +1,7 @@
-//! The per-client bearer, and the one HTTP client the transport shares.
+//! The configured per-client bearer and the shared transport HTTP client.
 //!
-//! This file used to carry the WorkOS web-auth flow — paste-code exchange,
-//! org listing, and a single-flighted refresh of a single-use refresh token —
-//! against a hosted edge. There is no account to sign in to and no hosted edge
-//! to sign in through, so what is left is the bearer a caller configured. A
-//! paired client's bearer is `userId@orgId`, which is what its host expects.
+//! A paired client's bearer is `userId@orgId`. The caller supplies the host and
+//! pairing configuration.
 
 use std::sync::OnceLock;
 use std::time::Duration;

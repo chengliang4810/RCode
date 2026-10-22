@@ -1,14 +1,13 @@
 //! `NativeHarness` — the adapter that puts RCode's own agent behind the
 //! existing [`Harness`] trait.
 //!
-//! This is the seam described in `docs/design/native-agent-rewrite.md` §2:
+//! Agent event and request flow (see `ARCHITECTURE.md` §5):
 //!
 //! ```text
 //!   rcode-model ──▶ rcode-agent (ReAct loop) ──▶ NativeHarness ──▶ engine / Loro / GPUI
 //! ```
 //!
-//! Everything downstream of this file is untouched by the rewrite. The whole
-//! job here is translation, in four directions:
+//! This adapter translates between the loop and engine in four directions:
 //!
 //! | in | out |
 //! |---|---|
@@ -1936,20 +1935,10 @@ fn map_run_event(
 /// minted once in [`Harness::run`]; the loop's own `MessageId` is dropped on
 /// the floor on purpose — see the note on `AssistantMessageCompleted`.
 ///
-/// Five `rcode_proto::AgentEvent` variants have no `rcode_agent` counterpart
-/// and are therefore never produced by this driver:
-///
-/// - `GeneratedImage` — no tool produces a raster asset yet (doc §5 drops the
-///   `artifact` tool).
-/// - `ContextUsage` / `Usage` — provider-reported accounting; the model client
-///   that would supply it is not wired.
-/// - `AvailableCommands` — this driver advertises no slash commands.
-/// - `Steered` and `BackgroundWake` are emitted by the persistent session.
-/// - `UserMessage` — nothing injects a user turn mid-run. Nested run events
-///   (`Subagent`) are produced, but by [`map_run_event`], one layer up.
-/// - `Error` — a loop failure becomes `Done { Failed }`, which the engine
-///   already renders as an error part; a second, separate `Error` event would
-///   double-report it.
+/// Model usage and context events are mapped along with text and tool events.
+/// Persistent-session control and nested subagent events are handled by the
+/// surrounding session and [`map_run_event`] paths. Loop failures become
+/// `Done { Failed }` so the engine reports each failure once.
 fn from_agent_event(
     event: AgentLoopEvent,
     harness: HarnessId,
@@ -2049,10 +2038,8 @@ fn from_agent_event(
                 rcode_agent::DoneReason::Failed(message) => Some(message.clone()),
                 _ => None,
             },
-            // Echoed for resume. TODO(port): resume itself — the loop has no
-            // persisted transcript to replay into, so a fresh run always
-            // starts empty. When the loop can take prior messages, this id
-            // (plus the Loro doc) is what it replays.
+            // Keep the session identity with the completion. The run entry
+            // point restores conversation history before spawning the loop.
             session_id: Some(session_id.to_owned()),
         },
     })

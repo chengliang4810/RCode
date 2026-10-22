@@ -69,9 +69,7 @@ rcode-github = { path = "crates/github" }
 
 # CRDT
 loro = "1.13"
-# Wire protocol for the SessionRoom DO rooms — official Rust twin of the npm
-# `loro-protocol` package the TS edge speaks (same monorepo, byte-identical
-# frames, cross-checked by its js_snapshots tests).
+# Loro wire-protocol primitives.
 loro-protocol = "0.3"
 
 # gpui — zeronsh/zui, extracted from wingleeio/zed e2ddcc6 with identical
@@ -133,13 +131,8 @@ uuid = { version = "1", features = ["v4", "serde"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 
 # misc
-# Global allocator on macOS only: libmalloc retains the churn high-water mark
-# as permanent RSS - measured as the top residency cause in
-# docs/memory-plan.md. Pinned to mimalloc v2: the crate's default (v3.3.2)
-# has the same watermark pathology itself - transient streaming/render churn
-# became permanent RSS (~6x glibc growth, daemon at 908MB for 7.3MB of docs,
-# no idle recovery). Linux stays on glibc, which measured flat on the same
-# workloads.
+# macOS uses mimalloc v2 to reduce retained streaming/render allocations.
+# Other platforms keep their system allocator.
 mimalloc = { version = "0.1", features = ["v2"] }
 anyhow = "1"
 tempfile = "3"

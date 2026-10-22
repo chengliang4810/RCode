@@ -1,15 +1,14 @@
 //! Where the agent's models come from.
 //!
-//! Providers and models live in `{data_dir}/providers.json`, separate from
+//! Providers and models live in `{config_root}/providers.json`, separate from
 //! `ui-settings.json`, because this file holds API keys. Keeping credentials
 //! out of the UI settings file means the settings file can be synced, shown or
 //! pasted into a bug report without leaking anything.
 //!
 //! The shape is deliberately flat — a list of providers, each with a list of
 //! models — because that is what the user asked for: several vendors, several
-//! models each, chosen per conversation. A model is addressed by its `id`,
-//! which is unique across providers, so a conversation records one string and
-//! the sub-agent override takes the same form.
+//! models each, chosen per conversation. Explicit model selections retain both
+//! provider ID and model ID; subagent selections can also record reasoning.
 
 use std::collections::BTreeMap;
 use std::fmt;

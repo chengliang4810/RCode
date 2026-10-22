@@ -5,8 +5,6 @@
 //!
 //! HTTP seam 仅供 crate 内 adapter 使用；公共协议 API 不暴露 client、headers 或原始请求。
 
-// Ported adjustment: The original project's `transport/cloudflare.rs` (emscripten/Cloudflare
-// backend) is intentionally not ported — the local-first target has no such seam.
 pub(crate) mod http;
 pub(crate) mod sse;
 

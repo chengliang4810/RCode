@@ -11,6 +11,7 @@
 //! `ToolCallDelta` into complete `ToolCall`s has to be right or tool calls are
 //! silently lost.
 
+#[cfg(test)]
 use futures::{StreamExt, stream::BoxStream};
 use std::sync::Arc;
 
@@ -23,6 +24,7 @@ use rcode_model::{
 
 /// Preserve terminal provider failures while translating streamed deltas. A
 /// partial response must never become a completed message or execute tools.
+#[cfg(test)]
 pub(crate) fn reasoning_chunks(
     stream: rcode_model::ModelStream,
     model: String,

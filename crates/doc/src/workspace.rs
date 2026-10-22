@@ -1,28 +1,7 @@
-//! Workspace doc schema over `loro` — the per-org entity index that replaces the original app's
-//! residual entity sync (ARCHITECTURE.md §2.2). Lives in its own DO room (same
-//! SessionRoom class, doc id `ws/{orgId}`).
+//! Loro workspace schema with keyed device, space, chat and session maps.
 //!
-//! Container layout — maps keyed by id, NOT lists: entity rows are LWW upserts, and a
-//! map-of-maps means concurrent writers to *different* rows never conflict while writes
-//! to the *same* row settle field-by-field LWW (exactly right for renames/archives):
-//! - `devices`: LoroMap keyed by deviceId → row map {id, name, platform, lastSeenAt}
-//! - `spaces`: LoroMap keyed by spaceId → row map {id, deviceId, path, name?,
-//!   gitDetected, gitCheckedAt?, checkoutId?, repositoryId?, createdAt}
-//! - `chats`: LoroMap keyed by chatId → row map {id, deviceId, title?, archived, cwd?,
-//!   branch?, checkoutId?, config?(json), lastMessagePreview?, lastMessageAt?, createdAt,
-//!   harnessSessionId?, harnessSessionCwd?, spaceId?, lastSeenAt?}
-//! - `sessions`: LoroMap keyed by chatId → row map {chatId, deviceId, status, startedAt?,
-//!   updatedAt}
-//! - `meta`: LoroMap {schemaVersion} — in-band detection for future destructive changes
-//!
-//! Writer discipline (ARCHITECTURE §2.2): each device writes its own device row, its
-//! own session rows, and rows for chats it hosts; title/archived renames are LWW map
-//! sets from any device — matching the original app's Mutate surface. Presence rides the room's
-//! `EphemeralStore` under keys `presence/{deviceId}` (an online timestamp), replacing
-//! The original app's 15s heartbeat writes so liveness never grows the oplog.
-//!
-//! Timestamps are stored as epoch millis (the session-doc convention) and surface as
-//! `chrono::DateTime<Utc>` through the `rcode_proto` entity types.
+//! Map entries allow concurrent updates to independent fields. Session documents
+//! use Loro; the engine workspace index uses [`crate::RegistryDoc`].
 
 use chrono::{DateTime, Utc};
 use loro::{ExportMode, LoroDoc, LoroMap, LoroValue, ToJson};

@@ -1,16 +1,8 @@
-//! Auth — **local-only**.
+//! Local identity and bearer provider for the engine.
 //!
-//! RCode used to own a WorkOS AuthKit session for its device (feature-inventory
-//! §3.7): it built the authorize URL itself and delegated the secret-bearing
-//! code exchange and refresh to the edge Worker, persisting a 0600 refresh
-//! token and caching access tokens with dual-clock expiry. The product is now
-//! pure-local (no account, no cloud sync, no remote service), so every WorkOS
-//! path is gone: the device has a fixed local identity and a constant bearer.
-//!
-//! What remains is the shape the rest of the engine and the wire protocol
-//! already speak — [`AuthState`], [`AuthUser`], and the
-//! [`rcode_rpc::TokenSource`] seam — so the workspace rooms, the RPC surface
-//! and the UI keep working without a network.
+//! [`AuthState`] and [`AuthUser`] carry the local identity on the RPC wire. The
+//! engine creates a fixed identity and exposes a constant configured bearer
+//! through [`rcode_rpc::TokenSource`].
 
 use std::sync::Arc;
 
@@ -20,7 +12,7 @@ use tokio::sync::watch;
 use rcode_rpc::TokenError;
 
 // ---------------------------------------------------------------------------
-// Wire types (feature-inventory §2 AuthRpc)
+// Wire types (ARCHITECTURE.md AuthRpc)
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

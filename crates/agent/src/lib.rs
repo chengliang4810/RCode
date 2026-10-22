@@ -1,26 +1,12 @@
 //! rcode-agent — the native agent: a ReAct loop over `rcode-model`.
 //!
-//! This crate owns the loop that used to live in an external CLI. It is
-//! deliberately host-free: the caller supplies the model client, the tool set
-//! and a way to ask the user, so nothing here depends on the engine, the UI or
-//! storage. `rcode-harness`'s native driver is the production host.
+//! The caller supplies the model client, tool set, conversation history and user
+//! interaction callback. The loop is independent of the engine and UI;
+//! `rcode-harness` supplies its production host. See `ARCHITECTURE.md` §5.
 //!
-//! Design and decisions: `docs/design/native-agent-rewrite.md`.
-//!
-//! ## Shape
-//!
-//! ```text
-//!   messages ──▶ Model (rcode-model) ──▶ tool calls?
-//!      ▲                                     │
-//!      │                                     ▼
-//!      └──────── tool results ◀──── ToolRegistry
-//!                    │
-//!                    └──▶ AgentEvent stream (the host renders and persists these)
-//! ```
-//!
-//! One loop iteration is: append the user turn, ask the model, stream its
-//! output as events, run any tools it asked for, append the results, repeat
-//! until the model answers without tool calls or the caller cancels.
+//! One iteration asks the model, streams output, executes requested tools and
+//! appends their results. Iteration continues until an answer, cancellation or
+//! failure.
 
 pub mod command;
 pub mod builtin_subagent_prompts;

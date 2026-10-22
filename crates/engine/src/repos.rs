@@ -1,5 +1,5 @@
 //! Repos — this device's git repositories, branches, worktrees, and the folder
-//! browser (feature-inventory §3.5; port of the original app's `repos.ts` + `folder-lister.ts`).
+//! browser (ARCHITECTURE.md; port of the original app's `repos.ts` + `folder-lister.ts`).
 //!
 //! Repos are device-local (paths differ per machine), so the known set is a plain
 //! JSON list (`{data_dir}/repos.json`) — no sync. Existing repos can live anywhere

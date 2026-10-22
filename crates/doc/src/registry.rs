@@ -1,5 +1,5 @@
-//! Workspace registry — the client side of the row-table sidebar sync that
-//! replaces the Loro workspace doc (docs/registry-sync.md).
+//! Workspace registry — keyed sidebar rows, clocks and pending operations.
+//! See `docs/registry-sync.md`.
 //!
 //! [`RegistryDoc`] is a local replica of the per-user registry room:
 //! - `authoritative` rows — the server's truth, replaced wholesale by `state`/
@@ -17,10 +17,8 @@
 //! ack anything: its writes fold straight into `authoritative` and `pending`
 //! stays empty.
 //!
-//! The merge function [`apply_op`] mirrors `registry-core.ts` 1:1 —
-//! the shared test vectors live in both files; change them together. The
-//! typed API mirrors the old `WorkspaceDoc` surface so `WorkspaceHost` is a
-//! drop-in swap.
+//! [`apply_op`] defines field-clock and tombstone semantics. Merge and transport
+//! tests cover the same row operations used by `WorkspaceHost`.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -1375,7 +1373,7 @@ impl RegistryDoc {
         Ok(true)
     }
 
-    /// Flip the chat's sync room generation (docs/chat2-sync.md M2). The
+    /// Flip the chat's sync room generation (docs/chat2-sync.md). The
     /// host calls this in the same breath as seeding the chat2 checkpoint;
     /// LWW per-field like every registry write, so the flip is per-chat and
     /// instantly revertible by writing 1 back.

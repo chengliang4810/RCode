@@ -1,20 +1,9 @@
-//! DocHost — per-chat `SessionDoc` handles: snapshot persistence (debounced), edge room
-//! sync (offline-tolerant), and the HOST-ONLY durable command executor.
+//! Per-chat Loro handles, command execution and persistence.
 //!
-//! Pragmatic port of the original app's `session-docs.ts` + the `main.ts` executor (spec:
-//! feature-inventory §3.3, ARCHITECTURE §2 "command plane"):
-//! - the doc IS the outbox: commands and user entries commit locally and sync whenever a
-//!   room connection exists; the engine is fully functional with sync disabled;
-//! - on every doc change (local commit or remote import) the handle re-emits the joined
-//!   transcript to watchers, drains pending commands, and schedules a snapshot save;
-//! - command drain: evaluate via `evaluate_command` (with the DocsStore processed
-//!   ledger), mark processed BEFORE execute, execute through the sessions engine, then
-//!   write the outcome status back into the doc as the sole outcome writer.
-//!
-//! Chat ownership is gated on the workspace doc (`chats[chat_id].deviceId`), with
-//! claim-on-first-command for unknown chats. Queueing a command for a chat hosted on
-//! another device POSTs a durable nudge to that device's room (§7 cold-chat delivery);
-//! the host's relay receives it and warm-opens the doc, which drains the queue.
+//! The host folds run events into session documents, persists snapshots and
+//! pending work, and drains durable commands for chats owned by this device.
+//! Optional endpoint transports handle row exchange, wake requests and publication;
+//! local document storage remains available without an endpoint.
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -123,10 +112,9 @@ const RELAY_GIVE_UP: std::time::Duration = std::time::Duration::from_secs(15 * 6
 /// Hosts below this stamped engine version don't serve `RelayCommand`.
 const RELAY_MIN_VERSION: (u64, u64, u64) = (0, 2, 12);
 
-/// Edge connection config. The bearer is a **provider**, never a snapshot:
-/// every room (re)connect and HTTP request re-reads it, so WorkOS access-token
-/// refreshes (~1h expiry) take effect without an engine restart. Dev bearers
-/// (which never expire) ride the same seam as a [`rcode_rpc::StaticToken`].
+/// Optional endpoint configuration. Each connection and HTTP request reads
+/// the bearer through its provider rather than retaining a token snapshot.
+/// Fixed bearers use [`rcode_rpc::StaticToken`].
 #[derive(Clone)]
 pub struct EdgeConfig {
     /// Edge base URL (`http(s)://…`); rewritten to `ws(s)` for the room socket.
@@ -614,7 +602,7 @@ pub struct ChatDocHandle {
     /// thin lineage exists on disk at all; `save_snapshot` double-checks, so
     /// a doc that was never seeded can't lose its only copy).
     retired: AtomicBool,
-    /// chat2 relay client (docs/chat2-sync.md C3) — populated once the
+    /// chat2 relay client (docs/chat2-sync.md) — populated once the
     /// registry names roomGen 2 for this chat and the join resolves.
     chat2: Mutex<Option<rcode_sync::ChatClient>>,
     sync_started: AtomicBool,
@@ -2442,7 +2430,7 @@ impl DocHost {
         });
     }
 
-    /// Host-side chat2 seed (docs/chat2-sync.md M1/M2): rebuild thin, POST
+    /// Host-side chat2 seed (docs/chat2-sync.md): rebuild thin, POST
     /// the seed checkpoint, persist the thin lineage locally, THEN flip the
     /// registry — each step idempotent, a crash before the flip leaves the
     /// chat on s2 and the next open retries (M5).
@@ -2543,7 +2531,7 @@ impl DocHost {
         // single chat (v0.1.32 DOA).
         drop(doc);
         if !rebuilt.sidecar.is_empty() {
-            // Sidecar PARKED (docs/chat2-sync.md A2): full outputs are not
+            // Sidecar PARKED (docs/chat2-sync.md): full outputs are not
             // uploaded; they survive in the rollback snapshot + run journal.
             tracing::info!(chat = %chat_id, payloads = rebuilt.sidecar.len(),
                 "chat2 seed: sidecar parked; outputs stay local");
@@ -2790,7 +2778,7 @@ impl DocHost {
         // source — the legacy s2 room — went away with the s2 client; any
         // transcript that existed only there was salvaged by earlier
         // releases or is reachable in the room's storage server-side.)
-        // Thin before appending (docs/chat2-sync.md A2): full outputs are
+        // Thin before appending (docs/chat2-sync.md): full outputs are
         // parked, exactly like a seed — they survive in the rollback copy
         // saved below and the run journal.
         if matches!(self.inner.store.load_snapshot(&rollback_id), Ok(None)) {
@@ -2820,7 +2808,7 @@ impl DocHost {
         Ok(())
     }
 
-    /// chat2 host duties on the doc-quiesce tick (docs/chat2-sync.md C3):
+    /// chat2 host duties on the doc-quiesce tick (docs/chat2-sync.md):
     /// - threshold checkpoint: when the room's row log passes 512KB or 200
     ///   rows, post a full checkpoint so cold readers load one compact blob
     ///   instead of replaying the log (the alert-shaped growth bound);
@@ -4841,11 +4829,9 @@ impl DocHost {
         Ok(())
     }
 
-    /// Upload a tool result's full output/diff to the R2 sidecar
-    /// (`PUT {edge}/blob/{chatId}/{partId}[.diff]`, docs/chat2-sync.md A2).
-    /// Fire-and-forget: the doc already carries the summary, so a lost upload
-    /// degrades to "full output unavailable" — it must never block or fail
-    /// the run. Offline/edge-less engines skip silently.
+    /// Upload a tool payload to a configured endpoint's blob route.
+    /// This best-effort task must not block or fail the run. It is skipped
+    /// when no endpoint is configured; the endpoint must implement the route.
     pub fn upload_tool_sidecar(&self, chat_id: &str, payload: rcode_doc::SidecarPayload) {
         let Some(edge) = self.inner.config.edge.clone() else {
             return;
@@ -5954,7 +5940,7 @@ pub fn respond_input_prompt(
 }
 
 /// Percent-encode one URL path segment of a sidecar part id. PART_RE's
-/// alphabet includes `#` and `:` — legal in R2 keys and doc refs, but a raw
+/// alphabet includes `#` and `:` — legal in blob keys and doc refs, but a raw
 /// `#` in a URL is a fragment delimiter (the request would silently hit the
 /// truncated key, colliding parts). The Worker decodes before validating.
 fn encode_part_segment(part_id: &str) -> String {

@@ -1,12 +1,9 @@
-//! rcode-harness — one interface over coding agents (plus a mock for tests).
+//! rcode-harness — engine adaptation for the native agent and test fixtures.
 //!
-//! There are two drivers. [`NativeHarness`] runs the ReAct loop in this process
-//! ([`rcode_agent`]) over the provider protocols in [`rcode_model`]; [`MockHarness`]
-//! replays canned events for tests. The external-CLI drivers this crate used to
-//! carry — the ACP adapters and the per-CLI wires that drove an installed agent
-//! binary — are gone with the subprocess plumbing they needed, so a harness no
-//! longer probes for or spawns a program at all (decision record:
-//! `docs/research/acp.md`).
+//! [`NativeHarness`] runs the ReAct loop in this process ([`rcode_agent`]) over
+//! provider protocols in [`rcode_model`]. [`MockHarness`] replays canned test
+//! events. The native driver also assembles run tools, prompts and provider
+//! configuration.
 
 use async_trait::async_trait;
 use futures::stream::BoxStream;

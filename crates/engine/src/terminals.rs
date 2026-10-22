@@ -1,4 +1,4 @@
-//! Terminals — PTY sessions owned by this device (feature-inventory §3.4; port of
+//! Terminals — PTY sessions owned by this device (ARCHITECTURE.md; port of
 //! The original app's `terminals.ts` over `portable-pty`).
 //!
 //! - `open` spawns the user's login shell in the chat's cwd; `subscribe` replays a

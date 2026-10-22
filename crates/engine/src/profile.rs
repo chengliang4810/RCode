@@ -1,19 +1,12 @@
 //! Workspace profile identity and storage boundaries.
 //!
-//! Two directories decide where everything lands. The **config root** holds
-//! what identifies this installation and what a reader needs to find it: the
-//! device id, the engine lock, provider credentials, UI settings, logs and the
-//! `location` pointer. The **data root** holds what grows with use: the profile
-//! stores (documents, journals, uploads), cloned repositories, scratch folders,
-//! caches and worktrees. They are the same directory until the user points the
-//! data root elsewhere.
+//! The config root holds device identity, engine lock, provider credentials,
+//! settings, logs and the `location` pointer. The data root holds profile stores,
+//! journals, uploads, clones, scratch directories, caches and worktrees. The roots
+//! are identical unless the pointer selects another directory.
 //!
-//! Stores, journals, and uploads are profile-scoped, under the data root.
-//!
-//! One profile shape: an identity (`org_id`/`user_id`) and the store root
-//! derived from it. The `Local`/`Development`/`Synced` distinction this type
-//! also carried went with the cloud — `Synced` first, then the rest, because a
-//! runtime that reports one shape does not need an enum to say so.
+//! A resolved profile uses `org_id`/`user_id` as storage keys and keeps that store
+//! boundary for the lifetime of the engine.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};

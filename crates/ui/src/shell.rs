@@ -318,7 +318,7 @@ pub struct JumpSession(pub usize);
 pub struct SelectPaletteTab(pub usize);
 
 // ---------------------------------------------------------------------------
-// Traffic-light-aware titlebar layout (feature-inventory §1.1)
+// Traffic-light-aware titlebar layout (ARCHITECTURE.md)
 // ---------------------------------------------------------------------------
 
 /// Where the top-left window-control cluster starts, in px from the window's
@@ -398,8 +398,7 @@ pub fn cluster_clearance(
 }
 
 /// (Re-)apply the whole app keymap: clears every binding, restores the composer
-/// map, then binds the customizable shortcuts from `keymap` (feature-inventory
-/// §1.4). Invalid persisted combos fall back to that shortcut's default.
+/// map, then binds the customizable shortcuts from `keymap` (ARCHITECTURE.md). Invalid persisted combos fall back to that shortcut's default.
 pub fn apply_keymap(
     cx: &mut App,
     keymap: &KeymapConfig,
@@ -529,7 +528,7 @@ pub fn apply_keymap(
     }));
 }
 
-/// The settings sections (feature-inventory §1.5 routes).
+/// The settings sections (ARCHITECTURE.md routes).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SettingsSection {
     /// Former Devices page: one device row with a copy-id and a rename, which
@@ -979,7 +978,7 @@ impl NavHistory {
     }
 }
 
-/// Sidebar resort glide (feature-inventory §1.6): 260ms
+/// Sidebar resort glide (ARCHITECTURE.md): 260ms
 /// `cubic-bezier(0.22,1,0.36,1)` per-row translate, the View Transitions
 /// equivalent.
 pub const RESORT: MotionSpec = MotionSpec::new(260, motion::EASE_RESORT);
@@ -4596,7 +4595,7 @@ impl Shell {
         }
     }
 
-    /// Cmd/Ctrl+J and the header button (feature-inventory §1.10). Height
+    /// Cmd/Ctrl+J and the header button (ARCHITECTURE.md). Height
     /// animates 200 ms; closing detaches (PTYs stay alive), opening restores.
     /// The flag is per chat (zeron `sessionPanels`).
     fn toggle_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {

@@ -1,6 +1,6 @@
 //! HostRelay + ClientLink end-to-end over an in-memory fake device room.
 //!
-//! The fake implements the `DeviceRoom` DO's relay semantics (device-room.ts):
+//! The fake implements the relay protocol used by HostRelay and ClientLink:
 //! route client frames to the single host socket with `from` stamped; route host frames
 //! by `to` (bounce `client_gone` when the target left); host supersede (a new host join
 //! closes the predecessor); `client_closed` on client disconnect; `host_closed` broadcast
@@ -236,7 +236,7 @@ async fn handle_socket(stream: tokio::net::TcpStream, state: Arc<Mutex<RelayStat
         }
     }
 
-    // Disconnect bookkeeping (mirrors DeviceRoom.webSocketClose).
+    // Remove the disconnected host/client and notify its peers.
     {
         let mut st = state.lock().expect("lock");
         if is_host {
@@ -754,9 +754,9 @@ async fn nudges_reach_the_host_callback() {
     assert_eq!(got, "chat-42");
 }
 
-/// Live-edge variant: run the same host+client path through a real DeviceRoom DO.
-/// `RCODE_EDGE_WS=http://127.0.0.1:26640 cargo test -p rcode-rpc -- --ignored live_edge`
-/// (dev-mode edge; RCODE_EDGE_TOKEN defaults to a fixed dev user id).
+/// Opt-in host/client round trip against a separately provisioned relay.
+/// Supply RCODE_EDGE_WS and, when required, RCODE_EDGE_TOKEN before running
+/// `cargo test -p rcode-rpc -- --ignored live_edge`.
 #[tokio::test]
 #[ignore = "needs a running edge (set RCODE_EDGE_WS)"]
 async fn live_edge_relay_round_trip() {

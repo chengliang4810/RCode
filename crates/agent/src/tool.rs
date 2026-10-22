@@ -3,7 +3,7 @@
 //!
 //! This is the framework only — no concrete tools live here. `Read`, `Write`,
 //! `Bash` and the rest are separate implementations of [`Tool`]; see the tool
-//! inventory in `docs/design/native-agent-rewrite.md` §5. Splitting the
+//! implementations in `tools`. Splitting the
 //! framework from the tools is what lets a host register a different set per
 //! conversation (and lets tests register a mock) without the loop knowing.
 //!

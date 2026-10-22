@@ -1,58 +1,27 @@
 # Streaming selection and prompt expansion
 
-> 历史记录：本文保留旧实现的测量与设计过程。外部 CLI、云端 edge 及相关演示/性能脚本已退役，文中的旧命令不再作为当前验证步骤。现行入口见 [开发验证](development-validation.md)。
-
-Text selection now releases automatic viewport following at mouse-down and
-materializes the current list position. A stream burst can no longer remove
-the drag anchor before the first mouse move. Selection retains the runway;
+Text selection releases automatic viewport following at mouse-down and
+materializes the current list position. A stream burst must not remove the drag
+anchor before the first mouse move. Selection retains the own-send runway;
 edge scrolling and returning to the live tail use the existing navigation paths.
 
-Show more adds the prompt's revealed height to the reservation, using the
-prompt's resize curve. Show less reverses it. Expanding the prompt therefore
-does not count as assistant output or permanently retire the runway. Real
-output still consumes the reservation, including when the prompt is expanded.
+Show more adds the prompt's revealed height to the reservation using the prompt
+resize curve. Show less reverses it. Expanding a prompt does not count as
+assistant output or consume the reservation; new assistant output does.
 
-## Native recordings
-
-- [Show more, Show less, and retained runway during streaming](https://github.com/user-attachments/assets/55162a94-8b6b-4725-9bfd-e67b173799c8)
-  (43 seconds): expand and collapse the prompt, apply downward wheel input,
-  select live text, and continue streaming with the reserved space intact.
-- [Select an overflowing live reply, then resume scrolling](https://github.com/user-attachments/assets/aa4c50dc-a7c9-4b84-a02b-63da3809e877)
-  (38 seconds): hold a paragraph selection while more code arrives, release,
-  jump to the live tail, and scroll up and down during the same turn.
-
-These are native Linux/X11 recordings at 1280×800 using Xvfb and software
-Vulkan, with four renderer workers. Both runs submitted through the composer
-and replayed deterministic Claude adapter events without model API calls.
-The long replay was briefly paused to position the pointer, then resumed at
-mouse-down before the first drag movement, exercising the burst regression.
-Both replay runs completed successfully. These are functional recordings,
-not performance benchmarks or native macOS validation.
-
-The recorded release binary has SHA-256
-`d304b603cc56575742d05e1b09fc722e74e884ffdec191abac220f3f81990e5c`.
-
-## Automated validation
-
-All 620 release UI tests passed:
+## Validation
 
 ```sh
-cargo test --release --locked -p rcode-ui --lib -- --test-threads=1
+cargo test --locked -p rcode-ui --lib -- --test-threads=1
 ```
 
-The new headless tests use the cached transcript view and real mouse events.
-They cover a burst between mouse-down and the first drag movement, selection
-across streaming and completion, and expanding/collapsing a live prompt before
-jumping to enough output to retire the reservation. The burst and Show more
-regressions both failed before their respective fixes.
+The UI tests exercise cached transcript views and mouse events, including a
+burst between mouse-down and the first drag movement, selection across streaming
+and completion, prompt expansion/collapse and returning to the tail. Related
+coverage includes runway geometry, wheel escape, resizing, completion shrinkage
+and viewport restoration.
 
-The existing suite also covers runway geometry, wheel escape and re-sticking,
-resizes, completion shrinkage, viewport restoration, and selection edge scrolling.
-The native app also built with `cargo build --release --locked -p rcode`.
-
-Replay with `scripts/resource-profile.mjs` and `scripts/replay-claude.py`:
-use `scripts/fixtures/transcript-selection-stream.jsonl` at 1200 ms per delta
-for the short turn, or `scripts/fixtures/resource-stream.jsonl` at 300 ms per
-delta for overflow. Set `RCODE_PROFILE_SUBMIT_UI=1`; the short-turn prompt
-must be long enough to expose Show more. The recordings used a 1939-character
-prompt for that case.
+For native acceptance, stream a reply while selecting text and expanding a long
+prompt, then return to the tail. Check that the selection anchor remains stable
+and new output consumes the reservation. Repeat on each supported desktop
+platform; headless interaction tests do not establish native rendering quality.

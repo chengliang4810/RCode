@@ -304,9 +304,7 @@ pub fn valid_visual_asset_name(name: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
 }
 
-/// Where one checklist item stands. Claude's TodoWrite, OpenCode and ACP plans
-/// distinguish the item being worked on from those still waiting; Codex and
-/// Cursor only report done / not done.
+/// Checklist state shared by the native TodoWrite tool and transcript views.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum TodoStatus {
@@ -394,10 +392,9 @@ pub struct SlashCommand {
 /// One turn of a conversation, as the engine hands it to a harness that
 /// replays history itself.
 ///
-/// The native agent is stateless: it sends the whole conversation to the model
-/// on every turn rather than resuming a provider-side session (see
-/// `docs/design/native-agent-rewrite.md`). That makes the engine the only
-/// place the conversation exists, and this the shape it hands over.
+/// The engine supplies conversation turns for history reconstruction. Native
+/// runs can also retain structured history in their persistent session state;
+/// model requests carry the history assembled for that run.
 ///
 /// Tool calls are flattened into the text of the turn that made them. The
 /// alternative — carrying `tool_use`/`tool_result` blocks through — would let

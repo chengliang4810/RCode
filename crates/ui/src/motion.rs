@@ -1,7 +1,7 @@
-//! Animation kit — the original app motion catalog as reusable helpers over gpui
+//! Animation kit — reusable motion helpers over gpui
 //! [`Animation`]/[`AnimationExt`].
 //!
-//! Catalog (docs/research/feature-inventory.md §1.12):
+//! Motion presets:
 //! - `fade-in`   0.5s  cubic-bezier(0.16,1,0.3,1), translateY 4→0 (entrances)
 //! - `fade-quick` 0.15s
 //! - `menu-in`   0.14s scale 0.96 + translateY −2 (popovers)

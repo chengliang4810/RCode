@@ -1177,7 +1177,7 @@ impl WorkspaceHost {
         Ok(self.mutate(|doc| doc.upsert_space(space))?)
     }
 
-    /// Flip the chat's sync room generation (docs/chat2-sync.md M2) — the
+    /// Flip the chat's sync room generation (docs/chat2-sync.md) — the
     /// host calls this in the same breath as seeding the chat2 checkpoint.
     pub fn set_chat_room_gen(&self, chat_id: &str, room_gen: u32) -> Result<bool, EngineError> {
         Ok(self.mutate(|doc| doc.set_chat_room_gen(chat_id, room_gen))?)

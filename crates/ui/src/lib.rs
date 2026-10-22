@@ -1,16 +1,9 @@
-//! rcode-ui — the gpui viewport. Shell, sidebar, conversation, composer, terminal,
-//! diff pane.
+//! rcode-ui — the GPUI desktop shell, sidebar, transcript, composer, settings,
+//! files, browser, terminals and changes views.
 //!
-//! Design: ARCHITECTURE.md §4; animation catalog docs/research/feature-inventory.md
-//! §1.12; virtualization/markdown techniques docs/research/mugen-pretext.md.
-//!
-//! M3a foundation:
-//! - [`theme`] — always-dark monochrome theme (oklch-derived neutrals), a gpui Global;
-//! - [`motion`] — the original app animation catalog over gpui `Animation` + cubic-bezier;
-//! - [`state`] — `AppState` entity + `EngineHandle` (connect-or-embed engine);
-//! - [`settings`] — persisted pane widths/collapse flags;
-//! - [`shell`] — sidebar + main panel + right-pane scaffold + gate;
-//! - [`loaders`] — the original app pulse loader, gradient spinner, boot splash.
+//! Engine state arrives through typed RPC subscriptions. Shared presentation,
+//! theme, text/Markdown layout, math and visual crates support rendering.
+//! See `ARCHITECTURE.md` §4.
 
 pub mod app_menus;
 pub mod app_update;
@@ -407,7 +400,7 @@ fn open_main_window(
                 // the titlebar, not the menu bar.
                 // macOS: frameless-inset chrome like the original Electron app
                 // (`titleBarStyle: "hiddenInset"`, traffic lights at 14,15 —
-                // feature-inventory §1.1). The strip is custom-drawn. Windows
+                // ARCHITECTURE.md). The strip is custom-drawn. Windows
                 // still needs a native title for taskbar previews and Alt+Tab. On
                 // Linux/Windows `appears_transparent` hides the system titlebar
                 // for our custom-drawn chrome; harmless where unsupported.

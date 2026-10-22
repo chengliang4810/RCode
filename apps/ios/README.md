@@ -102,8 +102,8 @@ xcodebuild … -only-testing:RCodeUITests/ScrollPerformanceTests test
 
 Online integration requires a separately provisioned, reachable host that
 implements the registry/session transport and a configured Native provider.
-This repository does not ship the former Cloudflare Worker service.
-`rcode headless` alone is not a replacement for that service. Pair in the app
+A deployable registry/session service is not included in this repository.
+`rcode headless` serves the engine IPC interface. Pair in the app
 using the host address and token; the Debug hook is `-pair host userId orgId`.
 
 The opt-in test in `RCodeUITests/LiveStackTests.swift` uses those same inputs:
@@ -123,8 +123,7 @@ available without a host or provider credentials.
 The client retains notification permissions, APNs token registration and
 notification navigation. Remote delivery requires the paired host to implement
 `POST /registry/:org/push-target` and APNs delivery; that backend is not included
-here. The former Worker deployment and `wrangler` instructions no longer
-apply. The TestFlight workflow still configures the app's Push capability.
+here. The TestFlight workflow configures the app's Push capability.
 
 ## TestFlight release
 

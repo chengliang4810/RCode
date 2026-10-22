@@ -1,17 +1,9 @@
-//! RegistryClient — WebSocket transport for the workspace registry
-//! (docs/registry-sync.md): hello/cursor handshake, push/ack for pending op
-//! batches, merged-row broadcasts, presence beats, probe/redial liveness, and
-//! reconnect with exponential backoff.
+//! RegistryClient — optional workspace registry transport.
 //!
-//! The client owns no row semantics: everything applies through the shared
-//! [`rcode_doc::RegistryDoc`] under a lock. Wire frames are JSON text —
-//! byte-compatible with `registry-room.ts`.
-//!
-//! Liveness discipline is inherited from `room.rs` and its incidents: the
-//! transport-level text ping elicits a runtime auto-pong that proves NOTHING
-//! about the DO (2026-07-30), so room-level health is judged only by protocol
-//! frames — a probe that goes unanswered past its deadline tears the session
-//! down for a fresh dial.
+//! The JSON protocol implements hello/cursor, push/ack, merged rows, presence and
+//! probe-based liveness. Row semantics belong to [`rcode_doc::RegistryDoc`]. A
+//! protocol probe timeout closes the session and schedules reconnection with
+//! backoff. See `docs/registry-sync.md`.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -80,7 +72,7 @@ pub enum RegistryEvent {
     Presence,
 }
 
-// ── wire frames (JSON text; mirror registry-room.ts) ───────────────
+// ── wire frames (JSON text) ──────────────────────────────────────
 
 #[derive(Serialize)]
 #[serde(tag = "t", rename_all = "lowercase")]

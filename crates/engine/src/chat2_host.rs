@@ -1,4 +1,4 @@
-//! chat2 host wiring (docs/chat2-sync.md C3): the engine-side implementations
+//! chat2 host wiring (docs/chat2-sync.md): the engine-side implementations
 //! of [`rcode_sync::chat_client::ChatDocSink`] and
 //! [`rcode_sync::chat_client::CheckpointFetcher`], binding a
 //! [`crate::doc_host::ChatDocHandle`]'s live doc to a chat2 room.
@@ -18,7 +18,7 @@ use rcode_sync::{DocsStore, SyncError};
 use crate::doc_host::EdgeConfig;
 use crate::http_error::describe_http_error;
 
-/// Doc epoch stamped on every chat2-synced snapshot (docs/chat2-sync.md M1:
+/// Doc epoch stamped on every chat2-synced snapshot (docs/chat2-sync.md:
 /// thin docs are lineage epoch 2; M3 readers discard-and-adopt below it).
 pub const CHAT2_DOC_EPOCH: u32 = 2;
 

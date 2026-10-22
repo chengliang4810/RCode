@@ -1,22 +1,13 @@
-//! Device-room relay transport (ARCHITECTURE §1, feature-inventory §3.7): the byte-frame
-//! codec spoken by the edge `DeviceRoom` DO, the **host relay** (this device serving its
-//! full RPC surface through the relay), and the **client link** (dialing another device's
-//! relay and speaking ordinary [`RpcClient`] RPC over it).
+//! Device relay codec, host routing and client links.
 //!
-//! Frame encoding:
-//! `uleb128(header_len) ‖ UTF-8 JSON header ‖ payload`, header `{s, k, to?, from?}`.
-//! The layout was fixed by the TypeScript `DeviceRoom` Durable Object it had to
-//! interop with (`device-room.ts`); that worker went with the cloud surface, so
-//! what pins the layout now is the codec tests in this file.
-//! - client → DO: the DO stamps `from = connId` and forwards to the host socket;
-//! - host → DO: must carry `to = connId`; the DO strips routing keys and delivers;
-//! - relay control frames use kind [`RELAY_KIND`] with payload `{"error": code}` —
-//!   codes `host_offline`, `host_closed`, `client_gone`, `client_closed`;
-//! - nudge frames use kind [`NUDGE_KIND`] with payload `{"chatId": …}`.
+//! Frame encoding is `uleb128(header_len) | JSON header | payload`, with header
+//! `{s, k, to?, from?}`. A relay stamps `from` on client requests and uses `to`
+//! for host replies. Codec tests define the byte layout.
 //!
-//! The RPC path multiplexes NOTHING new: each distinct client `connId` becomes a virtual
-//! string-frame connection feeding the existing [`serve_connection`] seam, so every RPC
-//! handler works through the relay untouched (the port of the original app's `device-room-host.ts`).
+//! Each client connection becomes a virtual string-frame connection served by
+//! [`serve_connection`]. Relay control frames report host/client disconnects;
+//! nudge frames carry chat wake requests. Using these links requires a configured
+//! relay endpoint.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -307,11 +298,11 @@ impl HostRelayConfig {
     }
 }
 
-/// The host end of the relay: one outbound WebSocket to our own DeviceRoom DO, serving
+/// The host end of the relay: one outbound WebSocket to the configured relay, serving
 /// `service` to every client conn through virtual string-frame connections. Immortal
 /// supervisor: quiet while signed out, reconnects with backoff when the socket drops
 /// (including the 4409 "superseded by new host connection" close — the newest host wins,
-/// so the superseded process backs off and retries, mirroring the original app's DeviceRoomHost).
+/// so the superseded process backs off and retries).
 pub struct HostRelay {
     task: tokio::task::JoinHandle<()>,
 }

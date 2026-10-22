@@ -1131,7 +1131,7 @@ pub struct UiSettings {
     pub terminal_height: f32,
     /// Legacy — see [`Self::right_pane_open`].
     pub terminal_open: bool,
-    /// Customizable shortcut combos (feature-inventory §1.4).
+    /// Customizable shortcut combos (ARCHITECTURE.md).
     pub keymap: KeymapConfig,
     /// macOS viewer-side Appshot capture. Device-local because the shortcut
     /// and TCC permissions belong to this desktop.

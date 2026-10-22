@@ -1,14 +1,11 @@
-//! rcode-sync — the edge room clients (registry rows + chat2 row protocol over
-//! WebSocket against the TS edge) and the local `DocsStore` (SQLite snapshots +
-//! processed-command ledger).
+//! rcode-sync — local SQLite persistence and optional transport clients.
 //!
-//! - [`ChatClient`]: joins a ChatRoom DO (`wss://…/chat2/{chatId}/ws?token=`),
-//!   catches up via checkpoint + row backfill, pushes local loro updates as
-//!   rows, and reconnects with exponential backoff.
-//! - [`RegistryClient`]: the per-profile workspace registry room (sidebar rows,
-//!   presence).
-//! - [`DocsStore`]: snapshot persistence (the doc IS the outbox — commands + user entries
-//!   flush immediately) and the processed-command ledger with mark-BEFORE-execute semantics.
+//! - [`ChatClient`] exchanges chat2 checkpoint/row frames over WebSocket.
+//! - [`RegistryClient`] exchanges workspace registry rows and presence.
+//! - [`DocsStore`] persists snapshots, pending work and processed commands.
+//!
+//! The clients require a separately configured protocol endpoint. The mock-server
+//! feature supplies local test infrastructure.
 
 pub mod budget;
 pub mod chat_client;

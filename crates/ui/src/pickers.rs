@@ -1,4 +1,4 @@
-//! Composer pickers (feature-inventory §1.7): RepoPicker (recents + search +
+//! Composer pickers (ARCHITECTURE.md): RepoPicker (recents + search +
 //! in-app folder browser + clone/create), BranchPicker (search + isolated-
 //! worktree toggle), HarnessModelPicker (harness rail + model list, harness
 //! locked once the chat exists), TraitsPicker (reasoning ladder + advertised
@@ -1170,7 +1170,7 @@ impl Pickers {
         &self.config
     }
 
-    /// Harness is locked once the chat exists (feature-inventory §1.7).
+    /// Harness is locked once the chat exists (ARCHITECTURE.md).
     fn harness_locked(&self, cx: &App) -> bool {
         let state = self.state.read(cx);
         self.title.is_none() && state.selected_chat.is_some() && !state.side_chat_harness_editable()

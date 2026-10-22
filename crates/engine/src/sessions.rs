@@ -1,7 +1,7 @@
 //! SessionsEngine — per-chat agent runs: dispatch, steering, interrupts, input bridging,
 //! journal + broadcast fan-out, and 120ms coalesced doc streaming.
 //!
-//! Pragmatic port of the original app's `sessions.ts` (spec: feature-inventory §3.2):
+//! Pragmatic port of the original app's `sessions.ts` (spec: ARCHITECTURE.md):
 //! - every `AgentEvent` is (a) appended to the on-disk run journal, (b) broadcast to
 //!   in-process subscribers, (c) folded via `fold_event_into_parts` and diffed into the
 //!   chat's `SessionDoc` through `SegmentWriter` on a coalesced `STREAM_COMMIT_MS` timer;
@@ -2616,7 +2616,7 @@ fn render_parts(parts: &[MessagePart]) -> Vec<MessagePart> {
                 // Output summaries, diff stats, and sidecar refs are
                 // deliberately kept: unlike raw tool inputs they are the
                 // transcript's record of what happened, and the strip already
-                // bounded them (docs/chat2-sync.md A1).
+                // bounded them (docs/chat2-sync.md).
                 output: output.clone(),
                 diff: diff.clone(),
                 output_ref: output_ref.clone(),
@@ -3416,7 +3416,7 @@ async fn drive_run(
                     let sink = subagents.remove(parent_tool_use_id).expect("checked");
                     inner.set_running_subagents(&chat_id, subagents.len());
                     let doc_id = sink.doc_id.clone();
-                    // FREEZE: the finished transcript uploads as a static R2
+                    // FREEZE: the finished transcript uploads as a static endpoint
                     // blob (`blob/{chatId}/{subDocId}`) so viewers of
                     // finished subagents never wake the doc's room; dropping
                     // the sink unpins the doc for the LRU and the room
@@ -3761,7 +3761,7 @@ async fn drive_run(
         let skip_fold = matches!(&event, AgentEvent::SessionStarted { .. }) && !folded.is_empty();
         if !skip_fold {
             fold_event_into_parts(&mut folded, &event);
-            // R2 sidecar PARKED (2026-08-10, product call): the fold's
+            // Tool sidecar uploads are disabled: the fold's
             // summary/stats ARE the doc's whole record — no refs stamped, no
             // uploads. Full outputs survive only in the host's local run
             // journal. To reintroduce: `rcode_doc::sidecar_payload(&event)`

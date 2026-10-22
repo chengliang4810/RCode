@@ -10,7 +10,7 @@ publish.workspace = true
 regex = "1"
 rcode-proto.workspace = true
 # The native driver (`src/native.rs`) is the adapter over this crate's ReAct
-# loop; see docs/design/native-agent-rewrite.md §2.
+# loop; see ARCHITECTURE.md section 5.
 rcode-agent.workspace = true
 rcode-model.workspace = true
 # MCP tools are registered as ordinary tools this driver calls.
