@@ -8,6 +8,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:uuid/uuid.dart';
 
 import 'rpc_client.dart';
+import 'session_cache.dart';
 import 'workspace_controller.dart' show WorkspaceController, jsonMap, jsonMaps;
 
 class UploadAttachment {
@@ -24,6 +25,8 @@ class UploadAttachment {
 /// An authoritative transcript plus device-local, id-stable pending echoes.
 class SessionController extends ChangeNotifier {
   SessionController(this.workspace, this.chatId) {
+    _cacheScope = workspace.cacheScope;
+    _cache = workspace.sessionCache.open(_cacheScope, chatId);
     workspace.addListener(_workspaceChanged);
     _start();
   }
@@ -37,6 +40,9 @@ class SessionController extends ChangeNotifier {
   Object? error;
   bool hydrated = false;
   bool _authoritativeTranscript = false;
+  bool _authoritativeQueue = false, _authoritativeState = false;
+  bool _localPendingChanged = false;
+  int _metadataRevision = 0;
   bool sending = false;
   double? transferProgress;
   bool disposed = false;
@@ -48,6 +54,11 @@ class SessionController extends ChangeNotifier {
   final Map<String, JsonMap> _queueAttempts = {};
   final Map<String, Completer<JsonMap>> _commandWaiters = {};
   Timer? _cacheDebounce;
+  late final String _cacheScope;
+  late final SessionCacheEntry _cache;
+  bool _cacheDirty = false;
+  String? _legacyCacheKey;
+  Future<void> _cacheWrite = Future.value();
 
   bool get connected => workspace.connected;
   JsonMap? get chat => workspace.chat(chatId);
@@ -80,8 +91,10 @@ class SessionController extends ChangeNotifier {
       workspace.rpc.watch('WatchQueue', {'chatId': chatId}).listen((value) {
         if (disposed || generation != _generation) return;
         queue = jsonMaps(jsonMap(value)['items']);
+        _authoritativeQueue = true;
         _adoptEchoes();
         notifyListeners();
+        _saveCache();
       }, onError: _streamError),
     );
     _subscriptions.add(
@@ -90,6 +103,8 @@ class SessionController extends ChangeNotifier {
       ) {
         if (disposed || generation != _generation) return;
         final state = jsonMap(value);
+        _authoritativeState = true;
+        ++_metadataRevision;
         commands = jsonMaps(state['commands']);
         for (final command in commands) {
           if (command['status'] != 'pending') {
@@ -104,6 +119,7 @@ class SessionController extends ChangeNotifier {
         _restoreCommandEchoes();
         _adoptEchoes();
         notifyListeners();
+        _saveCache();
       }, onError: _streamError),
     );
   }
@@ -117,11 +133,13 @@ class SessionController extends ChangeNotifier {
             final update = jsonMap(value);
             applyTranscriptUpdate(update);
             if (update.containsKey('contextUsage')) {
+              ++_metadataRevision;
               contextUsage = update['contextUsage'] == null
                   ? null
                   : jsonMap(update['contextUsage']);
             }
             if (update.containsKey('goal')) {
+              ++_metadataRevision;
               goal = update['goal'] == null ? null : jsonMap(update['goal']);
             }
             final firstSnapshot = !_authoritativeTranscript;
@@ -201,10 +219,10 @@ class SessionController extends ChangeNotifier {
     _queueAttempts.removeWhere((id, _) => adopted.contains(id));
   }
 
-  void _restoreCommandEchoes() {
+  void _restoreCommandEchoes({bool cachedTranscript = false}) {
     // A newly opened view needs the transcript reset before it can decide
     // which accepted commands are still waiting to become user messages.
-    if (!_authoritativeTranscript) return;
+    if (!_authoritativeTranscript && !cachedTranscript) return;
     final adopted = messages.map((entry) => entry['id']).toSet();
     final attempts = <String, List<JsonMap>>{};
     for (final command in commands) {
@@ -301,6 +319,7 @@ class SessionController extends ChangeNotifier {
         };
         _queueAttempts[messageId] = request;
         _echoes[messageId] = _pendingEcho(messageId, body, paths, attachments);
+        _saveCache();
         notifyListeners();
         try {
           await call('QueueMessage', request);
@@ -338,6 +357,7 @@ class SessionController extends ChangeNotifier {
       final entry = _command(payload);
       _echoes[messageId] = _pendingEcho(messageId, body, paths, attachments);
       _attempts[messageId] = entry;
+      _saveCache();
       notifyListeners();
       try {
         await call('RelayCommand', {'entry': entry});
@@ -362,6 +382,7 @@ class SessionController extends ChangeNotifier {
         sending = false;
         transferProgress = null;
         notifyListeners();
+        _saveCache();
       }
     }
   }
@@ -371,24 +392,27 @@ class SessionController extends ChangeNotifier {
     String text,
     List<String> paths,
     List<UploadAttachment> attachments,
-  ) => {
-    'id': id,
-    'role': 'user',
-    'parts': [
-      {'id': 'pending-text', 'kind': 'text', 'text': text},
-      for (var i = 0; i < paths.length; i++)
-        {
-          'id': 'pending-image-$i',
-          'kind': 'image',
-          'path': paths[i],
-          'name': attachments[i].name,
-          'mimeType': attachments[i].mimeType,
-        },
-    ],
-    'createdAt': DateTime.now().millisecondsSinceEpoch,
-    'deviceId': workspace.clientDeviceId,
-    'deliveryStatus': 'sending',
-  };
+  ) {
+    _localPendingChanged = true;
+    return {
+      'id': id,
+      'role': 'user',
+      'parts': [
+        {'id': 'pending-text', 'kind': 'text', 'text': text},
+        for (var i = 0; i < paths.length; i++)
+          {
+            'id': 'pending-image-$i',
+            'kind': 'image',
+            'path': paths[i],
+            'name': attachments[i].name,
+            'mimeType': attachments[i].mimeType,
+          },
+      ],
+      'createdAt': DateTime.now().millisecondsSinceEpoch,
+      'deviceId': workspace.clientDeviceId,
+      'deliveryStatus': 'sending',
+    };
+  }
 
   JsonMap _command(JsonMap payload) => {
     'id': const Uuid().v4(),
@@ -402,6 +426,7 @@ class SessionController extends ChangeNotifier {
   };
 
   Future<void> retryPending(String messageId) async {
+    _localPendingChanged = true;
     final queued = _queueAttempts[messageId];
     if (queued != null) {
       error = null;
@@ -415,7 +440,10 @@ class SessionController extends ChangeNotifier {
         _echoes[messageId]?['deliveryStatus'] = 'unconfirmed';
         if (_queueAttempts.containsKey(messageId)) rethrow;
       } finally {
-        if (!disposed) notifyListeners();
+        if (!disposed) {
+          notifyListeners();
+          _saveCache();
+        }
       }
       return;
     }
@@ -446,7 +474,10 @@ class SessionController extends ChangeNotifier {
       _restoreCommandEchoes();
       rethrow;
     } finally {
-      if (!disposed) notifyListeners();
+      if (!disposed) {
+        notifyListeners();
+        _saveCache();
+      }
     }
   }
 
@@ -616,43 +647,115 @@ class SessionController extends ChangeNotifier {
 
   Future<void> _loadCache(int generation) async {
     try {
-      final preferences = await SharedPreferences.getInstance();
-      if (disposed || generation != _generation || hydrated) return;
-      final raw = preferences.getString(
-        'session.${workspace.cacheScope}.$chatId',
-      );
-      if (raw == null) return;
-      messages = jsonMaps(jsonDecode(raw));
-      hydrated = true;
+      var saved = await _cache.read();
+      if (disposed || generation != _generation) return;
+      if (saved == null) {
+        final preferences = await SharedPreferences.getInstance();
+        if (disposed || generation != _generation) return;
+        final key = 'session.$_cacheScope.$chatId';
+        final raw = preferences.getString(key);
+        if (raw != null) {
+          final legacy = jsonDecode(raw);
+          if (legacy is List) {
+            saved = {'messages': legacy};
+            _legacyCacheKey = key;
+          }
+        }
+      }
+      if (saved == null || disposed || generation != _generation) return;
+      // Each independently delivered server snapshot wins its own field.
+      // A delayed disk read cannot replace a fresh transcript, queue or ledger.
+      if (!_authoritativeTranscript) {
+        messages = jsonMaps(saved['messages']);
+        hydrated = true;
+      }
+      if (!_authoritativeQueue) queue = jsonMaps(saved['queue']);
+      if (!_authoritativeState) commands = jsonMaps(saved['commands']);
+      if (_metadataRevision == 0) {
+        contextUsage = saved['contextUsage'] == null
+            ? null
+            : jsonMap(saved['contextUsage']);
+        goal = saved['goal'] == null ? null : jsonMap(saved['goal']);
+      }
+      if (!_localPendingChanged) {
+        for (final echo in jsonMaps(saved['pending'])) {
+          if (echo['deviceId'] == workspace.clientDeviceId &&
+              echo['id'] is String) {
+            // A process restart ends the original RPC wait. Its result remains
+            // unknown until a server snapshot adopts it or the user retries.
+            if (echo['deliveryStatus'] == 'sending') {
+              echo['deliveryStatus'] = 'unconfirmed';
+            }
+            _echoes.putIfAbsent(echo['id'] as String, () => echo);
+          }
+        }
+        for (final attempt in jsonMaps(saved['attempts'])) {
+          final id = jsonMap(attempt['payload'])['messageId'];
+          if (id is String && attempt['issuedBy'] == workspace.clientDeviceId) {
+            _attempts.putIfAbsent(id, () => attempt);
+          }
+        }
+        for (final attempt in jsonMaps(saved['queueAttempts'])) {
+          final id = attempt['id'];
+          if (id is String && attempt['issuedBy'] == workspace.clientDeviceId) {
+            _queueAttempts.putIfAbsent(id, () => attempt);
+          }
+        }
+      }
+      _restoreCommandEchoes(cachedTranscript: _legacyCacheKey == null);
+      _adoptEchoes();
       notifyListeners();
+      if (_legacyCacheKey != null) _saveCache();
     } catch (_) {
       /* The network reset remains authoritative. */
     }
   }
 
   void _saveCache() {
-    if (!workspace.cacheEnabled) return;
+    if (!workspace.cacheEnabled || disposed) return;
+    _cacheDirty = true;
     _cacheDebounce?.cancel();
-    final scope = workspace.cacheScope;
-    // Bound local caches without changing the authoritative scrollback stream.
-    final encoded = jsonEncode(
-      messages.skip(math.max(0, messages.length - 200)).toList(),
-    );
-    _cacheDebounce = Timer(const Duration(milliseconds: 500), () async {
-      try {
-        final preferences = await SharedPreferences.getInstance();
-        if (!disposed) {
-          await preferences.setString('session.$scope.$chatId', encoded);
-        }
-      } catch (_) {
-        /* A failed optional cache does not stop a live session. */
-      }
+    _cacheDebounce = Timer(const Duration(milliseconds: 500), () {
+      unawaited(flushCache().catchError((Object _) {}));
     });
+  }
+
+  /// Backgrounding/closing a view can flush without replaying any server work.
+  Future<void> flushCache() {
+    _cacheDebounce?.cancel();
+    if (!workspace.cacheEnabled || disposed || !_cacheDirty) return _cacheWrite;
+    _cacheDirty = false;
+    // No full-history encoding on the token path. FileSessionCache encodes
+    // this state in an isolate, after the debounce, in write invocation order.
+    final state = <String, dynamic>{
+      'messages': messages,
+      'queue': queue,
+      'commands': commands,
+      'contextUsage': contextUsage,
+      'goal': goal,
+      'pending': _echoes.values.toList(),
+      'attempts': _attempts.values.toList(),
+      'queueAttempts': _queueAttempts.values.toList(),
+    };
+    _cacheWrite = _cache
+        .write(state)
+        .then((_) async {
+          if (_legacyCacheKey case final key?) {
+            final preferences = await SharedPreferences.getInstance();
+            await preferences.remove(key);
+            _legacyCacheKey = null;
+          }
+        })
+        .catchError((Object _) {
+          if (!disposed) _cacheDirty = true;
+        });
+    return _cacheWrite;
   }
 
   @override
   void dispose() {
     if (disposed) return;
+    unawaited(flushCache());
     disposed = true;
     ++_generation;
     workspace.removeListener(_workspaceChanged);

@@ -9,6 +9,7 @@ import 'package:uuid/uuid.dart';
 
 import 'rpc_client.dart';
 import 'session_controller.dart';
+import 'session_cache.dart';
 
 export 'rpc_client.dart'
     show
@@ -19,6 +20,8 @@ export 'rpc_client.dart'
         normalizeServerUrl,
         validApiKey;
 export 'session_controller.dart' show SessionController, UploadAttachment;
+export 'session_cache.dart'
+    show SessionCache, SessionCacheEntry, FileSessionCache;
 
 abstract interface class ConnectionStore {
   Future<String?> read(String key);
@@ -41,15 +44,18 @@ class WorkspaceController extends ChangeNotifier {
   WorkspaceController({
     RpcClient? rpc,
     ConnectionStore? store,
+    SessionCache? sessionCache,
     this.cacheEnabled = true,
   }) : rpc = rpc ?? RpcClient(),
-       store = store ?? const SecureConnectionStore() {
+       store = store ?? const SecureConnectionStore(),
+       sessionCache = sessionCache ?? FileSessionCache() {
     this.rpc.addListener(_connectionChanged);
   }
 
   final RpcClient rpc;
   final ConnectionStore store;
   final bool cacheEnabled;
+  final SessionCache sessionCache;
   List<JsonMap> devices = [];
   List<JsonMap> spaces = [];
   List<JsonMap> chats = [];
@@ -68,6 +74,7 @@ class WorkspaceController extends ChangeNotifier {
   final Map<String, int> _sessionViews = {};
   Timer? _cacheDebounce;
   Future<void> _credentialWrites = Future.value();
+  Future<void> _workspaceCacheWrites = Future.value();
 
   RpcConnection get connection => rpc.connection;
   bool get connected => rpc.connected;
@@ -227,6 +234,13 @@ class WorkspaceController extends ChangeNotifier {
     final generation = ++_generation;
     _cacheDebounce?.cancel();
     final previous = host;
+    final previousScope = cacheScope;
+    final cleanup = forget && previous != null && cacheEnabled
+        ? Future.wait([
+            sessionCache.clearHost(previousScope),
+            _clearPreferenceCache(previousScope),
+          ]).catchError((Object _) => <void>[])
+        : Future<void>.value();
     host = null;
     _paired = false;
     loading = false;
@@ -241,6 +255,7 @@ class WorkspaceController extends ChangeNotifier {
     await rpc.disconnect();
     if (_disposed || generation != _generation) return;
     _clearWorkspace();
+    await cleanup;
     if (forget) {
       await _persistCredentials(generation, previous, null);
     }
@@ -341,6 +356,35 @@ class WorkspaceController extends ChangeNotifier {
   Future<void> markSeen(String id) =>
       mutate({'op': 'markChatSeen', 'chatId': id});
 
+  Future<void> flushCaches() async {
+    _cacheDebounce?.cancel();
+    if (cacheEnabled && !_disposed && host != null) {
+      _enqueueWorkspaceCache(_generation, cacheScope);
+    }
+    await Future.wait(
+      _sessionControllers.values.map((session) => session.flushCache()),
+    );
+    await _workspaceCacheWrites;
+  }
+
+  Future<void> _clearPreferenceCache(String scope) {
+    final task = _workspaceCacheWrites.then((_) async {
+      final preferences = await SharedPreferences.getInstance();
+      final keys = preferences
+          .getKeys()
+          .where(
+            (key) =>
+                key == 'workspace.$scope' || key.startsWith('session.$scope.'),
+          )
+          .toList();
+      for (final key in keys) {
+        await preferences.remove(key);
+      }
+    });
+    _workspaceCacheWrites = task.catchError((Object _) {});
+    return task;
+  }
+
   Future<void> _cancelSubscriptions() async {
     final subscriptions = _subscriptions.toList();
     _subscriptions.clear();
@@ -383,22 +427,26 @@ class WorkspaceController extends ChangeNotifier {
     _cacheDebounce?.cancel();
     final generation = _generation;
     final scope = cacheScope;
-    final content = jsonEncode({
-      'devices': devices,
-      'spaces': spaces,
-      'chats': chats,
-      'sessions': sessions,
-      'sidebarPreferences': sidebarPreferences,
+    _cacheDebounce = Timer(const Duration(milliseconds: 400), () {
+      _enqueueWorkspaceCache(generation, scope);
     });
-    _cacheDebounce = Timer(const Duration(milliseconds: 400), () async {
-      try {
-        final preferences = await SharedPreferences.getInstance();
-        if (_disposed || generation != _generation) return;
-        await preferences.setString('workspace.$scope', content);
-      } catch (_) {
-        /* A failed optional cache does not stop a live session. */
-      }
+  }
+
+  void _enqueueWorkspaceCache(int generation, String scope) {
+    final task = _workspaceCacheWrites.then((_) async {
+      if (_disposed || generation != _generation) return;
+      final preferences = await SharedPreferences.getInstance();
+      if (_disposed || generation != _generation) return;
+      final content = jsonEncode({
+        'devices': devices,
+        'spaces': spaces,
+        'chats': chats,
+        'sessions': sessions,
+        'sidebarPreferences': sidebarPreferences,
+      });
+      await preferences.setString('workspace.$scope', content);
     });
+    _workspaceCacheWrites = task.catchError((Object _) {});
   }
 
   @override
