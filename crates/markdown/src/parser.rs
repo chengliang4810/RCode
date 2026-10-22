@@ -1104,7 +1104,7 @@ fn rewrite_absolute_destinations(
     // the parse.
     let absolute = source.match_indices("](").any(|(at, _)| {
         let rest = source[at + 2..].trim_start_matches(' ');
-        (rest.starts_with('/') || rest.starts_with("file://")) && !skip.off(to_source(at))
+        absolute_destination_start(rest) && !skip.off(to_source(at))
     });
     if !absolute {
         return None;
@@ -1175,15 +1175,44 @@ fn rewrite_absolute_destinations(
         };
         free = close + 1;
         let destination = source[start..close].trim_end_matches(' ');
-        if absolute_destination_with_spaces(destination) && !skip.off(to_source(at)) {
+        if destination_needs_rewrite(destination) && !skip.off(to_source(at)) {
             done.push((to_source(at), to_source(close) + 1));
             let out = rewritten.get_or_insert_with(|| String::with_capacity(source.len() + 8));
             out.push_str(&source[copied..start]);
-            insertions.shift(out.len(), -1);
-            out.push('<');
-            out.push_str(destination);
-            insertions.shift(out.len(), -1);
-            out.push('>');
+            // An author-bracketed destination keeps its brackets; only the
+            // path inside them changes.
+            let bracketed = destination.starts_with('<') && destination.ends_with('>');
+            let inner = if bracketed {
+                &destination[1..destination.len() - 1]
+            } else {
+                destination
+            };
+            // A drive destination spells its separators with backslashes, and
+            // a Markdown destination reads those as escapes: `.config` behind
+            // one loses its dot, `#1` its hash. The `/` spelling means the
+            // same path to the host and is the same length, so every offset
+            // below stays put.
+            let text: Cow<'_, str> = if windows_drive(inner) && inner.contains('\\') {
+                Cow::Owned(inner.replace('\\', "/"))
+            } else {
+                Cow::Borrowed(inner)
+            };
+            if !bracketed && text.contains(' ') {
+                // A literal space ends a destination: bracket it.
+                insertions.shift(out.len(), -1);
+                out.push('<');
+                out.push_str(&text);
+                insertions.shift(out.len(), -1);
+                out.push('>');
+            } else {
+                if bracketed {
+                    out.push('<');
+                }
+                out.push_str(&text);
+                if bracketed {
+                    out.push('>');
+                }
+            }
             copied = start + destination.len();
         }
     }
@@ -1215,14 +1244,57 @@ fn escapes(bytes: &[u8]) -> Vec<bool> {
     escaped
 }
 
-/// Whether a destination needs the angle-bracket rewrite: an absolute path
-/// with at least one literal space that stays inside the absolute-path
-/// envelope the link classifier accepts. `file://` destinations are exempt
-/// from the file-name dot rule, exactly as they are when classified.
-fn absolute_destination_with_spaces(destination: &str) -> bool {
-    if !destination.contains(' ') {
-        return false;
+/// Whether a destination opens like an absolute path: a POSIX root, a
+/// `file://` URL, or a Windows drive. Cheap enough for the pre-pass to scan
+/// every `](` before deciding it has nothing to do.
+fn absolute_destination_start(destination: &str) -> bool {
+    // An author-bracketed destination starts one character in.
+    let destination = destination.strip_prefix('<').unwrap_or(destination);
+    destination.starts_with('/') || destination.starts_with("file://") || windows_drive(destination)
+}
+
+/// A drive letter, a colon and a separator: absolute on a Windows host. The
+/// drive-relative `C:x` spelling names a location against that drive's own
+/// working directory, so it is not one.
+fn windows_drive(destination: &str) -> bool {
+    let bytes = destination.as_bytes();
+    bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && matches!(bytes[2], b'\\' | b'/')
+}
+
+/// Whether a destination needs the pre-pass: an absolute path Markdown would
+/// otherwise misread. A literal space ends a destination, and a drive path's
+/// backslashes are escape characters inside one.
+fn destination_needs_rewrite(destination: &str) -> bool {
+    if let Some(inner) = destination
+        .strip_prefix('<')
+        .and_then(|rest| rest.strip_suffix('>'))
+    {
+        // Already bracketed, so its spaces survive: only the escapes its
+        // backslashes spell are left to fix.
+        return windows_drive(inner) && inner.contains('\\') && absolute_destination(inner);
     }
+    if windows_drive(destination) {
+        return absolute_destination(destination)
+            && (destination.contains('\\') || destination.contains(' '));
+    }
+    destination.contains(' ') && absolute_destination(destination)
+}
+
+/// Whether a destination is an absolute path inside the envelope the link
+/// classifier accepts. `file://` destinations are exempt from the file-name
+/// dot rule, exactly as they are when classified, and a drive path separates
+/// with the host's own characters.
+fn absolute_destination(destination: &str) -> bool {
+    // An author-bracketed destination is judged on the path inside it.
+    let destination = destination
+        .strip_prefix('<')
+        .and_then(|rest| rest.strip_suffix('>'))
+        .unwrap_or(destination);
+    let file_url = destination.starts_with("file://");
+    let windows = !file_url && windows_drive(destination);
     let path = match destination.strip_prefix("file://") {
         Some(rest) => {
             // Only an empty host keeps this a file path; `file://localhost`
@@ -1233,22 +1305,23 @@ fn absolute_destination_with_spaces(destination: &str) -> bool {
             }
             &rest[host_end..]
         }
-        None if destination.starts_with('/') => destination,
+        None if windows || destination.starts_with('/') => destination,
         None => return false,
     };
     if path.len() <= 1
         || path.starts_with("//")
-        || path.ends_with('/')
-        || destination.contains(['\\', '?'])
+        || path.ends_with(['/', '\\'])
+        || destination.contains('?')
         || destination.chars().any(char::is_control)
-        || destination
-            .split('/')
+        || (!windows && destination.contains('\\'))
+        || path
+            .split(['/', '\\'])
             .any(|part| matches!(part, "." | ".."))
     {
         return false;
     }
-    let file_name = path.rsplit('/').next().unwrap_or(path);
-    destination.starts_with("file://") || file_name.contains('.')
+    let file_name = path.rsplit(['/', '\\']).next().unwrap_or(path);
+    file_url || file_name.contains('.')
 }
 
 fn skip_destination_spaces(bytes: &[u8], at: usize) -> usize {
@@ -2952,6 +3025,70 @@ mod destination_rewrite_tests {
 
     fn text(runs: &[InlineRun]) -> String {
         runs.iter().map(|run| run.text.as_str()).collect()
+    }
+
+    /// A Windows chat writes the absolute path its own shell prints. Two
+    /// things in a Markdown destination would otherwise corrupt it: the
+    /// backslash is an escape character, and a literal space ends the
+    /// destination. Both are rewritten to the `/` spelling the link grammar
+    /// reads, which is the same path to the host.
+    #[test]
+    fn drive_destinations_keep_their_path() {
+        for (source, destination) in [
+            // The separator itself is harmless; `.config` behind one is not.
+            (r"[a](D:\dir\a.md)", "D:/dir/a.md"),
+            (r"[a](D:\dir\.config\a.md)", "D:/dir/.config/a.md"),
+            (r"[a](D:\dir\#1\a.md)", "D:/dir/#1/a.md"),
+            (r"[a](D:\a-b\c.md)", "D:/a-b/c.md"),
+            // A literal space: the destination is bracketed to survive it.
+            (r"[a](D:\My Docs\a.md)", "D:/My Docs/a.md"),
+            // Already bracketed by its author: only the escapes are fixed.
+            (r"[a](<D:\My Docs\.config\a.md>)", "D:/My Docs/.config/a.md"),
+            // The anchor rides along; `/` spelling stays as written.
+            (r"[a](D:\dir\a.md:12)", "D:/dir/a.md:12"),
+            (r"[a](D:\dir\a.md#L12)", "D:/dir/a.md#L12"),
+            ("[a](D:/dir/a.md)", "D:/dir/a.md"),
+        ] {
+            let runs = paragraph(source);
+            assert_eq!(link_of(&runs), Some(destination), "{source}");
+            assert_eq!(text(&runs), "a", "{source}");
+        }
+        // A destination outside the envelope the link grammar accepts is left
+        // exactly as written: the pre-pass has nothing to fix, and the
+        // renderer keeps it plain text.
+        for source in [
+            r"[a](D:\dir\Makefile)",
+            r"[a](D:\dir\..\a.md)",
+            r"[a](D:\a?b.md)",
+            r"[a](D:dir\a.md)",
+            // `file://` with a host is an ordinary URL, not a file.
+            r"[a](<file://localhost/D:\a.md>)",
+        ] {
+            assert!(
+                rewrite_absolute_destinations(source, options(), &Skip::default(), |at| at)
+                    .is_none(),
+                "{source}"
+            );
+        }
+    }
+
+    /// The pre-pass must leave its own output alone: a second pass over a
+    /// rewritten drive destination finds nothing to do.
+    #[test]
+    fn drive_rewrite_is_idempotent() {
+        for source in [
+            r"see [a](D:\dir\.config\a.md) and [b](D:\My Docs\b.md)",
+            r"[a](<D:\My Docs\.config\b.md>)",
+        ] {
+            let once = rewrite_absolute_destinations(source, options(), &Skip::default(), |at| at)
+                .expect("rewrite");
+            assert!(
+                rewrite_absolute_destinations(&once.0, options(), &Skip::default(), |at| at)
+                    .is_none(),
+                "second pass must find nothing to rewrite: {}",
+                once.0
+            );
+        }
     }
 
     #[test]
