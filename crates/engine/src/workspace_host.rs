@@ -303,6 +303,9 @@ impl WorkspaceHost {
         // write. Otherwise this re-seeds once if local-only writes exist that
         // no server has seen. The boot save below persists the result.
         doc.set_local_only(config.edge.is_none());
+        // Local profiles have no server snapshot to unlock sidebar edits.
+        // Their registry is already authoritative, including an empty list.
+        doc.reconcile_sidebar_pins(config.edge.is_none())?;
         // Destructive-break hygiene: the pre-spaces row stays unreachable.
         store.delete_snapshot(LEGACY_WORKSPACE_DOC_ID).ok();
 
@@ -1350,7 +1353,7 @@ impl WorkspaceHostInner {
             .is_some_and(|room| room.stats().synced);
         let snapshot = {
             let mut doc = lock(&self.reg);
-            match doc.reconcile_sidebar_pins(registry_synced) {
+            match doc.reconcile_sidebar_pins(self.config.edge.is_none() || registry_synced) {
                 Ok(true) => {
                     // Persist and transmit cleanup just like a user mutation.
                     self.bump_changed();
@@ -1944,6 +1947,113 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn local_sidebar_pins_are_editable_on_first_boot_and_survive_restart() {
+        use super::*;
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(DocsStore::open(dir.path()).unwrap());
+        let config = WorkspaceHostConfig {
+            device_id: "test-device".into(),
+            device_name: "Test device".into(),
+            platform: "windows".into(),
+            org_id: "test-org".into(),
+            user_id: "test-user".into(),
+            edge: None,
+        };
+        let host = WorkspaceHost::open(store.clone(), config.clone()).unwrap();
+        let initial = host.watch_sidebar_preferences().borrow().clone();
+        assert!(initial.can_edit(), "the first UI watch must allow pinning");
+        assert!(initial.initialized);
+        assert!(!initial.synced, "local readiness needs no server sync");
+        assert!(initial.pinned_session_ids.is_empty());
+        let saved = store.load_snapshot(REGISTRY_DOC_ID).unwrap().unwrap();
+        assert!(
+            RegistryDoc::from_bytes(&saved, "test-device")
+                .unwrap()
+                .sidebar_preferences()
+                .is_some(),
+            "boot must persist readiness even before the first pin"
+        );
+
+        host.create_chat("pinned", None, Some("test-device"), None, None)
+            .unwrap();
+        host.change_sidebar_pin(&rcode_proto::SidebarPinChange::Pin {
+            session_id: "pinned".into(),
+            after: None,
+            before: None,
+        })
+        .unwrap();
+        assert_eq!(
+            host.sidebar_preferences_snapshot().pinned_session_ids,
+            ["pinned"]
+        );
+        host.shutdown();
+        drop(host);
+
+        let host = WorkspaceHost::open(store.clone(), config.clone()).unwrap();
+        assert_eq!(
+            host.watch_sidebar_preferences().borrow().pinned_session_ids,
+            ["pinned"]
+        );
+        host.change_sidebar_pin(&rcode_proto::SidebarPinChange::Unpin {
+            session_id: "pinned".into(),
+        })
+        .unwrap();
+        host.shutdown();
+        drop(host);
+
+        let host = WorkspaceHost::open(store, config).unwrap();
+        assert!(host.sidebar_preferences_snapshot().can_edit());
+        assert!(
+            host.sidebar_preferences_snapshot()
+                .pinned_session_ids
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn unsynced_sidebar_pins_wait_for_server_unless_cached() {
+        use super::*;
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(DocsStore::open(dir.path()).unwrap());
+        let config = WorkspaceHostConfig {
+            device_id: "test-device".into(),
+            device_name: "Test device".into(),
+            platform: "windows".into(),
+            org_id: "test-org".into(),
+            user_id: "test-user".into(),
+            edge: Some(EdgeConfig::with_static_token("http://127.0.0.1:1", "test")),
+        };
+        let host = WorkspaceHost::open(store.clone(), config.clone()).unwrap();
+        host.inner.publish();
+        assert!(!host.watch_sidebar_preferences().borrow().can_edit());
+        assert!(
+            host.change_sidebar_pin(&rcode_proto::SidebarPinChange::Unpin {
+                session_id: "absent".into(),
+            })
+            .is_err()
+        );
+        assert!(!host.sidebar_preferences_snapshot().initialized);
+        host.shutdown();
+        drop(host);
+
+        // A previously initialized cache remains editable without the server.
+        let mut doc = RegistryDoc::new("test-device");
+        doc.reconcile_sidebar_pins(true).unwrap();
+        store
+            .save_snapshot(REGISTRY_DOC_ID, &doc.to_bytes().unwrap())
+            .unwrap();
+        let host = WorkspaceHost::open(store, config).unwrap();
+        assert!(host.watch_sidebar_preferences().borrow().can_edit());
+        assert!(!host.sidebar_preferences_snapshot().synced);
+        host.change_sidebar_pin(&rcode_proto::SidebarPinChange::Unpin {
+            session_id: "absent".into(),
+        })
+        .unwrap();
+    }
+
+    #[tokio::test]
     async fn sidebar_preferences_watch_preserves_explicit_empty_state() {
         use super::*;
 
@@ -1961,14 +2071,8 @@ mod tests {
         )
         .unwrap();
         let mut preferences = host.watch_sidebar_preferences();
-        assert!(!preferences.borrow().initialized);
-
-        host.change_sidebar_pin(&rcode_proto::SidebarPinChange::Unpin {
-            session_id: "absent".into(),
-        })
-        .unwrap();
-        host.inner.publish();
-        assert!(preferences.has_changed().unwrap());
+        assert!(preferences.borrow().can_edit());
+        assert!(!preferences.has_changed().unwrap());
         let state = preferences.borrow_and_update();
         assert!(state.initialized);
         assert!(!state.synced);
