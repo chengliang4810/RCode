@@ -58,10 +58,8 @@ pub async fn stage(
     directory: &Path,
 ) -> anyhow::Result<PathBuf> {
     ensure!(
-        manifest
-            .version
-            .split('.')
-            .all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit())),
+        manifest.version.trim() == manifest.version
+            && super::parse_version(&manifest.version).is_some(),
         "invalid Windows release version"
     );
     let file = artifact(&manifest.version);
@@ -468,6 +466,57 @@ mod tests {
                 .contains("checksum")
         );
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+
+    #[tokio::test]
+    async fn valid_beta_versions_reach_checksum_validation_before_download() {
+        for version in ["0.0.1-beta", "1.2.3-beta.2+build.17", "1.2.3", "0.1.0.1"] {
+            let directory = tempfile::tempdir().unwrap();
+            let manifest = super::super::Manifest {
+                version: version.to_owned(),
+                ..Default::default()
+            };
+            let error = stage("http://127.0.0.1:1", &manifest, directory.path())
+                .await
+                .unwrap_err();
+            assert!(
+                error.to_string().contains("SHA-256"),
+                "{version} was rejected before checksum validation: {error}"
+            );
+            assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn unsafe_or_invalid_versions_are_rejected_before_staging() {
+        for version in [
+            "../1.2.3",
+            r"1.2.3\escape",
+            "1.2.3:stream",
+            "1.2.3?download=1",
+            "1.2.3#fragment",
+            "1.2.3%2f..",
+            "1.2.3-",
+            "1.2.3+",
+            "1.2.3-beta.01",
+            "1.2.3 ",
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let manifest = super::super::Manifest {
+                version: version.to_owned(),
+                ..Default::default()
+            };
+            let error = stage("http://127.0.0.1:1", &manifest, directory.path())
+                .await
+                .unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("invalid Windows release version"),
+                "unexpected validation for {version}: {error}"
+            );
+            assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
+        }
     }
 
     #[tokio::test]
