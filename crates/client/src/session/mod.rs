@@ -1170,7 +1170,7 @@ impl SessionHandle {
         let client = self.core.client()?;
         if let Some(direct) = client.direct() {
             direct.enqueue(rcode_rpc::methods::QUEUE_MESSAGE,
-                serde_json::json!({"chatId":self.core.chat_id,"text":text,"attachments":item.attachments,"holdForTurnEnd":hold_for_turn_end}),
+                serde_json::json!({"chatId":self.core.chat_id,"id":id,"issuedBy":device_id,"text":text,"attachments":item.attachments,"holdForTurnEnd":hold_for_turn_end}),
                 Some(self.core.chat_id.clone()), None)?;
             return Ok(id);
         }

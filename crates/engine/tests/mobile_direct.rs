@@ -58,8 +58,22 @@ impl Harness for AskingHarness {
         request: RunRequest,
         controls: RunControls,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
-        assert_eq!(request.prompt, "ask from the phone");
         self.runs.fetch_add(1, Ordering::SeqCst);
+        if request.prompt == "queued from the phone" {
+            return Ok(futures::stream::iter([
+                Ok(AgentEvent::TextDelta {
+                    text: "queued turn completed".into(),
+                }),
+                Ok(AgentEvent::Done {
+                    status: DoneStatus::Completed,
+                    result: None,
+                    error: None,
+                    session_id: None,
+                }),
+            ])
+            .boxed());
+        }
+        assert_eq!(request.prompt, "ask from the phone");
         let answered = self.answered.clone();
         let finish = self.finish.clone();
         let (tx, rx) = tokio::sync::mpsc::channel(4);
@@ -269,6 +283,51 @@ async fn real_engine_mobile_direct_preserves_questions_commands_and_offline_comp
                 }
             )))
     );
+    let queued_id = session
+        .enqueue("remove before execution", vec![], true)
+        .unwrap();
+    until("the phone's exact queue id and issuer", || {
+        session
+            .composer()
+            .queue
+            .iter()
+            .any(|row| row.id == queued_id && row.from_this_device)
+            && replica
+                .read_queue()
+                .unwrap()
+                .iter()
+                .any(|row| row.id == queued_id)
+    })
+    .await;
+    let repeated = probe.call(rcode_rpc::methods::QUEUE_MESSAGE,
+        json!({"chatId":chat_id,"id":queued_id,"issuedBy":client.device_id(),"text":"remove before execution","holdForTurnEnd":true})).await.unwrap();
+    assert_eq!(repeated["id"], queued_id);
+    assert_eq!(
+        core.doc_host
+            .open(&chat_id)
+            .unwrap()
+            .doc()
+            .read_queue()
+            .unwrap()
+            .iter()
+            .filter(|row| row.id == queued_id)
+            .count(),
+        1
+    );
+    // Older clients omit both new fields and still receive a host-minted id.
+    let legacy = probe
+        .call(
+            rcode_rpc::methods::QUEUE_MESSAGE,
+            json!({"chatId":chat_id,"text":"legacy queued row","holdForTurnEnd":true}),
+        )
+        .await
+        .unwrap();
+    let legacy_id = legacy["id"].as_str().unwrap();
+    assert_ne!(legacy_id, queued_id);
+    until("the legacy queue row on the phone", || session.composer().queue.iter().any(|row| row.id == legacy_id)).await;
+    assert!(session.remove_queued(&queued_id).await.unwrap());
+    assert!(session.remove_queued(legacy_id).await.unwrap());
+    until("removed queue rows", || session.composer().queue.is_empty()).await;
     let answer = InteractionResponse::Questions {
         answers: vec![UserInputAnswer {
             question_id: "choice".into(),
@@ -400,6 +459,19 @@ async fn real_engine_mobile_direct_preserves_questions_commands_and_offline_comp
     })
     .await;
     assert_eq!(runs.load(Ordering::SeqCst), 1);
+    let promoted = session
+        .enqueue("queued from the phone", vec![], false)
+        .unwrap();
+    until("promotion under the phone's queue id", || {
+        session
+            .snapshot()
+            .entries
+            .iter()
+            .any(|entry| entry.id == promoted && entry.role() == MessageRole::User)
+            && contains_text(handle.doc(), "queued turn completed")
+    })
+    .await;
+    assert_eq!(runs.load(Ordering::SeqCst), 2);
     client.shutdown();
     probe.close();
     server.abort();

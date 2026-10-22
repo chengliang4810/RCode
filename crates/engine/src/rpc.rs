@@ -287,6 +287,11 @@ struct RelayCommandParams {
 struct QueueMessageParams {
     chat_id: String,
     text: String,
+    /// Direct viewers keep this id through queue display and promotion.
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    issued_by: Option<String>,
     #[serde(default)]
     attachments: Vec<String>,
     /// Keep this row visible during the current turn even when the harness
@@ -2695,15 +2700,19 @@ impl RpcService for EngineRpc {
             }
             methods::QUEUE_MESSAGE => {
                 let p: QueueMessageParams = parse_params(params)?;
-                let id = self
-                    .doc_host
-                    .queue_message_with_behavior(
+                let id = if let Some(id) = p.id {
+                    self.doc_host.queue_message_with_identity(
+                        &p.chat_id, &id, p.issued_by.as_deref(), &p.text,
+                        p.attachments, p.hold_for_turn_end,
+                    ).await
+                } else {
+                    self.doc_host.queue_message_with_behavior(
                         &p.chat_id,
                         &p.text,
                         p.attachments,
                         p.hold_for_turn_end,
                     )
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                }.map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&serde_json::json!({ "id": id }))
             }
             methods::UPDATE_QUEUED_MESSAGE => {

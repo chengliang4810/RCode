@@ -3583,21 +3583,60 @@ impl DocHost {
     ) -> Result<String, EngineError> {
         let handle = self.open(chat_id)?;
         let id = new_id();
+        self.append_queued_message(&handle, &id, None, text, attachments, hold_for_turn_end)
+    }
+
+    /// Accept a thin viewer's stable queue identity. The queue-take lock
+    /// closes the gap between removing a row and publishing its user entry,
+    /// so a repeated request cannot start another copy during promotion.
+    pub async fn queue_message_with_identity(
+        &self,
+        chat_id: &str,
+        id: &str,
+        issued_by: Option<&str>,
+        text: &str,
+        attachments: Vec<String>,
+        hold_for_turn_end: bool,
+    ) -> Result<String, EngineError> {
+        let handle = self.open(chat_id)?;
+        let _drain = handle.drain_lock.lock().await;
+        let messages = handle.doc.doc().get_list("messages");
+        let promoted = (0..messages.len()).any(|at| {
+            let Some(loro::ValueOrContainer::Container(loro::Container::Map(map))) = messages.get(at) else { return false; };
+            matches!(map.get("id"), Some(loro::ValueOrContainer::Value(loro::LoroValue::String(current))) if current.as_str() == id)
+        });
+        if handle.doc.read_queue()?.iter().any(|row| row.id == id)
+            || promoted
+        {
+            return Ok(id.to_owned());
+        }
+        self.append_queued_message(&handle, id, issued_by, text, attachments, hold_for_turn_end)
+    }
+
+    fn append_queued_message(
+        &self,
+        handle: &Arc<ChatDocHandle>,
+        id: &str,
+        issued_by: Option<&str>,
+        text: &str,
+        attachments: Vec<String>,
+        hold_for_turn_end: bool,
+    ) -> Result<String, EngineError> {
         handle.doc.push_queued(&QueuedMessage {
-            id: id.clone(),
+            id: id.to_owned(),
             text: text.to_string(),
             attachments,
             hold_for_turn_end,
-            issued_by: self.inner.config.device_id.clone(),
+            issued_by: issued_by.unwrap_or(&self.inner.config.device_id).to_owned(),
             issued_at: now_ms(),
             edited_at: None,
             delivery_gate: None,
         })?;
         handle.publish_queue();
         // Same reasoning as a command: the user is acting in this chat again.
-        self.unarchive_on_send(chat_id);
-        self.nudge_remote_host(chat_id);
-        Ok(id)
+        self.unarchive_on_send(&handle.chat_id);
+        self.nudge_remote_host(&handle.chat_id);
+        Ok(id.to_owned())
     }
 
     /// Retype a queued message. Empty text deletes the row — emptying the box
