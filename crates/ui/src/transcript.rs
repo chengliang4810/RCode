@@ -5462,12 +5462,16 @@ impl Transcript {
         };
         let is_diff = blob_ref.ends_with(".diff");
         let ref_key = blob_ref.clone();
+        let params = self
+            .state
+            .read(cx)
+            .tool_blob_params(&blob_ref, self.chat_id.as_deref());
         let task = cx.spawn(async move |this, cx| {
             let reply = crate::attachments::call_with_timeout(
                 &engine,
                 cx.background_executor(),
                 rcode_rpc::methods::FETCH_TOOL_BLOB,
-                serde_json::json!({ "blobRef": ref_key.as_ref() }),
+                params,
                 Duration::from_secs(20),
             )
             .await;

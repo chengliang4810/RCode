@@ -4212,6 +4212,10 @@ impl Shell {
             .map(|(source, _)| source)
             .unwrap_or(chat_id);
         let blob_ref = format!("{source_chat}/{doc_id}");
+        let params = self
+            .state
+            .read(cx)
+            .tool_blob_params(&blob_ref, Some(chat_id));
         let state = self.state.clone();
         let doc_id = doc_id.to_string();
         Some(cx.spawn(async move |_, cx| {
@@ -4219,7 +4223,7 @@ impl Shell {
                 &engine,
                 cx.background_executor(),
                 methods::FETCH_TOOL_BLOB,
-                serde_json::json!({ "blobRef": blob_ref }),
+                params,
                 Duration::from_secs(20),
             )
             .await;

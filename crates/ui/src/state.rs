@@ -1039,6 +1039,36 @@ impl AppState {
         (self.local_device_id.as_deref() != Some(device.as_str())).then_some(device)
     }
 
+    /// Address sidecars by their source chat, including copied tools and
+    /// subagent docs, rather than the currently selected execution device.
+    pub(crate) fn tool_blob_params(
+        &self,
+        blob_ref: &str,
+        fallback_chat: Option<&str>,
+    ) -> serde_json::Value {
+        let source = blob_ref
+            .split_once('/')
+            .map(|(chat, _)| chat)
+            .filter(|chat| !chat.is_empty());
+        fn root_chat(id: &str) -> &str {
+            id.split_once("--sub--").map_or(id, |(root, _)| root)
+        }
+        let chat = source
+            .into_iter()
+            .chain(fallback_chat)
+            .find_map(|id| self.chats.iter().find(|chat| chat.id == root_chat(id)));
+        let mut params = serde_json::json!({"blobRef": blob_ref});
+        if let Some(chat) = chat {
+            params["chatId"] = serde_json::json!(chat.id);
+            // Explicitly include the local id too: a copied local tool in a
+            // remote transcript must still read from this engine.
+            params["targetDeviceId"] = serde_json::json!(chat.device_id);
+        } else if let Some(id) = source.or(fallback_chat) {
+            params["chatId"] = serde_json::json!(root_chat(id));
+        }
+        params
+    }
+
     pub fn review_comments(&self, key: &str) -> &[ReviewComment] {
         self.review_comments
             .get(key)
@@ -4694,6 +4724,40 @@ mod tests {
             state.terminal_target_device("chat-1").as_deref(),
             Some("remote")
         );
+    }
+
+    #[test]
+    fn tool_blob_routes_follow_the_source_chat_across_remote_and_subagent_views() {
+        let mut state = AppState::new();
+        state.local_device_id = Some("local".into());
+        state.selected_device = Some("unrelated-selection".into());
+        let mut remote = chat("remote-chat", 0, None);
+        remote.device_id = "remote-host".into();
+        let mut other = chat("other-chat", 0, None);
+        other.device_id = "other-host".into();
+        let mut local = chat("local-chat", 0, None);
+        local.device_id = "local".into();
+        state.chats = vec![remote, other, local];
+        state.selected_chat = Some("other-chat".into());
+
+        for blob_ref in [
+            "remote-chat/tool.diff",
+            "remote-chat--sub--spawn/tool",
+            "remote-chat/remote-chat--sub--spawn",
+        ] {
+            let params = state.tool_blob_params(blob_ref, Some("other-chat"));
+            assert_eq!(params["blobRef"], blob_ref);
+            assert_eq!(params["chatId"], "remote-chat");
+            assert_eq!(params["targetDeviceId"], "remote-host");
+        }
+        let local = state.tool_blob_params("local-chat/tool", Some("remote-chat"));
+        assert_eq!(local["targetDeviceId"], "local");
+        let unknown = state.tool_blob_params("unknown-chat/tool", Some("remote-chat--sub--spawn"));
+        assert_eq!(unknown["chatId"], "remote-chat");
+        assert_eq!(unknown["targetDeviceId"], "remote-host");
+        let unloaded = state.tool_blob_params("unloaded--sub--spawn/tool", None);
+        assert_eq!(unloaded["chatId"], "unloaded");
+        assert!(unloaded.get("targetDeviceId").is_none());
     }
 
     #[test]
