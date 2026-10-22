@@ -22,6 +22,7 @@ pub(super) struct CommandProcesses {
     poll: Option<Task<()>>,
     _selection: Subscription,
 }
+impl gpui::EventEmitter<super::process_output::OutputTarget> for CommandProcesses {}
 impl CommandProcesses {
     pub(super) fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
         let observation = cx.observe(&state, |this: &mut Self, _, cx| this.select(cx));
@@ -100,6 +101,16 @@ impl CommandProcesses {
         }));
         cx.notify();
     }
+    fn open(&mut self, id: String, title: String, cx: &mut Context<Self>) {
+        if let Some((chat, device)) = &self.target {
+            cx.emit(super::process_output::OutputTarget {
+                chat: chat.clone(),
+                device: device.clone(),
+                id,
+                title,
+            });
+        }
+    }
     fn stop(&mut self, id: String, cx: &mut Context<Self>) {
         if self.stopping.contains(&id) {
             return;
@@ -147,6 +158,13 @@ impl Render for CommandProcesses {
             .iter()
             .map(|row| {
                 let id = row.id.clone();
+                let open_id = id.clone();
+                let open_title = row.command.clone();
+                let key_open_id = id.clone();
+                let key_open_title = row.command.clone();
+                let a11y_open_id = id.clone();
+                let a11y_open_title = row.command.clone();
+                let open_view = cx.entity().downgrade();
                 let key_id = id.clone();
                 let a11y_id = id.clone();
                 let view = cx.entity().downgrade();
@@ -163,6 +181,31 @@ impl Render for CommandProcesses {
                     .py(px(3.0))
                     .child(
                         div()
+                            .id(SharedString::from(format!("process-open-{id}")))
+                            .cursor_pointer()
+                            .role(gpui::Role::Button)
+                            .tab_index(0)
+                            .aria_label(l.format_with(
+                                TextKey::ShellOutputOpen,
+                                &[("command", row.command.as_str())],
+                            ))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.open(open_id.clone(), open_title.clone(), cx)
+                            }))
+                            .on_key_down(cx.listener(
+                                move |this, event: &gpui::KeyDownEvent, _, cx| {
+                                    if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                                        this.open(key_open_id.clone(), key_open_title.clone(), cx);
+                                    }
+                                },
+                            ))
+                            .on_a11y_action(gpui::AccessibleAction::Click, move |_, _, cx| {
+                                open_view
+                                    .update(cx, |this, cx| {
+                                        this.open(a11y_open_id.clone(), a11y_open_title.clone(), cx)
+                                    })
+                                    .ok();
+                            })
                             .flex_1()
                             .min_w_0()
                             .flex()

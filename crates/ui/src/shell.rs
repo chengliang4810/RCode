@@ -77,6 +77,7 @@ mod files_panel;
 mod memory_panel;
 mod goal_panel;
 mod command_processes;
+mod process_output;
 mod navigation_focus;
 #[cfg(test)]
 mod navigation_tests;
@@ -755,6 +756,7 @@ pub enum RightSurface {
     Picker,
     Memory,
     Goal(u64),
+    ProcessOutput(u64),
     File(u64),
     Browser(u64),
     Diff(u64),
@@ -1759,6 +1761,8 @@ fn relaunch_detached() {
 }
 
 pub struct Shell {
+    process_outputs: std::collections::HashMap<u64, Entity<process_output::OutputView>>,
+    pending_process_log: Option<(String, String)>,
     command_processes: Entity<command_processes::CommandProcesses>,
     state: Entity<AppState>,
     sidebar_pane: Entity<SidebarPane>,
@@ -2270,8 +2274,11 @@ impl Shell {
             shell: shell.downgrade(),
             _observation: cx.observe(&shell, |_, _, cx| cx.notify()),
         });
+        let command_processes = cx.new(|cx| command_processes::CommandProcesses::new(state.clone(), cx));
+        cx.subscribe(&command_processes, |this: &mut Self, _, target: &process_output::OutputTarget, cx| this.open_process_output(target.clone(), cx)).detach();
         Self {
-            command_processes: cx.new(|cx| command_processes::CommandProcesses::new(state.clone(), cx)),
+            process_outputs: Default::default(), pending_process_log: None,
+            command_processes,
             state,
             sidebar_pane,
             transcript,
@@ -3095,6 +3102,7 @@ impl Shell {
         stored
             .iter()
             .filter_map(|surface| match surface {
+                RightSurface::ProcessOutput(id) => self.process_outputs.get(id).map(|view| (*surface, view.read(cx).target.title.clone().into(), false, None)),
                 RightSurface::Goal(id) => self.goal_editor(*id).map(|editor| (
                     *surface, crate::l10n::localizer().text(TextKey::ConversationGoalEdit).into(), editor.read(cx).dirty(cx), None,
                 )),
@@ -3215,6 +3223,7 @@ impl Shell {
             RightSurface::Picker
             | RightSurface::Memory
             | RightSurface::Goal(_)
+            | RightSurface::ProcessOutput(_)
             | RightSurface::Diff(_)
             | RightSurface::Terminal(_)
             | RightSurface::SideChat(_)
@@ -3371,7 +3380,7 @@ impl Shell {
                     });
                 }
             }
-            RightSurface::Subagent(_) | RightSurface::Browser(_) | RightSurface::PullRequest(_) => {
+            RightSurface::ProcessOutput(_) | RightSurface::Subagent(_) | RightSurface::Browser(_) | RightSurface::PullRequest(_) => {
             }
             RightSurface::Picker => {}
         }
@@ -4327,6 +4336,7 @@ impl Shell {
             tabs.retain(|s| *s != surface);
         }
         match surface {
+            RightSurface::ProcessOutput(id) => { self.process_outputs.remove(&id); }
             RightSurface::File(_) | RightSurface::Memory | RightSurface::Goal(_) => {}
             RightSurface::Browser(id) => {
                 if let Some(browser) = self.browsers.remove(&id) {
@@ -11010,6 +11020,7 @@ impl Shell {
         let showing = self.right_pane_open(cx) || self.tween_active(self.right_tween) || exiting;
         let content: AnyElement = if showing {
             match self.resolved_right_active(cx) {
+                RightSurface::ProcessOutput(id) => self.process_outputs.get(&id).cloned().map(|view| view.into_any_element()).unwrap_or_else(|| self.render_surface_picker(cx)),
                 RightSurface::Goal(id) => self.goal_editor(id)
                     .map(|editor| editor.into_any_element()).unwrap_or_else(|| self.render_surface_picker(cx)),
                 RightSurface::Memory => self
@@ -11430,6 +11441,7 @@ impl Shell {
             }
             .map(crate::pickers::harness_brand_icon);
             let icon_path = match surface {
+                RightSurface::ProcessOutput(_) => icons::TERMINAL,
                 RightSurface::Goal(_) => icons::GOAL,
                 RightSurface::Memory => icons::FILE_MARKDOWN,
                 RightSurface::File(_) => icons::DOCUMENT,
@@ -12181,6 +12193,10 @@ fn header_icon_button_with(
 
 impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.sync_process_output_visibility(cx);
+        if let Some((chat, path)) = self.pending_process_log.take() {
+            self.add_file_surface_at((chat, self.state.clone()), path, None, window, cx);
+        }
         self.ensure_memory_panel(window, cx);
         // Every repaint (state frame, input, or the clock firing) reschedules
         // the next clock-driven one; the sidebar and transcript follow this

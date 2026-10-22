@@ -391,3 +391,17 @@ shell-processes-title = 后台进程
 shell-processes-stopping = 正在停止
 shell-processes-recovered = 已恢复
 shell-processes-stop-aria = 停止 { $command }
+
+shell-output-open = 查看 { $command } 的输出
+shell-output-running = 运行中
+shell-output-failed = 运行失败
+shell-output-stopped = 已停止
+shell-output-exited = 已结束
+shell-output-copy = 复制
+shell-output-file = 打开日志文件
+shell-output-pause = 暂停跟随
+shell-output-follow = 跟随输出
+shell-output-retry = 重试
+shell-output-empty = 暂无输出
+shell-output-error = 无法读取日志：{ $error }
+shell-output-rotated = 日志已轮转，仅保留最近输出。

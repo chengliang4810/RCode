@@ -418,3 +418,17 @@ shell-processes-title = Background processes
 shell-processes-stopping = Stopping
 shell-processes-recovered = Recovered
 shell-processes-stop-aria = Stop { $command }
+
+shell-output-open = View output for { $command }
+shell-output-running = Running
+shell-output-failed = Failed
+shell-output-stopped = Stopped
+shell-output-exited = Finished
+shell-output-copy = Copy
+shell-output-file = Open log file
+shell-output-pause = Pause following
+shell-output-follow = Follow output
+shell-output-retry = Retry
+shell-output-empty = No output yet
+shell-output-error = Could not read log: { $error }
+shell-output-rotated = Log rotated; only recent output is retained.
