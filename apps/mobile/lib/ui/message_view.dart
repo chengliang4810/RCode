@@ -158,9 +158,9 @@ class MessageView extends StatelessWidget {
                           await session.retryPending('${entry['id']}');
                         } catch (error) {
                           if (context.mounted) {
-                            ScaffoldMessenger.of(
-                              context,
-                            ).showSnackBar(SnackBar(content: Text('$error')));
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              SnackBar(content: Text(context.errorText(error))),
+                            );
                           }
                         }
                       },
@@ -491,7 +491,7 @@ class _ToolPartViewState extends State<ToolPartView> {
                       future: _output,
                       builder: (context, snapshot) => snapshot.hasError
                           ? Text(
-                              '${snapshot.error}',
+                              context.errorText(snapshot.error),
                               style: TextStyle(color: c.danger),
                             )
                           : snapshot.hasData
@@ -534,7 +534,7 @@ class _ToolPartViewState extends State<ToolPartView> {
                           Text(context.tr('子智能体', 'Subagent')),
                           if (p['subagentStatus'] != null)
                             Text(
-                              ' · ${p['subagentStatus']}',
+                              ' · ${context.statusLabel('${p['subagentStatus']}')}',
                               style: TextStyle(color: c.secondary),
                             ),
                         ],
@@ -572,7 +572,7 @@ class _ToolPartViewState extends State<ToolPartView> {
     } catch (error) {
       if (mounted) {
         ScaffoldMessenger.of(context)
-            .showSnackBar(SnackBar(content: Text('$error')));
+            .showSnackBar(SnackBar(content: Text(context.errorText(error))));
       }
     }
   }
@@ -604,7 +604,9 @@ class _SubagentPageState extends State<_SubagentPage> {
     final ref = '${widget.part['subagentRef']}';
     if (widget.part['subagentStatus'] != 'running') {
       try {
-        final value = jsonDecode(await widget.parent.toolBlob(ref));
+        final source = ref.split('--sub--').first;
+        final blobRef = ref.contains('/') ? ref : '$source/$ref';
+        final value = jsonDecode(await widget.parent.toolBlob(blobRef));
         final entries = value is List
             ? jsonMaps(value)
             : jsonMaps(jsonMap(value)['entries'] ?? jsonMap(value)['messages']);
