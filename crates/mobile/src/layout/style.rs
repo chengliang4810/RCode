@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use rcode_text::{FaceId, FontBook, FontMetrics, StyleId, StyleOptions};
 
 /// Faces the platform registers (same bytes it hands CoreText/Skia).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, uniffi::Enum, serde::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum FaceRole {
     Sans,
@@ -128,7 +128,7 @@ pub(crate) struct StyleKey {
 }
 
 /// A style the platform must be able to draw: `id` → (face, size).
-#[derive(Debug, Clone, PartialEq, uniffi::Record, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct StyleDesc {
     pub id: u16,
     pub face: FaceRole,

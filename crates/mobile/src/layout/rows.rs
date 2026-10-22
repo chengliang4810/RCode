@@ -27,7 +27,7 @@ use super::style::{Family, TYPE, Weight};
 use super::tools::{ThoughtState, ToolGroup, place_tools};
 
 /// Row kinds the painter may style differently (e.g. context menus).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RowKind {
     Markdown,
     User,

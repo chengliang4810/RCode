@@ -193,8 +193,8 @@ opt-level = 3
 [profile.dev.package.rcode-visual-gpu]
 opt-level = 3
 
-# Mobile core (scripts/ios/build-core.sh). Always optimized — layout and sync
-# run on the phone's hot paths, so even Debug app builds link an -O core.
+# Portable rendering (apps/mobile/native). Always optimized — Luau, layout,
+# math and GPU rendering run on the phone's hot paths, including Debug apps.
 [profile.mobile]
 inherits = "release"
 lto = false

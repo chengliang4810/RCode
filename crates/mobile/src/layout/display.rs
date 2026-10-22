@@ -6,7 +6,7 @@
 //! re-encoding. Colors are roles, not RGB — theming is paint-only.
 
 /// Paint roles. The painter maps these to its palette (light/dark).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, uniffi::Enum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ColorRole {
     Text,
     TextSecondary,
@@ -65,7 +65,7 @@ pub enum ColorRole {
 }
 
 /// Text decorations, painted relative to the run's baseline.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, uniffi::Enum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum Decoration {
     #[default]
     None,
@@ -75,7 +75,7 @@ pub enum Decoration {
 
 /// One positioned piece of text: `text[start..start+len]` (UTF-16) drawn with
 /// `style` so its origin sits at (`x`, `baseline`).
-#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct TextRun {
     pub start: u32,
     pub len: u32,
@@ -96,7 +96,7 @@ pub struct TextRun {
 /// One glyph of a math formula: glyph id `glyph` of math font `font` (an
 /// index for [`math_font_data`]) drawn at `size` with its origin at
 /// (`x`, `y`). Rules (fraction bars, radicals) are plain [`BoxPrim`] fills.
-#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct GlyphPrim {
     pub font: u8,
     pub glyph: u16,
@@ -115,7 +115,6 @@ pub struct GlyphPrim {
 /// order (0 = Fira Math, 1 = STIX Two Math, …), the same table whichever face
 /// lays formulas out; empty past the end. Glyph ids in [`GlyphPrim`] index
 /// these exact files. Hosts load an index when a glyph first names it.
-#[uniffi::export]
 pub fn math_font_data(index: u8) -> Vec<u8> {
     if index < zatex::bundled::FONTS {
         zatex::bundled::font_at(index).data().to_vec()
@@ -127,7 +126,7 @@ pub fn math_font_data(index: u8) -> Vec<u8> {
 /// The face formulas are laid out in (STIX Two for what it lacks). Every
 /// face paints from the [`math_font_data`] table, so switching never
 /// re-registers fonts.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, uniffi::Enum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum MathFace {
     /// Fira Math: a sans that sits beside Geist.
     #[default]
@@ -157,14 +156,14 @@ impl From<MathFace> for zatex::bundled::Face {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BoxStyle {
     Fill,
     /// A hairline (1 device pixel) stroke on the rect's inside edge.
     Hairline,
 }
 
-#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct BoxPrim {
     pub x: f32,
     pub y: f32,
@@ -181,7 +180,7 @@ pub struct BoxPrim {
 }
 
 /// A tappable link region (one per fragment; multi-line links repeat).
-#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct LinkHit {
     pub x: f32,
     pub y: f32,
@@ -194,7 +193,7 @@ pub struct LinkHit {
 /// A horizontally scrolling viewport (code blocks, wide tables). Primitives
 /// that reference it are positioned in its content coordinates, whose origin
 /// is the viewport's top-left.
-#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Scroller {
     pub x: f32,
     pub y: f32,
@@ -204,7 +203,7 @@ pub struct Scroller {
 }
 
 /// Which way overflowing text fades out.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FadeEdge {
     /// Text fades to transparent across the rect, left → right, and is
     /// clipped at its right edge (single lines wider than their slot).
@@ -217,7 +216,7 @@ pub enum FadeEdge {
 /// An overflow fade: runs whose baseline falls inside the rect's vertical
 /// band are painted through an alpha ramp — the text itself fades, so it
 /// works over any background.
-#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Fade {
     pub x: f32,
     pub y: f32,
@@ -228,7 +227,7 @@ pub struct Fade {
 }
 
 /// Native affordances the painter renders itself (icons, images, spinners).
-#[derive(Debug, Clone, PartialEq, uniffi::Enum)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum WidgetKind {
     /// Copy button for a code block; `payload` holds the code.
     CopyCode,
@@ -275,7 +274,7 @@ pub enum WidgetKind {
     Visual { id: String },
 }
 
-#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Widget {
     pub id: u32,
     pub kind: WidgetKind,
@@ -288,7 +287,7 @@ pub struct Widget {
 }
 
 /// Everything needed to paint a row at its current width.
-#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct RowDisplay {
     pub key: u64,
     pub version: u64,

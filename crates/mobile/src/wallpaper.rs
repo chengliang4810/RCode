@@ -7,7 +7,7 @@
 //! appearance) off the UI thread; platforms cache the result.
 
 /// Artwork treatment (desktop `NewThreadBackgroundEffect`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WallpaperEffect {
     None,
     Dither,
@@ -46,7 +46,6 @@ impl Source<'_> {
 
 /// Apply `effect` to an RGBA image; `light` is the appearance it's drawn in
 /// (effects print on white paper in light mode, black in dark).
-#[uniffi::export]
 pub fn wallpaper_render(
     rgba: Vec<u8>,
     width: u32,
@@ -216,7 +215,6 @@ fn contrast(a: f32, b: f32) -> f32 {
 /// `region` (0–1, fraction of the image height where text sits): the bright
 /// tail when text is light, the dark tail when text is dark. Clamped to
 /// [0, `max_opacity`].
-#[uniffi::export]
 pub fn wallpaper_safe_opacity(
     rgba: Vec<u8>,
     width: u32,

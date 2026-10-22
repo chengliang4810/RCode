@@ -1,4 +1,4 @@
-//! Display language shared with the native application at process startup.
+//! Display language for the internal Rust transcript layout helpers.
 
 use std::sync::OnceLock;
 
@@ -7,8 +7,8 @@ use rcode_presentation::{LanguagePreference, Localizer, TextKey};
 pub(crate) fn localizer() -> &'static Localizer {
     static LOCALIZER: OnceLock<Localizer> = OnceLock::new();
     LOCALIZER.get_or_init(|| {
-        // iOS supplies Bundle's preferred localization before starting the core.
-        // This also respects its per-app language preference without an ABI change.
+        // Rust layout callers may override the detected language at startup.
+        // Flutter visuals use their own per-worker locale command instead.
         let language = std::env::var("RCODE_DISPLAY_LANGUAGE").ok();
         match language {
             Some(language) => {
