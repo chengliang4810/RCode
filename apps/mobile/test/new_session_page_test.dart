@@ -32,6 +32,27 @@ class EmptyHostWorkspace extends PageWorkspace {
   }
 }
 
+class ReconnectWorkspace extends PageWorkspace {
+  var online = false;
+  var catalogLoads = 0;
+  @override
+  bool get connected => online;
+  void changeConnection(bool value) {
+    online = value;
+    notifyListeners();
+  }
+
+  @override
+  Future<dynamic> call(String method, [JsonMap params = const {}]) async {
+    if (method == 'ListHarnesses') {
+      catalogLoads++;
+      if (!online)
+        throw const RpcException('disconnected', 'server_disconnected');
+    }
+    return super.call(method, params);
+  }
+}
+
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
   setUp(() {
@@ -211,4 +232,40 @@ void main() {
     await tester.pump(const Duration(milliseconds: 300));
     expect(tester.takeException(), null);
   });
+
+  testWidgets(
+    'connection recovery refreshes the model catalog and live send state',
+    (tester) async {
+      resetRecoveredImagesForTesting(retrieval: Future.value([]));
+      final workspace = ReconnectWorkspace();
+      final preferences = await AppPreferences.load();
+      addTearDown(workspace.dispose);
+      addTearDown(preferences.dispose);
+      await tester.pumpWidget(
+        app(NewSessionPage(workspace: workspace, preferences: preferences)),
+      );
+      await tester.pumpAndSettle();
+      expect(
+        tester.widget<IconButton>(find.byKey(const Key('new-send'))).onPressed,
+        null,
+      );
+      expect(workspace.catalogLoads, 1);
+      workspace.changeConnection(true);
+      await tester.pumpAndSettle();
+      expect(workspace.catalogLoads, 2);
+      expect(
+        tester.widget<IconButton>(find.byKey(const Key('new-send'))).onPressed,
+        isNotNull,
+      );
+      workspace.changeConnection(false);
+      await tester.pumpAndSettle();
+      expect(
+        tester.widget<IconButton>(find.byKey(const Key('new-send'))).onPressed,
+        null,
+      );
+      await tester.pumpWidget(const SizedBox());
+      await tester.pump(const Duration(milliseconds: 300));
+      expect(tester.takeException(), null);
+    },
+  );
 }

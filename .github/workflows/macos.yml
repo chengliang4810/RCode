@@ -278,4 +278,3 @@ jobs:
         with:
           name: rcode-mobile-debug-apk
           path: apps/mobile/build/app/outputs/flutter-apk/app-debug.apk
-

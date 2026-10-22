@@ -43,6 +43,8 @@ class _NewSessionPageState extends State<NewSessionPage> {
   bool _recoveringImages = true;
   bool _sending = false;
   bool _created = false;
+  bool _wasConnected = false;
+  String? _catalogDevice;
   String? _pendingChatId;
   String? _pendingMessageId;
   SessionController? _pendingSession;
@@ -87,8 +89,22 @@ class _NewSessionPageState extends State<NewSessionPage> {
       text: widget.initialText ?? draft['text'] as String? ?? '',
     );
     _text.addListener(_remember);
+    _wasConnected = widget.workspace.connected;
+    widget.workspace.addListener(_workspaceChanged);
     _loadModels();
     WidgetsBinding.instance.addPostFrameCallback((_) => _restoreImages());
+  }
+
+  void _workspaceChanged() {
+    if (!mounted) return;
+    final reconnected = widget.workspace.connected && !_wasConnected;
+    _wasConnected = widget.workspace.connected;
+    if (widget.workspace.connected &&
+        (reconnected || _catalogDevice != _target)) {
+      unawaited(_loadModels());
+    } else {
+      setState(() {});
+    }
   }
 
   Future<void> _restoreImages() async {
@@ -135,6 +151,7 @@ class _NewSessionPageState extends State<NewSessionPage> {
     _persistDraft();
     _text.removeListener(_remember);
     _text.dispose();
+    widget.workspace.removeListener(_workspaceChanged);
     if (_pendingSession case final session?) {
       widget.workspace.releaseSession(session);
     }
@@ -143,6 +160,7 @@ class _NewSessionPageState extends State<NewSessionPage> {
 
   Future<void> _loadModels() async {
     final device = _target;
+    _catalogDevice = device;
     final generation = ++_modelGeneration;
     final key = '${widget.workspace.cacheScope}:$device';
     if (device == null) return;
@@ -804,10 +822,25 @@ class _NewSessionPageState extends State<NewSessionPage> {
                       if (_error != null)
                         Padding(
                           padding: const EdgeInsets.all(12),
-                          child: Text(
-                            context.errorText(_error),
-                            style: TextStyle(color: colors.danger),
-                            textAlign: TextAlign.center,
+                          child: Row(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              Flexible(
+                                child: Text(
+                                  context.errorText(_error),
+                                  style: TextStyle(color: colors.danger),
+                                  textAlign: TextAlign.center,
+                                ),
+                              ),
+                              if (_models.isEmpty && !_loadingModels)
+                                IconButton(
+                                  tooltip: context.tr('刷新模型', 'Refresh models'),
+                                  onPressed: widget.workspace.connected
+                                      ? _loadModels
+                                      : null,
+                                  icon: const Icon(Icons.refresh, size: 18),
+                                ),
+                            ],
                           ),
                         ),
                       if (!_loadingModels &&
