@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 
 import '../data/workspace_controller.dart';
@@ -546,6 +548,11 @@ class _SessionsPageState extends State<SessionsPage> {
     final unseen = sessionUnseen(chat);
     final current = widget.currentChatId == id;
     final colors = context.colors;
+    final textScaler = MediaQuery.textScalerOf(context);
+    final rowScale = math.max(
+      1.0,
+      math.max(textScaler.scale(16.5) / 16.5, textScaler.scale(13.5) / 13.5),
+    );
     final label = switch (status) {
       'working' => context.tr('工作中', 'Working'),
       'awaitingInput' => context.tr('等待输入', 'Input'),
@@ -574,7 +581,7 @@ class _SessionsPageState extends State<SessionsPage> {
         },
         onLongPress: () => _rowMenu(chat),
         child: SizedBox(
-          height: 62,
+          height: 62 * rowScale,
           child: Padding(
             padding: const EdgeInsets.symmetric(horizontal: 12),
             child: Row(

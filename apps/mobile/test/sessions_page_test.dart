@@ -120,6 +120,52 @@ void main() {
   });
 
   testWidgets(
+    '200 percent text scales the session row and keeps both lines inside it',
+    (tester) async {
+      final workspace = PageWorkspace();
+      workspace.chats = [
+        {'id': 'large', 'title': 'Large conversation', 'spaceId': 'project'},
+        {'id': 'next', 'title': 'Next conversation', 'spaceId': 'project'},
+      ];
+      workspace.spaces = [
+        {'id': 'project', 'name': 'Project name', 'path': '/project'},
+      ];
+      final preferences = await AppPreferences.load();
+      addTearDown(workspace.dispose);
+      addTearDown(preferences.dispose);
+      await tester.pumpWidget(
+        app(
+          Builder(
+            builder: (context) => MediaQuery(
+              data: MediaQuery.of(context)
+                  .copyWith(textScaler: const TextScaler.linear(2)),
+              child: SessionsPage(
+                workspace: workspace,
+                preferences: preferences,
+                onOpen: (_) {},
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      final row = find.byKey(const ValueKey('session-large'));
+      final next = find.byKey(const ValueKey('session-next'));
+      final bounds = tester.getRect(row);
+      expect(bounds.height, greaterThanOrEqualTo(124));
+      for (final label in ['Large conversation', 'Project name']) {
+        final textBounds = tester.getRect(
+          find.descendant(of: row, matching: find.text(label)),
+        );
+        expect(textBounds.top, greaterThanOrEqualTo(bounds.top));
+        expect(textBounds.bottom, lessThanOrEqualTo(bounds.bottom));
+      }
+      expect(tester.getRect(next).top, greaterThanOrEqualTo(bounds.bottom));
+      expect(tester.takeException(), null);
+    },
+  );
+
+  testWidgets(
     'archived search result offers restore and uses the shared wallpaper',
     (tester) async {
       final workspace = PageWorkspace();
