@@ -28,10 +28,10 @@ final class MainTabController: UITabBarController, UITabBarControllerDelegate, A
         tabBar.tintColor = Palette.text
         tabBarMinimizeBehavior = .onScrollDown
 
-        let sessions = UITab(title: "Sessions", image: UIImage(named: "tab-chat"), identifier: "sessions") { [app] _ in
+        let sessions = UITab(title: L10n.text("Sessions"), image: UIImage(named: "tab-chat"), identifier: "sessions") { [app] _ in
             Self.nav(SessionsViewController(app: app))
         }
-        let more = UITab(title: "Settings", image: UIImage(named: "tab-settings"), identifier: "more") { [app] _ in
+        let more = UITab(title: L10n.text("Settings"), image: UIImage(named: "tab-settings"), identifier: "more") { [app] _ in
             Self.nav(MoreViewController(app: app))
         }
         let search = UISearchTab { [app] _ in
@@ -191,7 +191,7 @@ final class MainTabController: UITabBarController, UITabBarControllerDelegate, A
         popToFrontPage()
         syncAccessory()
         view.layoutIfNeeded()
-        Toast.show("Couldn't open session. Try again.", in: view.window)
+        Toast.show(L10n.text("Couldn't open session. Try again."), in: view.window)
     }
 
     /// Push a session on the Sessions tab (from new-session, deep links, search).
@@ -235,7 +235,7 @@ final class AskAnythingAccessory: UIView {
         plate.layer.cornerCurve = .continuous
         plate.isUserInteractionEnabled = false
         plate.addSubview(mark)
-        label.text = "New session"
+        label.text = L10n.text("New session")
         label.font = Fonts.ui(.sansMedium, 16)
         label.textColor = Palette.text
         summary.font = Fonts.ui(.sansMedium, 13)
@@ -283,12 +283,12 @@ final class AskAnythingAccessory: UIView {
 
     func update(_ live: AppModel.LiveCounts) {
         var parts: [String] = []
-        if live.working > 0 { parts.append("\(live.working) working") }
-        if live.awaiting > 0 { parts.append("\(live.awaiting) need\(live.awaiting == 1 ? "s" : "") you") }
+        if live.working > 0 { parts.append(L10n.count("sessions.working", live.working)) }
+        if live.awaiting > 0 { parts.append(L10n.count("sessions.awaiting", live.awaiting)) }
         summary.text = parts.joined(separator: " · ")
         cells.isHidden = parts.isEmpty
         summary.isHidden = false
         cells.kind = live.working > 0 ? .spinner : .dot(StatusTone.input)
-        newSession.accessibilityLabel = parts.isEmpty ? "New session" : "New session, " + parts.joined(separator: ", ")
+        newSession.accessibilityLabel = parts.isEmpty ? L10n.text("New session") : L10n.format("new-session.summary", parts.joined(separator: ", "))
     }
 }

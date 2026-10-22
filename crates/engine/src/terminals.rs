@@ -27,6 +27,7 @@ mod windows;
 use tokio::sync::mpsc;
 
 use rcode_doc::TERMINAL_OUTPUT_BATCH_MS;
+use rcode_proto::terminal_errors::TerminalOpenFailure;
 use rcode_proto::{TerminalEvent, TerminalSession};
 
 use crate::{EngineError, new_id};
@@ -272,13 +273,16 @@ impl Terminals {
         command: Option<&str>,
     ) -> Result<TerminalSession, EngineError> {
         if lock(&self.inner.sessions).len() >= MAX_TERMINALS {
-            return Err(EngineError::Other(format!(
-                "Too many open terminals (maximum {MAX_TERMINALS})"
-            )));
+            return Err(EngineError::Other(
+                TerminalOpenFailure::Limit {
+                    maximum: MAX_TERMINALS,
+                }
+                .encode(),
+            ));
         }
         if !std::fs::metadata(cwd).map(|m| m.is_dir()).unwrap_or(false) {
             return Err(EngineError::Other(
-                "Session working directory is unavailable".into(),
+                TerminalOpenFailure::WorkingDirectoryUnavailable.encode(),
             ));
         }
 
@@ -308,15 +312,26 @@ impl Terminals {
         };
 
         #[cfg(windows)]
-        let (master, mut child) =
-            windows::open(&shell, cwd, clamp_size(cols, rows), environment)
-                .map_err(|e| EngineError::Other(format!("could not open Windows terminal: {e}")))?;
+        let (master, mut child) = windows::open(&shell, cwd, clamp_size(cols, rows), environment)
+            .map_err(|e| {
+            EngineError::Other(
+                TerminalOpenFailure::Startup {
+                    reason: e.to_string(),
+                }
+                .encode(),
+            )
+        })?;
         #[cfg(not(windows))]
         let (master, mut child) = {
             let pty = native_pty_system();
-            let pair = pty
-                .openpty(clamp_size(cols, rows))
-                .map_err(|e| EngineError::Other(format!("could not open a pty: {e}")))?;
+            let pair = pty.openpty(clamp_size(cols, rows)).map_err(|e| {
+                EngineError::Other(
+                    TerminalOpenFailure::Startup {
+                        reason: e.to_string(),
+                    }
+                    .encode(),
+                )
+            })?;
             let mut cmd = CommandBuilder::new(&shell);
             if !cfg!(windows) {
                 cmd.arg("-l"); // login shell — the user's real PATH/profile
@@ -331,20 +346,35 @@ impl Terminals {
             if let Some(script) = initial_script.as_ref() {
                 cmd.env("RCODE_ACTION_SCRIPT", script.path());
             }
-            let child = pair
-                .slave
-                .spawn_command(cmd)
-                .map_err(|e| EngineError::Other(format!("could not spawn {shell_name}: {e}")))?;
+            let child = pair.slave.spawn_command(cmd).map_err(|e| {
+                EngineError::Other(
+                    TerminalOpenFailure::Launch {
+                        shell: shell_name.to_owned(),
+                        reason: e.to_string(),
+                    }
+                    .encode(),
+                )
+            })?;
             drop(pair.slave);
             (pair.master, child)
         };
         let killer = child.clone_killer();
-        let reader = master
-            .try_clone_reader()
-            .map_err(|e| EngineError::Other(format!("pty reader: {e}")))?;
-        let writer = master
-            .take_writer()
-            .map_err(|e| EngineError::Other(format!("pty writer: {e}")))?;
+        let reader = master.try_clone_reader().map_err(|e| {
+            EngineError::Other(
+                TerminalOpenFailure::Startup {
+                    reason: e.to_string(),
+                }
+                .encode(),
+            )
+        })?;
+        let writer = master.take_writer().map_err(|e| {
+            EngineError::Other(
+                TerminalOpenFailure::Startup {
+                    reason: e.to_string(),
+                }
+                .encode(),
+            )
+        })?;
 
         let id = new_id();
         let session = Arc::new(Mutex::new(LiveTerminal {
@@ -382,7 +412,12 @@ impl Terminals {
                     lock(&self.inner.sessions).remove(&id);
                     dispose(&session, true);
                 }
-                EngineError::Other(format!("pty reader thread: {e}"))
+                EngineError::Other(
+                    TerminalOpenFailure::Startup {
+                        reason: e.to_string(),
+                    }
+                    .encode(),
+                )
             })?;
         #[cfg(windows)]
         {
@@ -405,7 +440,12 @@ impl Terminals {
                 .map_err(|e| {
                     lock(&self.inner.sessions).remove(&id);
                     dispose(&session, true);
-                    EngineError::Other(format!("pty wait thread: {e}"))
+                    EngineError::Other(
+                        TerminalOpenFailure::Startup {
+                            reason: e.to_string(),
+                        }
+                        .encode(),
+                    )
                 })?;
             tokio::spawn(async move { rx.await.map_err(std::io::Error::other)? })
         };
@@ -753,7 +793,7 @@ mod windows_tests {
                     let _ = reader_gate.recv_timeout(Duration::from_secs(20));
                 }));
             }
-            wait_for_shell_prompt(&terminals, &terminal.id).await;
+            wait_for_shell_ready(&terminals, &terminal.id).await;
             write_line(&terminals, &terminal.id, "exit 0");
             tokio::time::timeout(EVENT_TIMEOUT, reader_drained)
                 .await
@@ -837,16 +877,30 @@ mod windows_tests {
         }
     }
 
-    async fn wait_for_shell_prompt(terminals: &Terminals, terminal_id: &str) {
+    async fn wait_for_shell_ready(terminals: &Terminals, terminal_id: &str) {
         let mut rx = terminals
             .subscribe(terminal_id, None)
             .expect("subscribe to startup");
         let mut events = Vec::new();
-        collect_until(&mut rx, &mut events, |events| {
-            let output = decoded(events);
-            output.contains("PS ") && output.contains("> ")
-        })
-        .await;
+        // A profile may replace or translate the prompt. Wait for an executed
+        // marker instead; split its literal so echoed input cannot satisfy it.
+        let deadline = tokio::time::Instant::now() + EVENT_TIMEOUT;
+        let mut probe = tokio::time::interval(Duration::from_millis(250));
+        loop {
+            tokio::select! {
+                _ = tokio::time::sleep_until(deadline) => {
+                    panic!("shell readiness timed out; transcript: {:?}", decoded(&events));
+                }
+                _ = probe.tick() => {
+                    write_line(terminals, terminal_id, "[Console]::WriteLine(('RCODE_TEST_' + 'READY'))");
+                }
+                event = rx.recv() => {
+                    let event = event.expect("terminal stream stays open during startup");
+                    events.push(event);
+                    if decoded(&events).contains("RCODE_TEST_READY") { break; }
+                }
+            }
+        }
     }
 
     fn write_line(terminals: &Terminals, terminal_id: &str, command: &str) {
@@ -917,7 +971,7 @@ mod windows_tests {
         // command typed into PSReadLine while PowerShell is still starting.
         let pid = super::lock(&terminals.session(&session.id).unwrap()).process_id;
         assert!(process_exists(pid).await, "PowerShell child is running");
-        wait_for_shell_prompt(&terminals, &session.id).await;
+        wait_for_shell_ready(&terminals, &session.id).await;
         (terminals, session.id, pid)
     }
 
@@ -940,7 +994,7 @@ mod windows_tests {
         assert_eq!(session.shell.to_ascii_lowercase(), "powershell.exe");
 
         let mut live = terminals.subscribe(&session.id, None).expect("subscribe");
-        wait_for_shell_prompt(&terminals, &session.id).await;
+        wait_for_shell_ready(&terminals, &session.id).await;
         write_line(
             &terminals,
             &session.id,

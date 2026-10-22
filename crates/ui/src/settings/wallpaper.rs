@@ -2,6 +2,7 @@
 use std::path::{Path, PathBuf};
 
 use gpui::{App, Global, Task};
+use rcode_presentation::TextKey;
 use std::collections::VecDeque;
 
 const HISTORY_LIMIT: usize = 8;
@@ -24,12 +25,13 @@ fn choose(
     String,
 > {
     let entries = std::fs::read_dir(folder).map_err(|_| {
-        "Unable to read the wallpaper folder. Choose an accessible folder in Appearance."
-            .to_string()
+        crate::l10n::localizer().text(TextKey::AuditSettingsWallpaperFolderUnreadable)
     })?;
     let mut candidates = Vec::new();
     for entry in entries {
-        let entry = entry.map_err(|_| "Unable to read the wallpaper folder.".to_string())?;
+        let entry = entry.map_err(|_| {
+            crate::l10n::localizer().text(TextKey::AuditSettingsWallpaperFolderUnreadable)
+        })?;
         let path = entry.path();
         let supported = path
             .extension()
@@ -63,7 +65,7 @@ fn choose(
             return Ok((path, staged, image));
         }
     }
-    Err("No readable wallpapers found in this folder. Add images such as PNG or JPEG, or choose another folder.".into())
+    Err(crate::l10n::localizer().text(TextKey::AuditSettingsWallpaperFolderEmpty))
 }
 
 const LOOKAHEAD: usize = 3;
@@ -114,10 +116,9 @@ struct Candidate {
 
 impl Candidate {
     fn load(key: &QueueKey, history: &[PathBuf]) -> Result<Self, String> {
-        let folder = key
-            .folder
-            .as_deref()
-            .ok_or_else(|| "Choose a wallpaper folder in Appearance first.".to_string())?;
+        let folder = key.folder.as_deref().ok_or_else(|| {
+            crate::l10n::localizer().text(TextKey::AuditSettingsWallpaperFolderRequired)
+        })?;
         let (source, staged, image) = choose(folder, history)?;
         let artwork = crate::new_thread_background_effects::PreloadedArtwork::load(
             &image, key.effect, key.light,
@@ -258,7 +259,9 @@ pub fn randomize(cx: &mut App) -> Task<Result<(), String>> {
     }
     cx.spawn(async move |cx| {
         if folder.is_none() {
-            return Err("Choose a wallpaper folder in Appearance first.".into());
+            return Err(
+                crate::l10n::localizer().text(TextKey::AuditSettingsWallpaperFolderRequired)
+            );
         }
         loop {
             let result = cx.update(|cx| {

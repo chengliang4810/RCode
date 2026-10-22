@@ -371,7 +371,7 @@ impl FilesSurface {
                         surface.search_state.active = 0;
                     }
                     Err(error) => {
-                        surface.search_state.error = Some(error.to_string().into());
+                        surface.search_state.error = Some(error.display_message().into());
                     }
                 }
                 surface.search_list.reset_with_uniform_height(
@@ -501,7 +501,7 @@ impl FilesSurface {
                     Err(error) => {
                         let _ = this.update(cx, |surface, cx| {
                             if surface.accepts_reveal(&context, generation, reveal_generation) {
-                                surface.search_state.error = Some(error.to_string().into());
+                                surface.search_state.error = Some(error.display_message().into());
                                 cx.notify();
                             }
                         });

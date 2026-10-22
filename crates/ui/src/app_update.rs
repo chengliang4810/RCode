@@ -13,6 +13,7 @@
 //! installed when the app quits — so nobody stays on a stale version just
 //! because they never clicked. `RCODE_AUTO_UPDATE=0` keeps it report-only.
 
+use rcode_presentation::{Localizer, TextKey};
 use std::path::{Path, PathBuf};
 
 use gpui::{App, AppContext as _, Context, Entity, Global, SharedString, Task};
@@ -222,7 +223,7 @@ impl AppUpdate {
             let manifest = rcode_update::fetch_latest(&release_base).await?;
             anyhow::ensure!(
                 rcode_update::version_newer(&manifest.version, rcode_update::current_version()),
-                "the release feed no longer offers a newer version"
+                crate::l10n::localizer().text(TextKey::AuditSettingsUpdateReleaseUnavailable)
             );
             let staged = install
                 .stage_desktop(&release_base, &manifest, &data_dir)
@@ -254,6 +255,18 @@ impl AppUpdate {
             .ok();
         }));
         cx.notify();
+    }
+
+    pub(crate) fn blocker_text(blocker: &rcode_update::UpdateBlocker) -> String {
+        match blocker {
+            rcode_update::UpdateBlocker::Translocated | rcode_update::UpdateBlocker::DiskImage => {
+                crate::l10n::localizer().text(TextKey::AuditUpdateReadOnly)
+            }
+            rcode_update::UpdateBlocker::NotWritable(path) => crate::l10n::localizer().format_with(
+                TextKey::AuditUpdateNotWritable,
+                &[("path", &path.display().to_string())],
+            ),
+        }
     }
 
     /// "Check for Updates…": check now and report the outcome in a dialog. A
@@ -385,42 +398,72 @@ pub fn strip_for(
     flow: &Flow,
     latest: &str,
 ) -> (SharedString, StripAction) {
+    strip_for_with_localizer(install, blocked, flow, latest, crate::l10n::localizer())
+}
+
+/// Formats a strip without depending on the process-wide display language.
+pub fn strip_for_with_localizer(
+    install: &InstallKind,
+    blocked: bool,
+    flow: &Flow,
+    latest: &str,
+    localizer: &Localizer,
+) -> (SharedString, StripAction) {
     if install.supports_desktop_update() {
         if blocked {
             return (
-                format!("Update available — v{latest}").into(),
+                localizer
+                    .format_with(TextKey::AuditUpdateStripAvailable, &[("version", latest)])
+                    .into(),
                 StripAction::Explain,
             );
         }
         return match flow {
             Flow::Idle => (
-                format!("Update available — v{latest}").into(),
+                localizer
+                    .format_with(TextKey::AuditUpdateStripAvailable, &[("version", latest)])
+                    .into(),
                 StripAction::Download,
             ),
-            Flow::Downloading { version } => {
-                (format!("Downloading v{version}…").into(), StripAction::None)
-            }
+            Flow::Downloading { version } => (
+                localizer
+                    .format_with(
+                        TextKey::AuditUpdateStripDownloading,
+                        &[("version", version)],
+                    )
+                    .into(),
+                StripAction::None,
+            ),
             Flow::Ready { .. } => (
-                "Update ready — restart to apply".into(),
+                localizer.text(TextKey::AuditUpdateStripReady).into(),
                 StripAction::Restart,
             ),
             Flow::Failed { message, .. } => (
-                format!("Update failed: {message}").into(),
+                localizer
+                    .format_with(TextKey::AuditUpdateStripFailed, &[("error", message)])
+                    .into(),
                 StripAction::Download,
             ),
-            Flow::Installed => ("Restarting…".into(), StripAction::None),
+            Flow::Installed => (
+                localizer.text(TextKey::AuditUpdateRestarting).into(),
+                StripAction::None,
+            ),
         };
     }
     if matches!(install, InstallKind::Managed { .. }) {
         (
-            format!("Update available — v{latest} · run `rcode update`").into(),
+            localizer
+                .format_with(TextKey::AuditUpdateStripCli, &[("version", latest)])
+                .into(),
             StripAction::Advise {
                 open_releases: false,
             },
         )
     } else {
         (
-            format!("Update available — v{latest} · download from GitHub").into(),
+            localizer
+                .format_with(TextKey::AuditUpdateStripDownload, &[("version", latest)])
+                .into(),
             StripAction::Advise {
                 open_releases: true,
             },
@@ -446,14 +489,16 @@ pub fn install_on_quit(cx: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rcode_presentation::LanguagePreference;
 
     #[test]
     fn strip_follows_the_flow_on_self_updating_installs() {
+        let localizer = Localizer::new(LanguagePreference::EnUs);
         let mac_app = InstallKind::MacApp {
             bundle: PathBuf::from("/Applications/RCode.app"),
         };
         assert_eq!(
-            strip_for(&mac_app, false, &Flow::Idle, "0.2.86"),
+            strip_for_with_localizer(&mac_app, false, &Flow::Idle, "0.2.86", &localizer),
             (
                 SharedString::from("Update available — v0.2.86"),
                 StripAction::Download
@@ -463,7 +508,7 @@ mod tests {
             version: "0.2.86".into(),
         };
         assert_eq!(
-            strip_for(&mac_app, false, &downloading, "0.2.86"),
+            strip_for_with_localizer(&mac_app, false, &downloading, "0.2.86", &localizer),
             (
                 SharedString::from("Downloading v0.2.86…"),
                 StripAction::None
@@ -474,7 +519,7 @@ mod tests {
             staged: PathBuf::from("/tmp/RCode.app"),
         };
         assert_eq!(
-            strip_for(&mac_app, false, &ready, "0.2.86").1,
+            strip_for_with_localizer(&mac_app, false, &ready, "0.2.86", &localizer).1,
             StripAction::Restart
         );
         let failed = Flow::Failed {
@@ -482,7 +527,7 @@ mod tests {
             message: "offline".into(),
         };
         assert_eq!(
-            strip_for(&mac_app, false, &failed, "0.2.86"),
+            strip_for_with_localizer(&mac_app, false, &failed, "0.2.86", &localizer),
             (
                 SharedString::from("Update failed: offline"),
                 StripAction::Download
@@ -490,14 +535,21 @@ mod tests {
         );
         // A translocated or read-only bundle explains instead of failing.
         assert_eq!(
-            strip_for(&mac_app, true, &Flow::Idle, "0.2.86").1,
+            strip_for_with_localizer(&mac_app, true, &Flow::Idle, "0.2.86", &localizer).1,
             StripAction::Explain
         );
     }
 
     #[test]
     fn strip_advises_installs_without_a_desktop_path() {
-        let unmanaged = strip_for(&InstallKind::Unmanaged, false, &Flow::Idle, "0.2.86");
+        let localizer = Localizer::new(LanguagePreference::EnUs);
+        let unmanaged = strip_for_with_localizer(
+            &InstallKind::Unmanaged,
+            false,
+            &Flow::Idle,
+            "0.2.86",
+            &localizer,
+        );
         assert_eq!(
             unmanaged,
             (
@@ -510,7 +562,7 @@ mod tests {
         let managed = InstallKind::Managed {
             app_root: PathBuf::from("/home/u/.rcode/app"),
         };
-        let strip = strip_for(&managed, false, &Flow::Idle, "0.2.86");
+        let strip = strip_for_with_localizer(&managed, false, &Flow::Idle, "0.2.86", &localizer);
         if cfg!(target_os = "linux") {
             // Linux desktop installs share the managed layout and update
             // themselves like the other desktop platforms.
@@ -526,15 +578,78 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn windows_installs_drive_the_desktop_flow() {
+        let localizer = Localizer::new(LanguagePreference::EnUs);
         let installed = InstallKind::WindowsPortable {
             directory: PathBuf::from(r"C:\Users\u\AppData\Local\Programs\RCode"),
         };
         assert_eq!(
-            strip_for(&installed, false, &Flow::Idle, "0.2.86"),
+            strip_for_with_localizer(&installed, false, &Flow::Idle, "0.2.86", &localizer),
             (
                 SharedString::from("Update available — v0.2.86"),
                 StripAction::Download
             )
+        );
+    }
+
+    #[test]
+    fn chinese_update_strips_preserve_versions_errors_and_actions() {
+        let localizer = Localizer::new(LanguagePreference::ZhCn);
+        let install = InstallKind::MacApp {
+            bundle: PathBuf::from("/Applications/RCode.app"),
+        };
+        for (flow, expected, action) in [
+            (Flow::Idle, "有可用更新 — v0.2.86", StripAction::Download),
+            (
+                Flow::Downloading {
+                    version: "0.2.86".into(),
+                },
+                "正在下载 v0.2.86…",
+                StripAction::None,
+            ),
+            (
+                Flow::Ready {
+                    version: "0.2.86".into(),
+                    staged: PathBuf::from("/tmp/RCode.app"),
+                },
+                "更新已就绪 — 重启以应用",
+                StripAction::Restart,
+            ),
+            (
+                Flow::Failed {
+                    version: "0.2.86".into(),
+                    message: "HTTP 503".into(),
+                },
+                "更新失败：HTTP 503",
+                StripAction::Download,
+            ),
+            (Flow::Installed, "正在重启…", StripAction::None),
+        ] {
+            assert_eq!(
+                strip_for_with_localizer(&install, false, &flow, "0.2.86", &localizer),
+                (SharedString::from(expected), action),
+            );
+        }
+        assert_eq!(
+            strip_for_with_localizer(&install, true, &Flow::Idle, "0.2.86", &localizer),
+            (
+                SharedString::from("有可用更新 — v0.2.86"),
+                StripAction::Explain
+            ),
+        );
+        assert_eq!(
+            strip_for_with_localizer(
+                &InstallKind::Unmanaged,
+                false,
+                &Flow::Idle,
+                "0.2.86",
+                &localizer
+            ),
+            (
+                SharedString::from("有可用更新 — v0.2.86 · 从 GitHub 下载"),
+                StripAction::Advise {
+                    open_releases: true
+                },
+            ),
         );
     }
 }

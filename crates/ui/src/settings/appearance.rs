@@ -392,9 +392,12 @@ impl AppearancePage {
         let settings = crate::settings::current(cx);
         let (render_math, math_font, math_size) =
             (settings.render_math, settings.math_font, settings.math_size);
-        let font_control = widgets::select("math-font", "Math font", theme, |page: &mut Self| {
-            &mut page.math_font_select
-        })
+        let font_control = widgets::select(
+            "math-font",
+            crate::l10n::localizer().text(TextKey::AuditSettingsMathFont),
+            theme,
+            |page: &mut Self| &mut page.math_font_select,
+        )
         .options(
             MathFont::ALL
                 .into_iter()
@@ -411,14 +414,17 @@ impl AppearancePage {
             cx.notify();
         })
         .render(&self.math_font_select, cx);
-        let size_control = widgets::select("math-size", "Math size", theme, |page: &mut Self| {
-            &mut page.math_size_select
-        })
+        let size_control = widgets::select(
+            "math-size",
+            crate::l10n::localizer().text(TextKey::AuditSettingsMathSize),
+            theme,
+            |page: &mut Self| &mut page.math_size_select,
+        )
         .options(
             MATH_SIZES.into_iter().map(|size| {
                 let option = widgets::SelectOption::new(format!("{size}%"));
                 if size == MATH_SIZE_DEFAULT {
-                    option.detail("Default")
+                    option.detail(crate::l10n::localizer().text(TextKey::PickersDefault))
                 } else {
                     option
                 }
@@ -437,13 +443,17 @@ impl AppearancePage {
                     div()
                         .flex_1()
                         .min_w_0()
-                        .child(widgets::row_title(theme, "Render math"))
+                        .child(widgets::row_title(
+                            theme,
+                            crate::l10n::localizer().text(TextKey::SettingsAppearanceMathAria),
+                        ))
                         .child(widgets::meta_line(
                             theme,
                             vec![
                                 div()
                                     .child(
-                                        "Typeset LaTeX in messages. Off shows the source as code.",
+                                        crate::l10n::localizer()
+                                            .text(TextKey::AuditSettingsMathRenderDetail),
                                     )
                                     .into_any_element(),
                             ],
@@ -475,7 +485,10 @@ impl AppearancePage {
                     div()
                         .flex_1()
                         .min_w(px(160.0))
-                        .child(widgets::row_title(theme, "Math font"))
+                        .child(widgets::row_title(
+                            theme,
+                            crate::l10n::localizer().text(TextKey::AuditSettingsMathFont),
+                        ))
                         .child(widgets::meta_line(
                             theme,
                             vec![div().child(math_font.description()).into_any_element()],
@@ -488,7 +501,10 @@ impl AppearancePage {
                     div()
                         .flex_1()
                         .min_w(px(160.0))
-                        .child(widgets::row_title(theme, "Math size"))
+                        .child(widgets::row_title(
+                            theme,
+                            crate::l10n::localizer().text(TextKey::AuditSettingsMathSize),
+                        ))
                         .child(widgets::meta_line(
                             theme,
                             vec![
@@ -1438,8 +1454,18 @@ fn source_name(path: &Path) -> String {
     path.file_stem()
         .and_then(|name| name.to_str())
         .filter(|name| !name.is_empty())
-        .unwrap_or("Custom theme")
-        .to_owned()
+        .map(str::to_owned)
+        .unwrap_or_else(|| crate::l10n::localizer().text(TextKey::AuditSettingsCustomTheme))
+}
+
+fn theme_source_label(source: &rcode_theme::CustomThemeSource) -> String {
+    use rcode_theme::CustomThemeSource;
+    crate::l10n::localizer().text(match source {
+        CustomThemeSource::ImportedSnapshot { .. } => TextKey::SettingsAppearanceImported,
+        CustomThemeSource::LinkedFile { .. } => TextKey::AuditSettingsThemeLinkedFile,
+        CustomThemeSource::LinkedPackage { .. } => TextKey::AuditSettingsThemeLinkedPackage,
+        CustomThemeSource::EditableFile { .. } => TextKey::AuditSettingsThemeEditableFile,
+    })
 }
 
 fn slug(value: &str) -> String {
@@ -3395,8 +3421,11 @@ impl AppearancePage {
                 &crate::l10n::localizer().text(TextKey::SettingsAppearanceThemeMapping),
             ))
             .child(
-                popover::dialog_body(theme, format!("{} · {}", entry.name, entry.source.label()))
-                    .mt(px(6.0)),
+                popover::dialog_body(
+                    theme,
+                    format!("{} · {}", entry.name, theme_source_label(&entry.source)),
+                )
+                .mt(px(6.0)),
             );
         for variant in &entry.family.variants {
             card = card
@@ -3454,7 +3483,7 @@ impl AppearancePage {
             CustomThemeStatus::Ready => localizer.format_with(
                 TextKey::SettingsAppearanceThemeStatus,
                 &[
-                    ("source", entry.source.label()),
+                    ("source", theme_source_label(&entry.source).as_str()),
                     (
                         "variants",
                         localizer
@@ -3710,7 +3739,7 @@ impl Render for AppearancePage {
                 let selected = mode == current_mode;
                 let selection_t = widgets::tab_selection_t(
                     window,
-                    format!("appearance-mode-{}-selection", mode.label()),
+                    format!("appearance-mode-{}-selection", mode.id()),
                     selected,
                     reduced_motion,
                 );
@@ -3722,7 +3751,7 @@ impl Render for AppearancePage {
                     selection_t,
                     preview(mode, &current_themes, current_accent, current_surface),
                 )
-                .id(SharedString::from(format!("appearance-{}", mode.label())))
+                .id(SharedString::from(format!("appearance-{}", mode.id())))
                 .tab_index(0)
                 .role(gpui::Role::Button)
                 .focus_visible(|s| s.border_2().border_color(theme.accent).opacity(1.0))

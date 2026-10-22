@@ -322,14 +322,18 @@ pub(super) struct Host {
 pub(super) struct NativePage(Rc<Host>);
 
 impl NativePage {
-    pub fn new(window: &Window, data: &BrowserData, tx: Sender) -> Result<Self, String> {
+    pub fn new(
+        window: &Window,
+        data: &BrowserData,
+        tx: Sender,
+    ) -> Result<Self, super::BrowserError> {
         use raw_window_handle::{HasWindowHandle, RawWindowHandle};
         let hwnd = match HasWindowHandle::window_handle(window)
             .map_err(|error| error.to_string())?
             .as_raw()
         {
             RawWindowHandle::Win32(handle) => HWND(handle.hwnd.get() as *mut _),
-            _ => return Err("Browser requires a Win32 window".into()),
+            _ => return Err(super::BrowserError::Message(TextKey::BrowserWindowRequired)),
         };
         window
             .enable_scene_overlay()
@@ -374,13 +378,13 @@ impl NativePage {
         self.0.update_visibility();
     }
 
-    pub fn load(&self, url: &str) -> Result<(), String> {
+    pub fn load(&self, url: &str) -> Result<(), super::BrowserError> {
         self.0.error.borrow_mut().take();
         *self.0.requested_url.borrow_mut() = Some(url.into());
         self.0.loading.set(true);
         match &*self.0.page.borrow() {
             Some(page) => unsafe { page.webview.Navigate(&HSTRING::from(url)) }
-                .map_err(|error| error.message()),
+                .map_err(|error| super::BrowserError::Native(error.message())),
             None => {
                 *self.0.pending_url.borrow_mut() = Some(url.into());
                 Ok(())

@@ -330,3 +330,16 @@ conversation-goal-duration-hours = { $count }h
 conversation-goal-duration-days = { $count }d
 
 conversation-load-earlier = Load earlier messages
+
+# Mobile transcript chrome. Model/user content remains verbatim.
+mobile-question-answered = Answered a question
+mobile-question-awaiting = Awaiting your answer…
+mobile-forked-from = Forked from { $title }
+mobile-show-less = Show less
+mobile-show-more = Show more
+mobile-new-file = New file
+mobile-diff-truncated = Diff truncated — showing first { $limit } of { $total } lines
+mobile-more-lines = { $count ->
+    [one] … { $count } more line
+   *[other] … { $count } more lines
+}

@@ -15,9 +15,9 @@ final class PushNotifications: NSObject, UNUserNotificationCenterDelegate {
 
         var title: String {
             switch self {
-            case .done: "Run finished"
-            case .input: "Waiting on your input"
-            case .failed: "Run failed"
+            case .done: L10n.text("Run finished")
+            case .input: L10n.text("Waiting on your input")
+            case .failed: L10n.text("Run failed")
             }
         }
     }

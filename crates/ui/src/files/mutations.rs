@@ -226,7 +226,22 @@ impl FilesSurface {
             }) if intent.origin.checkout_id.as_ref() == Some(checkout_id) => {
                 self.apply_semantic_mutation(change, entry.clone(), true, cx);
             }
-            Ok(WorkspaceMutationOutcome::Rejected { message, .. }) | Err(message) => {
+            Ok(WorkspaceMutationOutcome::Rejected {
+                reason, message, ..
+            }) => {
+                if !observed_applied {
+                    tracing::warn!(?reason, %message, "workspace file mutation rejected");
+                    self.mutation_error = Some(
+                        rcode_presentation::workspace::mutation_failure(
+                            crate::l10n::localizer(),
+                            *reason,
+                            message,
+                        )
+                        .into(),
+                    );
+                }
+            }
+            Err(message) => {
                 if !observed_applied {
                     self.mutation_error = Some(message.clone().into());
                 }

@@ -52,12 +52,12 @@ final class CoreSessionSource: SessionSource {
         let row = app?.row(chatId)
         hostDevice = c.host.deviceId
         var next = SessionChrome()
-        next.title = c.title
-        let project = row?.project?.name ?? "No project"
+        next.title = row?.hasTitle == false ? L10n.text("New session") : c.title
+        let project = row?.project?.name ?? L10n.text("No project")
         next.subtitle = c.host.name.map { "\(project) @ \($0)" } ?? project
         next.running = c.live.turnRunning
         next.canSteer = c.host.capabilities.midTurnSteering ?? false
-        next.placeholder = "Message \(row?.harnessLabel ?? "the agent")"
+        next.placeholder = L10n.format("message.placeholder", row?.harnessLabel ?? L10n.text("the agent"))
         var chips: [ComposerChip] = []
         if let model = row?.modelLabel ?? row?.harnessLabel {
             chips.append(ComposerChip(id: "model", title: model, symbol: nil, icon: BrandMarks.image(for: row?.harness ?? "claude-code", side: 13)))
@@ -76,7 +76,7 @@ final class CoreSessionSource: SessionSource {
             if fraction >= 0.5 {
                 chips.append(ComposerChip(
                     id: "context",
-                    title: "\(Int((fraction * 100).rounded()))% context",
+                    title: L10n.format("context.percent", Int((fraction * 100).rounded())),
                     symbol: fraction >= 0.85 ? "exclamationmark.circle" : "circle.lefthalf.filled",
                     tint: fraction >= 0.85 ? Palette.warning : nil
                 ))
@@ -88,7 +88,7 @@ final class CoreSessionSource: SessionSource {
         } else if c.sendState == .failed {
             next.banner = .notDelivered
         } else if c.sendState == .queued {
-            next.banner = .failed("\(c.host.name ?? "Host") is offline — will send when it's back")
+            next.banner = .failed(L10n.format("host.offline.queued", c.host.name ?? L10n.text("Host")))
         } else if c.sendState == .sending {
             next.banner = .sending
         } else if app?.connectivity?.state == .offline {
@@ -105,9 +105,9 @@ final class CoreSessionSource: SessionSource {
         }
         next.queue = c.queue.map { q in
             let gate: String? = switch q.gate {
-            case let .editing(_, _, mine)?: mine ? "Editing" : "Being edited"
-            case .reviewRequired?: "Needs review"
-            case nil: q.actionPending ? "Updating" : nil
+            case let .editing(_, _, mine)?: mine ? L10n.text("Editing") : L10n.text("Being edited")
+            case .reviewRequired?: L10n.text("Needs review")
+            case nil: q.actionPending ? L10n.text("Updating") : nil
             }
             return SessionChrome.QueuedItem(id: q.id, text: q.visibleText, thumbnail: nil, gate: gate)
         }
@@ -129,7 +129,7 @@ final class CoreSessionSource: SessionSource {
             return true
         } catch {
             // Kept across refreshes (which rebuild the chrome) until the next send.
-            sendFailure = "Couldn't send: \(error)"
+            sendFailure = L10n.format("send.failed", L10n.error(error))
             refresh()
             return false
         }
@@ -214,7 +214,7 @@ final class CoreSessionSource: SessionSource {
         let harness = row.harness ?? "claude-code"
         switch id {
         case "model":
-            return UIMenu(title: "Model", children: [UIDeferredMenuElement { [weak self] done in
+            return UIMenu(title: L10n.text("Model"), children: [UIDeferredMenuElement { [weak self] done in
                 guard let self else { return done([]) }
                 Task { @MainActor in
                     let models = (try? await self.client.listModels(deviceId: self.hostDevice, harness: harness)) ?? fallbackModels(harness: harness)
@@ -226,7 +226,7 @@ final class CoreSessionSource: SessionSource {
                 }
             }])
         case "effort":
-            return UIMenu(title: "Reasoning effort", children: [UIDeferredMenuElement { [weak self] done in
+            return UIMenu(title: L10n.text("Reasoning effort"), children: [UIDeferredMenuElement { [weak self] done in
                 guard let self else { return done([]) }
                 Task { @MainActor in
                     let models = (try? await self.client.listModels(deviceId: self.hostDevice, harness: harness)) ?? fallbackModels(harness: harness)
@@ -241,8 +241,8 @@ final class CoreSessionSource: SessionSource {
         case "pr":
             guard let url = row.pullRequest.flatMap({ URL(string: $0.url) }) else { return nil }
             return UIMenu(title: row.pullRequest?.title ?? "", children: [
-                UIAction(title: "Open Pull Request", image: UIImage(systemName: "safari")) { _ in UIApplication.shared.open(url) },
-                UIAction(title: "Copy Link", image: UIImage(systemName: "link")) { _ in UIPasteboard.general.url = url },
+                UIAction(title: L10n.text("Open Pull Request"), image: UIImage(systemName: "safari")) { _ in UIApplication.shared.open(url) },
+                UIAction(title: L10n.text("Copy Link"), image: UIImage(systemName: "link")) { _ in UIPasteboard.general.url = url },
             ])
         default:
             return nil

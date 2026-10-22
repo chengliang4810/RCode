@@ -794,11 +794,9 @@ impl TerminalPanel {
                     let _ = this.update(cx, |panel, cx| {
                         if let Some(tab) = panel.tab_mut(&chat, key) {
                             tab.emulator.feed(
-                                crate::l10n::localizer()
-                                    .format_with(
-                                        TextKey::TerminalOpenFailed,
-                                        &[("reason", &err.to_string())],
-                                    )
+                                rcode_presentation::workspace::terminal_open_failure(
+                                    crate::l10n::localizer(), &err.to_string(),
+                                )
                                     .as_bytes(),
                             );
                             tab.exited = Some(-1);

@@ -32,6 +32,7 @@ async fn git(cwd: &Path, args: &[&str]) {
 async fn init_repo(path: &Path) {
     std::fs::create_dir_all(path.join("src/nested")).expect("repo tree");
     git(path, &["init", "-b", "main"]).await;
+    git(path, &["config", "core.autocrlf", "false"]).await;
     std::fs::write(path.join("README.md"), "hello\n").expect("readme");
     std::fs::write(path.join("src/lib.rs"), "pub fn answer() -> u8 { 42 }\n").expect("source");
     std::fs::write(path.join("src/nested/mod.rs"), "pub mod child;\n").expect("nested source");
@@ -551,12 +552,22 @@ async fn projectless_home_is_required_for_files_catalogs_and_terminal() {
         ),
     ] {
         let error = client.call(method, params).await.expect_err(method);
-        assert!(
-            error
-                .to_string()
-                .contains("User home directory unavailable"),
-            "{method}: {error}"
-        );
+        if method == methods::OPEN_TERMINAL {
+            assert_eq!(
+                rcode_proto::terminal_errors::TerminalOpenFailure::decode(&error.to_string()),
+                Some(
+                    rcode_proto::terminal_errors::TerminalOpenFailure::WorkingDirectoryUnavailable
+                ),
+                "{method}: {error}",
+            );
+        } else {
+            assert!(
+                error
+                    .to_string()
+                    .contains("User home directory unavailable"),
+                "{method}: {error}"
+            );
+        }
     }
     client
         .call(
@@ -633,7 +644,10 @@ async fn write_rejects_changed_checkout_even_when_contents_match() {
         .call(methods::WRITE_WORKSPACE_FILE, request.clone())
         .await
         .unwrap_err();
-    assert!(error.to_string().contains("Workspace changed"), "{error}");
+    assert_eq!(
+        rcode_proto::workspace_errors::WorkspaceFailure::decode(&error.to_string()),
+        Some(rcode_proto::workspace_errors::WorkspaceFailure::WorkspaceChanged),
+    );
     request
         .as_object_mut()
         .unwrap()
@@ -852,7 +866,10 @@ async fn absolute_paths_read_inside_normally_and_outside_read_only() {
         )
         .await
         .expect_err("missing outside read");
-    assert!(error.to_string().contains("not found"), "{error}");
+    assert_eq!(
+        rcode_proto::workspace_errors::WorkspaceFailure::decode(&error.to_string()),
+        Some(rcode_proto::workspace_errors::WorkspaceFailure::FileMissing),
+    );
     let directory: WorkspaceFileText = serde_json::from_value(
         client
             .call(

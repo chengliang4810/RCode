@@ -48,20 +48,7 @@ pub(super) fn renamed_path(path: &str, name: &str) -> Result<String, String> {
 }
 /// "a.txt" for one entry; "3 items (a.txt, b.txt and 1 more)" for several.
 fn delete_subject(paths: &[String]) -> String {
-    let names = paths
-        .iter()
-        .map(|path| path.rsplit('/').next().unwrap_or(path))
-        .collect::<Vec<_>>();
-    match names.as_slice() {
-        [name] => (*name).to_string(),
-        [first, second] => format!("2 items ({first} and {second})"),
-        [first, second, rest @ ..] => format!(
-            "{} items ({first}, {second} and {} more)",
-            names.len(),
-            rest.len()
-        ),
-        [] => String::new(),
-    }
+    rcode_presentation::workspace::delete_subject(crate::l10n::localizer(), paths)
 }
 
 impl FilesSurface {
@@ -586,19 +573,6 @@ mod tests {
                 .borrow()
                 .iter()
                 .any(|event| matches!(event, FilesEvent::Mutate(_)))
-        );
-    }
-    #[test]
-    fn delete_copy_names_a_few_selected_entries() {
-        let paths = |names: &[&str]| names.iter().map(|n| n.to_string()).collect::<Vec<_>>();
-        assert_eq!(delete_subject(&paths(&["src/a.txt"])), "a.txt");
-        assert_eq!(
-            delete_subject(&paths(&["a.txt", "src"])),
-            "2 items (a.txt and src)"
-        );
-        assert_eq!(
-            delete_subject(&paths(&["a.txt", "b.txt", "c/d.txt", "e"])),
-            "4 items (a.txt, b.txt and 2 more)"
         );
     }
 

@@ -9619,7 +9619,11 @@ fn more_lines_row(truncated_by: usize, theme: &Theme) -> gpui::Div {
         .items_center()
         .text_size(px(TOOL_TEXT_SIZE))
         .text_color(theme.text_faint)
-        .child(SharedString::from(format!("… {truncated_by} more lines")))
+        .child(SharedString::from(crate::l10n::localizer().format_count(
+            rcode_presentation::TextKey::AuditMoreLines,
+            "count",
+            truncated_by as i64,
+        )))
 }
 
 /// Shape one flattened thought line into gpui text runs — the detail-body

@@ -65,12 +65,12 @@ enum MathSettings {
 
     static func detail(_ f: MathFace) -> String {
         switch f {
-        case .fira: "A sans that sits beside the interface font."
-        case .stixTwo: "A serif with the Times-like TeX look."
-        case .computerModern: "The classic LaTeX look."
-        case .libertinus: "A warm book serif."
-        case .pagella: "TeX Gyre Pagella, a Palatino serif."
-        case .euler: "Zapf's upright, hand-drawn math."
+        case .fira: L10n.text("A sans that sits beside the interface font.")
+        case .stixTwo: L10n.text("A serif with the Times-like TeX look.")
+        case .computerModern: L10n.text("The classic LaTeX look.")
+        case .libertinus: L10n.text("A warm book serif.")
+        case .pagella: L10n.text("TeX Gyre Pagella, a Palatino serif.")
+        case .euler: L10n.text("Zapf's upright, hand-drawn math.")
         }
     }
 
@@ -724,18 +724,18 @@ extension TranscriptListView: UIContextMenuInteractionDelegate {
         return UIContextMenuConfiguration(identifier: NSNumber(value: model.display.key), previewProvider: nil) { _ in
             var actions: [UIMenuElement] = []
             if !block.isEmpty {
-                actions.append(UIAction(title: "Copy", image: UIImage(systemName: "doc.on.doc")) { _ in
+                actions.append(UIAction(title: L10n.text("Copy"), image: UIImage(systemName: "doc.on.doc")) { _ in
                     UIPasteboard.general.string = block
                 })
             }
             if let message = frame.messageText(index: index), !message.isEmpty, message != block {
-                actions.append(UIAction(title: "Copy Message", image: UIImage(systemName: "doc.on.clipboard")) { _ in
+                actions.append(UIAction(title: L10n.text("Copy Message"), image: UIImage(systemName: "doc.on.clipboard")) { _ in
                     UIPasteboard.general.string = message
                 })
             }
             let selectable = frame.messageText(index: index) ?? block
             if !selectable.isEmpty {
-                actions.append(UIAction(title: "Select Text", image: UIImage(systemName: "character.cursor.ibeam")) { [weak self] _ in
+                actions.append(UIAction(title: L10n.text("Select Text"), image: UIImage(systemName: "character.cursor.ibeam")) { [weak self] _ in
                     self?.presentSelection(selectable)
                 })
             }
@@ -774,7 +774,7 @@ final class SelectTextViewController: UIViewController {
     private let text: String
     private let mono: Bool
 
-    init(text: String, title: String = "Select Text", mono: Bool = false) {
+    init(text: String, title: String = L10n.text("Select Text"), mono: Bool = false) {
         self.text = text
         self.mono = mono
         super.init(nibName: nil, bundle: nil)

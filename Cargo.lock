@@ -7618,6 +7618,7 @@ dependencies = [
  "rcode-client",
  "rcode-doc",
  "rcode-markdown",
+ "rcode-presentation",
  "rcode-proto",
  "rcode-syntax",
  "rcode-text",

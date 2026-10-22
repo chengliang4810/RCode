@@ -70,7 +70,7 @@ final class ComposerBar: UIView, UITextViewDelegate, UIGestureRecognizerDelegate
     var running = false { didSet { if running != oldValue { refreshAction(animated: true) } } }
     var canSteer = false { didSet { refreshAction(animated: false) } }
     var preferredDelivery: DeliveryMode = .queue { didSet { refreshAction(animated: false) } }
-    var placeholder = "Message" { didSet { placeholderLabel.text = placeholder } }
+    var placeholder = L10n.text("Message") { didSet { placeholderLabel.text = placeholder } }
     var chips: [ComposerChip] = [] { didSet { if chips != oldValue { rebuildChips() } } }
     /// Chips with a menu open it on tap (native, glassy, lazily loaded).
     var chipMenus: [String: () -> UIMenu?] = [:] { didSet { applyChipMenus() } }
@@ -150,7 +150,7 @@ final class ComposerBar: UIView, UITextViewDelegate, UIGestureRecognizerDelegate
         attach.cornerStyle = .capsule
         attach.contentInsets = .zero
         attachButton.configuration = attach
-        attachButton.accessibilityLabel = "Attach"
+        attachButton.accessibilityLabel = L10n.text("Attach")
         attachButton.accessibilityIdentifier = "composer-attach"
         attachButton.translatesAutoresizingMaskIntoConstraints = false
         // Built on open so "Paste Image" reflects the pasteboard right now.
@@ -496,7 +496,7 @@ final class ComposerBar: UIView, UITextViewDelegate, UIGestureRecognizerDelegate
             x.cornerStyle = .capsule
             x.contentInsets = .zero
             let remove = UIButton(configuration: x)
-            remove.accessibilityLabel = "Remove image"
+            remove.accessibilityLabel = L10n.text("Remove image")
             remove.translatesAutoresizingMaskIntoConstraints = false
             remove.addAction(UIAction { [weak self] _ in
                 UIView.animate(withDuration: 0.25) { self?.images.removeAll { $0.id == img.id } }
@@ -616,20 +616,20 @@ final class ComposerBar: UIView, UITextViewDelegate, UIGestureRecognizerDelegate
             apply()
         }
         switch action {
-        case .send: actionButton.accessibilityLabel = "Send message"
-        case .queue: actionButton.accessibilityLabel = steering ? "Steer" : "Queue message"
-        case .stop: actionButton.accessibilityLabel = "Stop response"
+        case .send: actionButton.accessibilityLabel = L10n.text("Send message")
+        case .queue: actionButton.accessibilityLabel = steering ? L10n.text("Steer") : L10n.text("Queue message")
+        case .stop: actionButton.accessibilityLabel = L10n.text("Stop response")
         }
         // Long-press offers the other delivery modes mid-turn.
         if action == .queue {
             var items: [UIMenuElement] = [
-                UIAction(title: "Queue for next turn", image: UIImage(systemName: "text.line.last.and.arrowtriangle.forward")) { [weak self] _ in self?.send(.queue) },
+                UIAction(title: L10n.text("Queue for next turn"), image: UIImage(systemName: "text.line.last.and.arrowtriangle.forward")) { [weak self] _ in self?.send(.queue) },
             ]
             if canSteer {
-                items.append(UIAction(title: "Steer now", subtitle: "Deliver into the running turn", image: UIImage(systemName: "arrow.turn.down.right")) { [weak self] _ in self?.send(.steer) })
+                items.append(UIAction(title: L10n.text("Steer now"), subtitle: L10n.text("Deliver into the running turn"), image: UIImage(systemName: "arrow.turn.down.right")) { [weak self] _ in self?.send(.steer) })
             }
-            items.append(UIAction(title: "Stop and send", image: UIImage(systemName: "stop.circle"), attributes: .destructive) { [weak self] _ in self?.send(.interrupt) })
-            actionButton.menu = UIMenu(title: "While the agent works", children: items)
+            items.append(UIAction(title: L10n.text("Stop and send"), image: UIImage(systemName: "stop.circle"), attributes: .destructive) { [weak self] _ in self?.send(.interrupt) })
+            actionButton.menu = UIMenu(title: L10n.text("While the agent works"), children: items)
             actionButton.showsMenuAsPrimaryAction = false
         } else {
             actionButton.menu = nil
@@ -666,7 +666,7 @@ final class ComposerBar: UIView, UITextViewDelegate, UIGestureRecognizerDelegate
 
     // External keyboards: ⌘↩ sends.
     override var keyCommands: [UIKeyCommand]? {
-        [UIKeyCommand(title: "Send", action: #selector(commandReturn), input: "\r", modifierFlags: .command)]
+        [UIKeyCommand(title: L10n.text("Send"), action: #selector(commandReturn), input: "\r", modifierFlags: .command)]
     }
 
     @objc private func commandReturn() {

@@ -43,7 +43,10 @@ impl Shell {
         }
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             source.update(cx, |files, cx| {
-                files.report_mutation_error("Workspace service is unavailable".into(), cx)
+                files.report_mutation_error(
+                    crate::l10n::localizer().text(TextKey::FilesServiceUnavailable),
+                    cx,
+                )
             });
             return;
         };
@@ -59,7 +62,10 @@ impl Shell {
             .any(|surface| surface.read(cx).mutation_busy())
         {
             source.update(cx, |files, cx| {
-                files.report_mutation_error("Another file operation is still running".into(), cx)
+                files.report_mutation_error(
+                    crate::l10n::localizer().text(TextKey::FilesOperationRunning),
+                    cx,
+                )
             });
             return;
         }
@@ -86,10 +92,12 @@ impl Shell {
                         .await;
                 }
                 if !ready {
-                    return Err("Wait for the pending save to finish and try again".into());
+                    return Err(crate::l10n::localizer().text(TextKey::FilesOperationWaitSave));
                 }
                 if !source.read_with(cx, |files, cx| files.accepts_origin(&intent.origin, cx)) {
-                    return Err("Workspace changed before the operation started".into());
+                    return Err(
+                        crate::l10n::localizer().text(TextKey::FilesOperationWorkspaceChanged)
+                    );
                 }
                 // Only refresh the source revision when our own save was awaited.
                 // Otherwise an external edit must cause SourceChanged, not consent.
@@ -106,15 +114,19 @@ impl Shell {
                             &[intent.entry.path.clone()],
                         )
                         .await
-                        .map_err(|e| e.to_string())?;
+                        .map_err(|e| e.display_message())?;
                     if page.checkout_id != intent.origin.checkout_id {
-                        return Err("Workspace changed while saving".into());
+                        return Err(
+                            crate::l10n::localizer().text(TextKey::FilesOperationChangedSaving)
+                        );
                     }
                     let entry = page
                         .entries
                         .into_iter()
                         .find(|entry| entry.path == intent.entry.path)
-                        .ok_or("Source no longer exists")?;
+                        .ok_or_else(|| {
+                            crate::l10n::localizer().text(TextKey::FilesMutationSourceMissing)
+                        })?;
                     intent.entry.mutation_revision = entry.mutation_revision;
                 }
                 let owner_active = shell
@@ -127,18 +139,17 @@ impl Shell {
                 if !owner_active
                     || !source.read_with(cx, |files, cx| files.accepts_origin(&intent.origin, cx))
                 {
-                    return Err("File operation cancelled after switching sessions".into());
+                    return Err(
+                        crate::l10n::localizer().text(TextKey::FilesOperationSessionChanged)
+                    );
                 }
-                let checkout = intent
-                    .origin
-                    .checkout_id
-                    .clone()
-                    .ok_or("Workspace identity unavailable")?;
-                let revision = intent
-                    .entry
-                    .mutation_revision
-                    .clone()
-                    .ok_or("Refresh the tree before trying again")?;
+                let checkout = intent.origin.checkout_id.clone().ok_or_else(|| {
+                    crate::l10n::localizer().text(TextKey::FilesCheckoutUnavailable)
+                })?;
+                let revision =
+                    intent.entry.mutation_revision.clone().ok_or_else(|| {
+                        crate::l10n::localizer().text(TextKey::FilesOperationRefresh)
+                    })?;
                 if let Some(destination) = &intent.destination {
                     client
                         .move_entry(MoveWorkspaceEntryRequest {
@@ -151,7 +162,7 @@ impl Shell {
                             expected_kind: intent.entry.kind,
                         })
                         .await
-                        .map_err(|e| e.to_string())
+                        .map_err(|e| e.display_message())
                 } else {
                     client
                         .delete_entry(DeleteWorkspaceEntryRequest {
@@ -165,7 +176,7 @@ impl Shell {
                                 == rcode_proto::WorkspaceEntryKind::Directory,
                         })
                         .await
-                        .map_err(|e| e.to_string())
+                        .map_err(|e| e.display_message())
                 }
             }
             .await;
@@ -199,14 +210,16 @@ fn batch_failure_message(
     total: usize,
     message: &str,
 ) -> String {
-    let verb = if intent.destination.is_some() {
-        "Moved"
-    } else {
-        "Deleted"
-    };
     let path = &intent.entry.path;
     let name = path.rsplit('/').next().unwrap_or(path);
-    format!("{verb} {completed} of {total} — {name}: {message}")
+    rcode_presentation::workspace::batch_failure(
+        crate::l10n::localizer(),
+        intent.destination.is_some(),
+        completed,
+        total,
+        name,
+        message,
+    )
 }
 
 #[cfg(test)]
@@ -410,9 +423,9 @@ mod tests {
             ),
             destination: Some("dest/a.txt".into()),
         });
-        assert_eq!(
-            batch_failure_message(&intent, 2, 5, "Destination exists"),
-            "Moved 2 of 5 — a.txt: Destination exists"
-        );
+        let message = batch_failure_message(&intent, 2, 5, "destination");
+        assert!(message.contains("a.txt"));
+        assert!(message.contains('2') && message.contains('5'));
+        assert!(message.contains("destination"));
     }
 }

@@ -365,7 +365,10 @@ impl From<&zc::ComposerState> for ComposerState {
                     questions,
                 }
             }),
-            queue_error: c.queue_error.clone(),
+            queue_error: c
+                .queue_error
+                .as_deref()
+                .map(|message| crate::l10n::host_failure(crate::l10n::localizer(), message)),
             last_submitted_message_id: c.last_submitted_message_id.clone(),
             context_usage: c.context_usage.map(|u| ContextUsage {
                 tokens: u.tokens,

@@ -647,7 +647,7 @@ impl MarkdownPreview {
                                     async move { crate::image_media::decode_image(&mime, bytes) },
                                 )
                                 .await,
-                            Err(error) => Err(error.to_string()),
+                            Err(error) => Err(error.display_message()),
                         };
                         (source, result)
                     }

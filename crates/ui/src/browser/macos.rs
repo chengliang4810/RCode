@@ -1,6 +1,7 @@
 //! AppKit boundary for the browser. Wry owns the native child and its UI
 //! delegate; our navigation delegate supplies browser policy and state. All
 //! callbacks enqueue events, never re-enter GPUI. No page-to-engine IPC.
+use super::BrowserError;
 use super::model::{PageState, Presentation, allowed_navigation};
 use gpui::{Bounds, Pixels, Window};
 use objc2::rc::Retained;
@@ -130,9 +131,9 @@ pub(super) fn persistent_profiles_supported() -> bool {
 }
 
 impl BrowserData {
-    pub(super) fn persistence_notice(&self) -> Option<&'static str> {
+    pub(super) fn persistence_notice(&self) -> Option<String> {
         (self.0.borrow().profile.is_some() && !persistent_profiles_supported())
-            .then_some("Logins are temporary on this macOS version. Use macOS 14 or later, or open this page in your default browser, to keep them.")
+            .then(|| localized(TextKey::BrowserTemporaryLogins))
     }
 }
 
@@ -349,8 +350,9 @@ pub(super) struct Host {
 }
 
 impl NativePage {
-    pub fn new(window: &Window, data: &BrowserData, tx: Sender) -> Result<Self, String> {
-        let mtm = MainThreadMarker::new().ok_or("Browser must be created on the main thread")?;
+    pub fn new(window: &Window, data: &BrowserData, tx: Sender) -> Result<Self, BrowserError> {
+        let mtm = MainThreadMarker::new()
+            .ok_or(BrowserError::Message(TextKey::BrowserMainThreadRequired))?;
         let new_tab = tx.clone();
         let web = wry::WebViewBuilder::new()
             .with_webview_configuration(data.configuration(mtm))
@@ -369,7 +371,8 @@ impl NativePage {
         window
             .enable_scene_overlay()
             .map_err(|error| error.to_string())?;
-        let parent = unsafe { view.superview() }.ok_or("Browser parent is missing")?;
+        let parent = unsafe { view.superview() }
+            .ok_or(BrowserError::Message(TextKey::BrowserParentMissing))?;
         let clip: Retained<BrowserClipView> = unsafe {
             let object = mtm.alloc().set_ivars(ClipState {
                 dragging: Cell::new(false),
@@ -501,12 +504,14 @@ impl NativePage {
     pub fn present(&mut self, presentation: Presentation) {
         self.0.borrow_mut().present(presentation);
     }
-    pub fn load(&self, url: &str) -> Result<(), String> {
+    pub fn load(&self, url: &str) -> Result<(), BrowserError> {
         let host = self.0.borrow();
         host.data.register_preview(url);
         host.observer.ivars().error.borrow_mut().take();
         *host.observer.ivars().requested_url.borrow_mut() = Some(url.into());
-        host.web.load_url(url).map_err(|e| e.to_string())
+        host.web
+            .load_url(url)
+            .map_err(|e| BrowserError::Native(e.to_string()))
     }
     pub fn reload(&self) {
         let host = self.0.borrow();

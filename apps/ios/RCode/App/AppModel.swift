@@ -369,7 +369,7 @@ final class AppModel {
         var page = FrontPage()
         let pinned = ws.front.pinned.map(vm)
         if !pinned.isEmpty {
-            page.folders.append(FolderRowVM(id: "pinned", name: "Pinned", count: pinned.count, symbol: "pin"))
+            page.folders.append(FolderRowVM(id: "pinned", name: L10n.text("Pinned"), count: pinned.count, symbol: "pin"))
         }
         page.sectionSessions["pinned"] = pinned
         for s in ws.front.sections {
@@ -418,7 +418,7 @@ final class AppModel {
                 name = project?.groupName ?? ref.name
             } else {
                 id = "home:" + row.deviceId
-                name = row.deviceName.map { "Home · \($0)" } ?? "Home"
+                name = row.deviceName.map { L10n.format("home.device", $0) } ?? L10n.text("Home")
             }
             if let i = index[id] {
                 groups[i].sessions.append(vm)
@@ -444,7 +444,7 @@ final class AppModel {
         SessionRowVM(
             id: r.id,
             title: r.title,
-            projectName: r.project?.name ?? r.deviceName ?? "No project",
+            projectName: r.project?.name ?? r.deviceName ?? L10n.text("No project"),
             hasProject: r.project != nil,
             // Project-less sessions tone like the desktop's "home" tile.
             colorIndex: Int(r.project?.colorIndex ?? projectColorIndex(spacePath: "home")),
@@ -498,7 +498,7 @@ final class AppModel {
     func archive(_ id: String) {
         attempt("archive") { try client?.archiveSession(chatId: id) }
         let window = UIApplication.shared.connectedScenes.compactMap { ($0 as? UIWindowScene)?.keyWindow }.first
-        Toast.show("Archived", action: "Undo", in: window) { [weak self] in self?.unarchive(id) }
+        Toast.show(L10n.text("Archived"), action: L10n.text("Undo"), in: window) { [weak self] in self?.unarchive(id) }
     }
     func unarchive(_ id: String) { attempt("unarchive") { try client?.unarchiveSession(chatId: id) } }
     func move(_ id: String, toSection section: String?) { attempt("assign") { try client?.assignSection(chatId: id, sectionId: section) } }
@@ -537,16 +537,16 @@ final class AppModel {
     /// What this device is paired with, by the pair itself — there is no
     /// account to name.
     var accountName: String {
-        if isDemo { return "Demo" }
-        guard client != nil else { return "Not paired" }
+        if isDemo { return L10n.text("Demo") }
+        guard client != nil else { return L10n.text("Not paired") }
         let p = AccountProfile.load()
-        return p.orgName ?? "Paired"
+        return p.orgName ?? L10n.text("Paired")
     }
 
     var accountDetail: String {
-        if isDemo { return "Offline demo workspace" }
+        if isDemo { return L10n.text("Offline demo workspace") }
         let p = AccountProfile.load()
-        return [p.email, p.orgName].compactMap { $0 }.joined(separator: " · ").nonEmpty ?? "Not paired"
+        return [p.email, p.orgName].compactMap { $0 }.joined(separator: " · ").nonEmpty ?? L10n.text("Not paired")
     }
 
     /// The account label under the settings rows. There is no account to ask:
@@ -572,7 +572,7 @@ final class AppModel {
 
     /// A device's name; never its id.
     func deviceName(_ id: String) -> String {
-        client?.devices().first { $0.id == id }?.name ?? "Unknown device"
+        client?.devices().first { $0.id == id }?.name ?? L10n.text("Unknown device")
     }
 
     func models(for deviceId: String) async -> [ModelChoice] {

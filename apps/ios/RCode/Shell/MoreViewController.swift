@@ -28,7 +28,7 @@ final class MoreViewController: UIViewController, UICollectionViewDelegate {
     init(app: AppModel) {
         self.app = app
         super.init(nibName: nil, bundle: nil)
-        title = "Settings"
+        title = L10n.text("Settings")
     }
 
     required init?(coder: NSCoder) { fatalError() }
@@ -129,7 +129,7 @@ final class MoreViewController: UIViewController, UICollectionViewDelegate {
     }
 
     private func notificationRows() -> [Row] {
-        var rows = [Row(id: "notify:enabled", title: "Notifications", subtitle: notificationStatus == .denied ? "Turned off in iOS Settings" : "When a session finishes, needs you or fails", symbol: "bell", accessory: .toggle(notificationsOn))]
+        var rows = [Row(id: "notify:enabled", title: L10n.text("Notifications"), subtitle: notificationStatus == .denied ? L10n.text("Turned off in iOS Settings") : L10n.text("When a session finishes, needs you or fails"), symbol: "bell", accessory: .toggle(notificationsOn))]
         if notificationsOn {
             rows += PushNotifications.Kind.allCases.map { kind in
                 let symbol: String = switch kind {
@@ -160,9 +160,9 @@ final class MoreViewController: UIViewController, UICollectionViewDelegate {
             }
             if notificationStatus == .denied {
                 // Only the Settings app can turn them back on.
-                let alert = UIAlertController(title: "Notifications are off", message: "Allow notifications for RCode in iOS Settings.", preferredStyle: .alert)
-                alert.addAction(UIAlertAction(title: "Not Now", style: .cancel) { [weak self] _ in self?.reload() })
-                alert.addAction(UIAlertAction(title: "Open Settings", style: .default) { [weak self] _ in
+                let alert = UIAlertController(title: L10n.text("Notifications are off"), message: L10n.text("Allow notifications for RCode in iOS Settings."), preferredStyle: .alert)
+                alert.addAction(UIAlertAction(title: L10n.text("Not Now"), style: .cancel) { [weak self] _ in self?.reload() })
+                alert.addAction(UIAlertAction(title: L10n.text("Open Settings"), style: .default) { [weak self] _ in
                     if let url = URL(string: UIApplication.openSettingsURLString) { UIApplication.shared.open(url) }
                     self?.reload()
                 })
@@ -186,44 +186,44 @@ final class MoreViewController: UIViewController, UICollectionViewDelegate {
 
     private func reload() {
         var s = NSDiffableDataSourceSnapshot<String, Row>()
-        s.appendSections(["Account"])
+        s.appendSections([L10n.text("Account")])
         s.appendItems([
             Row(id: "account", title: app.accountName, subtitle: app.accountDetail, symbol: "person.crop.circle", accessory: .none),
         ])
-        s.appendSections(["Devices"])
-        s.appendItems(app.hostOptions.map { Row(id: "device:\($0.id)", title: $0.name, subtitle: $0.online ? "Online" : "Offline", symbol: "desktopcomputer", accessory: .dot($0.online)) })
-        s.appendSections(["Notifications"])
+        s.appendSections([L10n.text("Devices")])
+        s.appendItems(app.hostOptions.map { Row(id: "device:\($0.id)", title: $0.name, subtitle: $0.online ? L10n.text("Online") : L10n.text("Offline"), symbol: "desktopcomputer", accessory: .dot($0.online)) })
+        s.appendSections([L10n.text("Notifications")])
         s.appendItems(notificationRows())
-        s.appendSections(["Appearance"])
+        s.appendSections([L10n.text("Appearance")])
         let style = UserDefaults.standard.integer(forKey: "appearance")
         s.appendItems([
-            Row(id: "appearance:0", title: "System", symbol: "circle.lefthalf.filled", accessory: .check(style == 0)),
-            Row(id: "appearance:1", title: "Light", symbol: "sun.max", accessory: .check(style == 1)),
-            Row(id: "appearance:2", title: "Dark", symbol: "moon", accessory: .check(style == 2)),
+            Row(id: "appearance:0", title: L10n.text("System"), symbol: "circle.lefthalf.filled", accessory: .check(style == 0)),
+            Row(id: "appearance:1", title: L10n.text("Light"), symbol: "sun.max", accessory: .check(style == 1)),
+            Row(id: "appearance:2", title: L10n.text("Dark"), symbol: "moon", accessory: .check(style == 2)),
         ])
-        s.appendSections(["Wallpaper"])
-        var wall = [Row(id: "wallpaper:choose", title: WallpaperStore.isSet ? "Change Wallpaper…" : "Choose Wallpaper…", subtitle: WallpaperStore.isSet ? WallpaperStore.name : "Shown behind new chats and the sessions list", symbol: "photo")]
+        s.appendSections([L10n.text("Wallpaper")])
+        var wall = [Row(id: "wallpaper:choose", title: WallpaperStore.isSet ? L10n.text("Change Wallpaper…") : L10n.text("Choose Wallpaper…"), subtitle: WallpaperStore.isSet ? WallpaperStore.name : L10n.text("Shown behind new chats and the sessions list"), symbol: "photo")]
         if WallpaperStore.isSet {
             let effect = WallpaperStore.effect
-            wall.append(Row(id: "wallpaper:effect", title: "Effect", subtitle: "\(WallpaperStore.label(effect)) — \(WallpaperStore.detail(effect))", symbol: "wand.and.stars"))
-            wall.append(Row(id: "wallpaper:remove", title: "Remove Wallpaper", symbol: "trash", accessory: .none, destructive: true))
+            wall.append(Row(id: "wallpaper:effect", title: L10n.text("Effect"), subtitle: "\(WallpaperStore.label(effect)) — \(WallpaperStore.detail(effect))", symbol: "wand.and.stars"))
+            wall.append(Row(id: "wallpaper:remove", title: L10n.text("Remove Wallpaper"), symbol: "trash", accessory: .none, destructive: true))
         }
         s.appendItems(wall)
-        s.appendSections(["Math"])
-        var math = [Row(id: "math:render", title: "Render Math", subtitle: "Off shows LaTeX as its source", symbol: "function", accessory: .toggle(MathSettings.render))]
+        s.appendSections([L10n.text("Math")])
+        var math = [Row(id: "math:render", title: L10n.text("Render Math"), subtitle: L10n.text("Off shows LaTeX as its source"), symbol: "function", accessory: .toggle(MathSettings.render))]
         if MathSettings.render {
             let face = MathSettings.face
-            math.append(Row(id: "math:font", title: "Math Font", subtitle: "\(MathSettings.label(face)) — \(MathSettings.detail(face))", symbol: "textformat"))
-            math.append(Row(id: "math:size", title: "Math Size", subtitle: "\(MathSettings.size)% of the text around it", symbol: "textformat.size"))
+            math.append(Row(id: "math:font", title: L10n.text("Math Font"), subtitle: "\(MathSettings.label(face)) — \(MathSettings.detail(face))", symbol: "textformat"))
+            math.append(Row(id: "math:size", title: L10n.text("Math Size"), subtitle: L10n.format("math.relative-size", MathSettings.size), symbol: "textformat.size"))
         }
         s.appendItems(math)
-        s.appendSections(["Sessions"])
+        s.appendSections([L10n.text("Sessions")])
         s.appendItems([
-            Row(id: "groupByProject", title: "Group by Project", subtitle: "Sessions outside your sections, under their project", symbol: "square.stack.3d.up", accessory: .toggle(app.groupByProject)),
-            Row(id: "archived", title: "Archived Sessions", symbol: "archivebox"),
+            Row(id: "groupByProject", title: L10n.text("Group by Project"), subtitle: L10n.text("Sessions outside your sections, under their project"), symbol: "square.stack.3d.up", accessory: .toggle(app.groupByProject)),
+            Row(id: "archived", title: L10n.text("Archived Sessions"), symbol: "archivebox"),
         ])
         s.appendSections([" "])
-        s.appendItems([Row(id: "signout", title: "Sign Out", symbol: "rectangle.portrait.and.arrow.right", accessory: .none, destructive: true)])
+        s.appendItems([Row(id: "signout", title: L10n.text("Sign Out"), symbol: "rectangle.portrait.and.arrow.right", accessory: .none, destructive: true)])
         dataSource.apply(s, animatingDifferences: false)
     }
 
@@ -239,17 +239,17 @@ final class MoreViewController: UIViewController, UICollectionViewDelegate {
         case "wallpaper:choose":
             WallpaperPicker.present(from: self)
         case "wallpaper:effect":
-            let sheet = UIAlertController(title: "Wallpaper Effect", message: nil, preferredStyle: .actionSheet)
+            let sheet = UIAlertController(title: L10n.text("Wallpaper Effect"), message: nil, preferredStyle: .actionSheet)
             for e in WallpaperStore.allEffects {
                 let action = UIAlertAction(title: WallpaperStore.label(e), style: .default) { _ in WallpaperStore.effect = e }
                 action.setValue(e == WallpaperStore.effect, forKey: "checked")
                 sheet.addAction(action)
             }
-            sheet.addAction(UIAlertAction(title: "Cancel", style: .cancel))
+            sheet.addAction(UIAlertAction(title: L10n.text("Cancel"), style: .cancel))
             sheet.popoverPresentationController?.sourceView = collectionView.cellForItem(at: path)
             present(sheet, animated: true)
         case "math:font":
-            let sheet = UIAlertController(title: "Math Font", message: nil, preferredStyle: .actionSheet)
+            let sheet = UIAlertController(title: L10n.text("Math Font"), message: nil, preferredStyle: .actionSheet)
             for f in MathSettings.allFaces {
                 let action = UIAlertAction(title: MathSettings.label(f), style: .default) { [weak self] _ in
                     MathSettings.face = f
@@ -258,11 +258,11 @@ final class MoreViewController: UIViewController, UICollectionViewDelegate {
                 action.setValue(f == MathSettings.face, forKey: "checked")
                 sheet.addAction(action)
             }
-            sheet.addAction(UIAlertAction(title: "Cancel", style: .cancel))
+            sheet.addAction(UIAlertAction(title: L10n.text("Cancel"), style: .cancel))
             sheet.popoverPresentationController?.sourceView = collectionView.cellForItem(at: path)
             present(sheet, animated: true)
         case "math:size":
-            let sheet = UIAlertController(title: "Math Size", message: nil, preferredStyle: .actionSheet)
+            let sheet = UIAlertController(title: L10n.text("Math Size"), message: nil, preferredStyle: .actionSheet)
             for size in MathSettings.allSizes {
                 let action = UIAlertAction(title: "\(size)%", style: .default) { [weak self] _ in
                     MathSettings.size = size
@@ -271,17 +271,17 @@ final class MoreViewController: UIViewController, UICollectionViewDelegate {
                 action.setValue(size == MathSettings.size, forKey: "checked")
                 sheet.addAction(action)
             }
-            sheet.addAction(UIAlertAction(title: "Cancel", style: .cancel))
+            sheet.addAction(UIAlertAction(title: L10n.text("Cancel"), style: .cancel))
             sheet.popoverPresentationController?.sourceView = collectionView.cellForItem(at: path)
             present(sheet, animated: true)
         case "wallpaper:remove":
             WallpaperStore.remove()
         case "archived":
-            navigationController?.pushViewController(FolderViewController(app: app, folder: FolderRowVM(id: "archived", name: "Archived", count: 0, symbol: "archivebox")), animated: true)
+            navigationController?.pushViewController(FolderViewController(app: app, folder: FolderRowVM(id: "archived", name: L10n.text("Archived"), count: 0, symbol: "archivebox")), animated: true)
         case "signout":
-            let alert = UIAlertController(title: "Sign out?", message: "Local drafts stay on this device.", preferredStyle: .actionSheet)
-            alert.addAction(UIAlertAction(title: "Sign Out", style: .destructive) { [weak self] _ in self?.app.signOut() })
-            alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
+            let alert = UIAlertController(title: L10n.text("Sign out?"), message: L10n.text("Local drafts stay on this device."), preferredStyle: .actionSheet)
+            alert.addAction(UIAlertAction(title: L10n.text("Sign Out"), style: .destructive) { [weak self] _ in self?.app.signOut() })
+            alert.addAction(UIAlertAction(title: L10n.text("Cancel"), style: .cancel))
             alert.popoverPresentationController?.sourceView = collectionView.cellForItem(at: path)
             present(alert, animated: true)
         default:

@@ -3199,7 +3199,7 @@ fn status_description(item: &ChangeRequestListItem, localizer: &Localizer) -> St
         assessment
             .blockers
             .iter()
-            .map(|blocker| blocker.label().to_owned()),
+            .map(|blocker| rcode_presentation::assessment::blocker(localizer, *blocker)),
     );
     if item.review_decision == ChangeRequestReviewDecision::Approved {
         labels.push(localizer.text(TextKey::PrListStatusApproved));
@@ -3211,7 +3211,7 @@ fn status_description(item: &ChangeRequestListItem, localizer: &Localizer) -> St
             .filter(|reason| {
                 **reason != rcode_proto::change_request_assessment::AttentionReason::FailingCi
             })
-            .map(|reason| reason.label().to_owned()),
+            .map(|reason| rcode_presentation::assessment::attention(localizer, *reason)),
     );
     labels.join(" · ")
 }
@@ -3224,7 +3224,7 @@ fn row_status(item: &ChangeRequestListItem, tight: bool) -> String {
         .blockers
         .iter()
         .filter(|blocker| **blocker != Blocker::FailingCi)
-        .map(|blocker| blocker.label().to_owned())
+        .map(|blocker| rcode_presentation::assessment::blocker(localizer, *blocker))
         .collect();
     if item.is_draft && !tight {
         labels.insert(0, localizer.text(TextKey::PrListStatusDraft));
@@ -3239,7 +3239,7 @@ fn row_status(item: &ChangeRequestListItem, tight: bool) -> String {
             .filter(|reason| {
                 **reason != rcode_proto::change_request_assessment::AttentionReason::FailingCi
             })
-            .map(|reason| reason.label().to_owned()),
+            .map(|reason| rcode_presentation::assessment::attention(localizer, *reason)),
     );
     labels.join(" · ")
 }
@@ -3247,12 +3247,13 @@ fn row_status(item: &ChangeRequestListItem, tight: bool) -> String {
 /// The CI state, then the head commit unless the row is tight (its tooltip
 /// keeps the full commit either way).
 fn row_ci_label(item: &ChangeRequestListItem, tight: bool) -> String {
+    let localizer = crate::l10n::localizer();
     if tight || item.head_ref_oid.is_empty() {
-        item.ci.state.label().to_owned()
+        rcode_presentation::assessment::ci_state(localizer, item.ci.state)
     } else {
         format!(
             "{} · {}",
-            item.ci.state.label(),
+            rcode_presentation::assessment::ci_state(localizer, item.ci.state),
             item.head_ref_oid.chars().take(7).collect::<String>()
         )
     }
@@ -3354,10 +3355,8 @@ fn render_pr_identity(item: &ChangeRequestListItem, tight: bool, theme: &Theme) 
                             _ => theme.text_muted,
                         })
                         .tooltip(widgets::text_tooltip({
-                            // The CI state and the missing/action labels come
-                            // from the language-free proto layer; only the
-                            // connective wording ("Commit:", "Next:") and the
-                            // no-action fallback are display text.
+                            // Typed protocol facts get display labels here;
+                            // their stable values also serve agent handoffs.
                             let commit = if item.head_ref_oid.is_empty() {
                                 localizer.text(TextKey::PrListCiCommitUnavailable)
                             } else {
@@ -3366,17 +3365,25 @@ fn render_pr_identity(item: &ChangeRequestListItem, tight: bool, theme: &Theme) 
                             let missing = assessment
                                 .missing
                                 .iter()
-                                .map(|missing| missing.label())
+                                .map(|missing| {
+                                    rcode_presentation::assessment::missing(localizer, *missing)
+                                })
                                 .collect::<Vec<_>>()
                                 .join(" · ");
                             let next = assessment.actions.first().map_or_else(
                                 || localizer.text(TextKey::PrListCiNoAction),
-                                |action| action.label().to_owned(),
+                                |action| rcode_presentation::assessment::action(localizer, *action),
                             );
                             let commit_line = localizer.format_with(
                                 TextKey::PrListCiCommitLine,
                                 &[
-                                    ("state", item.ci.state.label()),
+                                    (
+                                        "state",
+                                        &rcode_presentation::assessment::ci_state(
+                                            localizer,
+                                            item.ci.state,
+                                        ),
+                                    ),
                                     ("commit", commit.as_str()),
                                 ],
                             );
@@ -3395,7 +3402,7 @@ fn render_pr_identity(item: &ChangeRequestListItem, tight: bool, theme: &Theme) 
                             .truncate()
                             .text_size(crate::typography::ui_rems(11.0))
                             .text_color(tone)
-                            .child(status.trim_start_matches("Open · ").to_string()),
+                            .child(status.clone()),
                     )
                 }),
         )
@@ -4852,7 +4859,7 @@ mod tests {
         let draft = crate::l10n::localizer().text(TextKey::PrListStatusDraft);
         assert!(row_status(&item, false).starts_with(&format!("{draft} · ")));
         assert!(!row_status(&item, true).contains(&draft));
-        assert!(row_status(&item, true).contains("Merge conflicts"));
+        assert!(row_status(&item, true).contains(&crate::l10n::localizer().text(TextKey::PrAssessmentConflicts)));
         let (_, cx) = cx.add_window_view(|_, _| RowLayoutFixture { item });
         for (width, diff) in [(360.0, false), (600.0, true)] {
             cx.simulate_resize(gpui::size(px(width), px(480.0)));

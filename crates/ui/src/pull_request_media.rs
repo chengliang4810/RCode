@@ -354,7 +354,7 @@ pub(super) fn media(
                 );
             };
             let alt = if image.alt.is_empty() {
-                "Image".to_owned()
+                crate::l10n::localizer().text(TextKey::AuditImage)
             } else {
                 image.alt.clone()
             };

@@ -35,7 +35,10 @@ impl Shell {
     /// through its latest completed response, as a child of it.
     pub(super) fn create_side_chat(&mut self, cx: &mut Context<Self>) {
         let Some(source) = self.state.read(cx).selected_chat_row().cloned() else {
-            self.show_side_chat_error("Start a conversation before creating a side chat.", cx);
+            self.show_side_chat_error(
+                crate::l10n::localizer().text(TextKey::AuditSideChatStartFirst),
+                cx,
+            );
             return;
         };
         let parent = source.id.clone();
@@ -107,7 +110,10 @@ impl Shell {
             None => state.selected_chat_row().cloned(),
         };
         let Some(parent) = parent else {
-            self.show_side_chat_error("Start a conversation before creating a side chat.", cx);
+            self.show_side_chat_error(
+                crate::l10n::localizer().text(TextKey::AuditSideChatStartFirst),
+                cx,
+            );
             return;
         };
         let key = self.panel_key(cx);
@@ -559,7 +565,7 @@ mod tests {
                         .composer
                         .read(cx)
                         .failure()
-                        .is_some_and(|message| message.contains("Start a conversation"))
+                        .is_some_and(|message| message.contains(&crate::l10n::localizer().text(TextKey::AuditSideChatStartFirst)))
                 );
             })
             .unwrap();

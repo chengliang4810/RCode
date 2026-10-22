@@ -1,4 +1,17 @@
 browser-title = Browser
+
+browser-starting = Starting browser…
+browser-cache-unavailable = Could not locate the browser cache directory.
+browser-startup-failed = Could not start the browser: { $reason }. Check the WebKitGTK 4.1 runtime and display.
+browser-startup-invalid = The browser returned an invalid startup response. Reopen this tab.
+browser-startup-stopped = Browser initialization stopped unexpectedly. Reopen this tab.
+browser-profile-invalid = The browser profile requires an absolute storage directory.
+browser-profile-unwritable = Could not create or write the browser profile directory.
+browser-profile-locked = The browser profile is in use or cannot be locked. Close the other RCode instance and reopen this tab.
+browser-window-required = The browser requires a native Windows window.
+browser-main-thread-required = The browser must be created on the main thread.
+browser-parent-missing = The browser window is no longer available.
+browser-temporary-logins = Logins are temporary on this macOS version. Use macOS 14 or later, or open this page in your default browser, to keep them.
 browser-back = Back
 browser-forward = Forward
 browser-reload = Reload

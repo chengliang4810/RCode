@@ -1,4 +1,9 @@
 terminal-title = Terminal
+
+terminal-limit-reached = Too many open terminals (maximum { $maximum }).
+terminal-working-directory-unavailable = This session’s working directory is unavailable.
+terminal-startup-failed = Terminal startup failed: { $reason }
+terminal-launch-failed = Could not start { $shell }: { $reason }
 terminal-new = New terminal
 terminal-close = Close terminal
 terminal-hide = Hide terminal

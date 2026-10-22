@@ -22,6 +22,7 @@ use rcode_proto::{
     WriteWorkspaceFileRequest,
 };
 use rcode_rpc::RpcError;
+use rcode_proto::workspace_errors::{WorkspaceFailure, WorkspaceRule};
 use sha2::{Digest, Sha256};
 use tokio::sync::{Notify, broadcast, mpsc};
 use tokio_util::sync::CancellationToken;
@@ -115,6 +116,11 @@ pub enum WorkspaceFilesError {
 impl From<WorkspaceFilesError> for RpcError {
     fn from(error: WorkspaceFilesError) -> Self {
         match error {
+            WorkspaceFilesError::BadParams(message)
+                if WorkspaceFailure::decode(&message).is_some() =>
+            {
+                RpcError::Failed(message)
+            }
             WorkspaceFilesError::BadParams(message) => RpcError::BadParams(message),
             WorkspaceFilesError::Authorization(message)
             | WorkspaceFilesError::NotFound(message)
@@ -140,22 +146,22 @@ impl WorkspaceRelativePath {
         if path.is_empty() {
             return allow_root
                 .then(|| Self(PathBuf::new()))
-                .ok_or_else(|| bad_path("path must not be empty"));
+                .ok_or_else(|| bad_path(WorkspaceRule::PathEmpty));
         }
         if path.len() > MAX_RELATIVE_PATH_BYTES {
-            return Err(bad_path("path is too long"));
+            return Err(bad_path(WorkspaceRule::PathTooLong));
         }
         if path.contains(['\0', '\\', ':']) {
-            return Err(bad_path("path contains an invalid character"));
+            return Err(bad_path(WorkspaceRule::PathInvalidCharacter));
         }
         if path.starts_with('/') || path.starts_with("//") {
-            return Err(bad_path("path must be workspace-relative"));
+            return Err(bad_path(WorkspaceRule::PathRelative));
         }
         if path
             .split('/')
             .any(|component| component == "." || component == "..")
         {
-            return Err(bad_path("path must not contain . or .."));
+            return Err(bad_path(WorkspaceRule::PathTraversal));
         }
 
         let parsed = Path::new(path);
@@ -163,22 +169,22 @@ impl WorkspaceRelativePath {
         for component in parsed.components() {
             count += 1;
             if count > MAX_RELATIVE_PATH_COMPONENTS {
-                return Err(bad_path("path has too many components"));
+                return Err(bad_path(WorkspaceRule::PathComponents));
             }
             match component {
                 Component::Normal(value) => {
                     let value = value
                         .to_str()
-                        .ok_or_else(|| bad_path("path must be UTF-8"))?;
+                        .ok_or_else(|| bad_path(WorkspaceRule::PathUtf8))?;
                     if value.eq_ignore_ascii_case(".git") {
-                        return Err(bad_path(".git paths are not accessible"));
+                        return Err(bad_path(WorkspaceRule::GitPath));
                     }
                 }
                 Component::CurDir | Component::ParentDir => {
-                    return Err(bad_path("path must not contain . or .."));
+                    return Err(bad_path(WorkspaceRule::PathTraversal));
                 }
                 Component::RootDir | Component::Prefix(_) => {
-                    return Err(bad_path("path must be workspace-relative"));
+                    return Err(bad_path(WorkspaceRule::PathRelative));
                 }
             }
         }
@@ -194,23 +200,23 @@ impl WorkspaceRelativePath {
         for component in path.components() {
             count += 1;
             if count > MAX_RELATIVE_PATH_COMPONENTS {
-                return Err(bad_path("path has too many components"));
+                return Err(bad_path(WorkspaceRule::PathComponents));
             }
             match component {
                 Component::Normal(value) => {
                     let value = value
                         .to_str()
-                        .ok_or_else(|| bad_path("path must be UTF-8"))?;
+                        .ok_or_else(|| bad_path(WorkspaceRule::PathUtf8))?;
                     if value.eq_ignore_ascii_case(".git") {
-                        return Err(bad_path(".git paths are not accessible"));
+                        return Err(bad_path(WorkspaceRule::GitPath));
                     }
                     parsed.push(value);
                 }
-                _ => return Err(bad_path("path must be workspace-relative")),
+                _ => return Err(bad_path(WorkspaceRule::PathRelative)),
             }
         }
         if parsed.as_os_str().is_empty() {
-            return Err(bad_path("path must not be empty"));
+            return Err(bad_path(WorkspaceRule::PathEmpty));
         }
         Ok(Self(parsed))
     }
@@ -231,8 +237,8 @@ impl WorkspaceRelativePath {
     }
 }
 
-fn bad_path(message: &str) -> WorkspaceFilesError {
-    WorkspaceFilesError::BadParams(message.to_string())
+fn bad_path(rule: WorkspaceRule) -> WorkspaceFilesError {
+    WorkspaceFilesError::BadParams(rule.encode())
 }
 
 fn plain_folder_identity(device_id: &str, root: &Path) -> String {
@@ -271,24 +277,39 @@ impl WorkspaceFiles {
         target: &WorkspaceTarget,
     ) -> Result<ResolvedWorkspace, WorkspaceFilesError> {
         if target.memory {
-            let config = self.inner.memory_config_root.as_ref().ok_or_else(|| WorkspaceFilesError::Unsupported("automatic memory is unavailable".into()))?;
+            let config = self.inner.memory_config_root.as_ref().ok_or_else(|| {
+                WorkspaceFilesError::Unsupported(WorkspaceFailure::MemoryUnavailable.encode())
+            })?;
             let mut project_target = target.clone();
             project_target.memory = false;
             let project = Box::pin(self.resolve_target(&project_target)).await?;
             let root = std::fs::canonicalize(rcode_agent::memory::directory(&project.root, config))
-                .map_err(|error| WorkspaceFilesError::Io(format!("memory directory is unavailable: {error}")))?;
-            return Ok(ResolvedWorkspace { checkout_id: format!("memory-{}", plain_folder_identity(&self.inner.device_id, &root)), root });
+                .map_err(|error| {
+                    WorkspaceFilesError::Io(
+                        WorkspaceFailure::MemoryDirectoryUnavailable {
+                            reason: error.to_string(),
+                        }
+                        .encode(),
+                    )
+                })?;
+            return Ok(ResolvedWorkspace {
+                checkout_id: format!(
+                    "memory-{}",
+                    plain_folder_identity(&self.inner.device_id, &root)
+                ),
+                root,
+            });
         }
         let (root, identity) = match (&target.chat_id, &target.space_id) {
             (Some(_), Some(_)) | (None, None) => {
                 return Err(WorkspaceFilesError::BadParams(
-                    "workspace target needs exactly one of chatId or spaceId".into(),
+                    WorkspaceFailure::InvalidTarget.encode(),
                 ));
             }
             (Some(chat_id), None) => {
                 if target.checkout_path.is_some() {
                     return Err(WorkspaceFilesError::BadParams(
-                        "checkoutPath applies only to a space target".into(),
+                        WorkspaceFailure::CheckoutPathRequiresSpace.encode(),
                     ));
                 }
                 let chat = self
@@ -296,10 +317,12 @@ impl WorkspaceFiles {
                     .workspace
                     .chat(chat_id)
                     .map_err(|error| WorkspaceFilesError::Io(error.to_string()))?
-                    .ok_or_else(|| WorkspaceFilesError::NotFound("chat not found".into()))?;
+                    .ok_or_else(|| {
+                        WorkspaceFilesError::NotFound(WorkspaceFailure::ChatMissing.encode())
+                    })?;
                 if chat.device_id != self.inner.device_id {
                     return Err(WorkspaceFilesError::Authorization(
-                        "chat belongs to another device".into(),
+                        WorkspaceFailure::DifferentDevice.encode(),
                     ));
                 }
                 let Some(space_id) = chat.space_id else {
@@ -314,15 +337,20 @@ impl WorkspaceFiles {
                     );
                     if !cwd.is_absolute() {
                         return Err(WorkspaceFilesError::BadParams(
-                            "chat folder must be absolute".into(),
+                            WorkspaceFailure::FolderAbsoluteRequired.encode(),
                         ));
                     }
                     let root = std::fs::canonicalize(&cwd).map_err(|error| {
-                        WorkspaceFilesError::Io(format!("chat folder is unavailable: {error}"))
+                        WorkspaceFilesError::Io(
+                            WorkspaceFailure::FolderUnavailable {
+                                reason: error.to_string(),
+                            }
+                            .encode(),
+                        )
                     })?;
                     if !root.is_dir() {
                         return Err(WorkspaceFilesError::BadParams(
-                            "chat folder is not a directory".into(),
+                            WorkspaceFailure::FolderNotDirectory.encode(),
                         ));
                     }
                     return Ok(ResolvedWorkspace {
@@ -331,7 +359,7 @@ impl WorkspaceFiles {
                     });
                 };
                 let cwd = chat.cwd.map(PathBuf::from).ok_or_else(|| {
-                    WorkspaceFilesError::NotFound("chat has no workspace folder".into())
+                    WorkspaceFilesError::NotFound(WorkspaceFailure::FolderMissing.encode())
                 })?;
                 let space = self
                     .inner
@@ -339,11 +367,11 @@ impl WorkspaceFiles {
                     .space(&space_id)
                     .map_err(|error| WorkspaceFilesError::Io(error.to_string()))?
                     .ok_or_else(|| {
-                        WorkspaceFilesError::NotFound("chat workspace space not found".into())
+                        WorkspaceFilesError::NotFound(WorkspaceFailure::SpaceMissing.encode())
                     })?;
                 if space.device_id != self.inner.device_id {
                     return Err(WorkspaceFilesError::Authorization(
-                        "chat space belongs to another device".into(),
+                        WorkspaceFailure::DifferentDevice.encode(),
                     ));
                 }
                 let (checkout, identity) = tokio::join!(
@@ -353,9 +381,7 @@ impl WorkspaceFiles {
                     self.inner.repos.checkout_identity(&cwd),
                 );
                 let root = checkout.ok_or_else(|| {
-                    WorkspaceFilesError::Authorization(
-                        "chat folder is not a workspace checkout".into(),
-                    )
+                    WorkspaceFilesError::Authorization(WorkspaceFailure::NotCheckout.encode())
                 })?;
                 (root, identity)
             }
@@ -365,10 +391,12 @@ impl WorkspaceFiles {
                     .workspace
                     .space(space_id)
                     .map_err(|error| WorkspaceFilesError::Io(error.to_string()))?
-                    .ok_or_else(|| WorkspaceFilesError::NotFound("space not found".into()))?;
+                    .ok_or_else(|| {
+                        WorkspaceFilesError::NotFound(WorkspaceFailure::SpaceMissing.encode())
+                    })?;
                 if space.device_id != self.inner.device_id {
                     return Err(WorkspaceFilesError::Authorization(
-                        "space belongs to another device".into(),
+                        WorkspaceFailure::DifferentDevice.encode(),
                     ));
                 }
                 let space_path = PathBuf::from(&space.path);
@@ -382,9 +410,7 @@ impl WorkspaceFiles {
                     .workspace_checkout(&space_path, &requested)
                     .await
                     .ok_or_else(|| {
-                        WorkspaceFilesError::BadParams(
-                            "checkoutPath is not a workspace checkout".into(),
-                        )
+                        WorkspaceFilesError::BadParams(WorkspaceFailure::NotCheckout.encode())
                     })?;
                 let identity = self.inner.repos.checkout_identity(&root).await;
                 (root, identity)
@@ -425,7 +451,14 @@ impl WorkspaceFiles {
             )
         })
         .await
-        .map_err(|error| WorkspaceFilesError::Io(format!("directory worker failed: {error}")))?;
+        .map_err(|error| {
+            WorkspaceFilesError::Io(
+                WorkspaceFailure::WorkerFailed {
+                    reason: error.to_string(),
+                }
+                .encode(),
+            )
+        })?;
         cancel_on_drop.disarm();
         result.map(|mut page| {
             page.checkout_id = Some(workspace.checkout_id);
@@ -459,7 +492,14 @@ impl WorkspaceFiles {
             )
         })
         .await
-        .map_err(|error| WorkspaceFilesError::Io(format!("search worker failed: {error}")))?;
+        .map_err(|error| {
+            WorkspaceFilesError::Io(
+                WorkspaceFailure::WorkerFailed {
+                    reason: error.to_string(),
+                }
+                .encode(),
+            )
+        })?;
         cancel_on_drop.disarm();
         result
     }
@@ -475,7 +515,14 @@ impl WorkspaceFiles {
             search_content_blocking(&search, &workspace.root, &request)
         })
         .await
-        .map_err(|error| WorkspaceFilesError::Io(format!("search worker failed: {error}")))?
+        .map_err(|error| {
+            WorkspaceFilesError::Io(
+                WorkspaceFailure::WorkerFailed {
+                    reason: error.to_string(),
+                }
+                .encode(),
+            )
+        })?
     }
 
     pub async fn warm_search(
@@ -486,7 +533,14 @@ impl WorkspaceFiles {
         let search = self.inner.repos.workspace_search().clone();
         let state = tokio::task::spawn_blocking(move || search.warm(&workspace.root))
             .await
-            .map_err(|error| WorkspaceFilesError::Io(format!("search worker failed: {error}")))?
+            .map_err(|error| {
+                WorkspaceFilesError::Io(
+                    WorkspaceFailure::WorkerFailed {
+                        reason: error.to_string(),
+                    }
+                    .encode(),
+                )
+            })?
             .map_err(|error| WorkspaceFilesError::Io(error.to_string()))?;
         Ok(WarmWorkspaceSearchResult {
             state: match state {
@@ -516,7 +570,14 @@ impl WorkspaceFiles {
             Ok(file)
         })
         .await
-        .map_err(|error| WorkspaceFilesError::Io(format!("file read worker failed: {error}")))?;
+        .map_err(|error| {
+            WorkspaceFilesError::Io(
+                WorkspaceFailure::WorkerFailed {
+                    reason: error.to_string(),
+                }
+                .encode(),
+            )
+        })?;
         cancel_on_drop.disarm();
         result
     }
@@ -532,7 +593,7 @@ impl WorkspaceFiles {
                 || request.expected_checkout_id != workspace.checkout_id)
         {
             return Err(WorkspaceFilesError::Authorization(
-                "Workspace changed before image read".into(),
+                WorkspaceFailure::WorkspaceChanged.encode(),
             ));
         }
         tokio::task::spawn_blocking(move || {
@@ -543,7 +604,7 @@ impl WorkspaceFiles {
                             || request.expected_checkout_id != workspace.checkout_id
                         {
                             return Err(WorkspaceFilesError::Authorization(
-                                "Workspace changed before image read".into(),
+                                WorkspaceFailure::WorkspaceChanged.encode(),
                             ));
                         }
                         read_image_blocking(&workspace.root, &relative, &request)
@@ -570,8 +631,7 @@ impl WorkspaceFiles {
             || request.expected_checkout_id != workspace.checkout_id
         {
             return Err(WorkspaceFilesError::Authorization(
-                "Workspace changed since this file was opened. Switch back to save your edits."
-                    .into(),
+                WorkspaceFailure::WorkspaceChanged.encode(),
             ));
         }
         let mutation_guard = self
@@ -580,7 +640,7 @@ impl WorkspaceFiles {
             .await;
         if self.resolve_target(&request.target).await? != workspace {
             return Err(WorkspaceFilesError::Authorization(
-                "Workspace changed while waiting to save".into(),
+                WorkspaceFailure::WorkspaceChangedSaving.encode(),
             ));
         }
         let relative = WorkspaceRelativePath::file(&request.path)?;
@@ -609,7 +669,14 @@ impl WorkspaceFiles {
             write_file_blocking(&workspace.root, &relative, &expected_hash, &bytes, &cancel)
         })
         .await
-        .map_err(|error| WorkspaceFilesError::Io(format!("file write worker failed: {error}")))?;
+        .map_err(|error| {
+            WorkspaceFilesError::Io(
+                WorkspaceFailure::WorkerFailed {
+                    reason: error.to_string(),
+                }
+                .encode(),
+            )
+        })?;
         cancel_on_drop.disarm();
         result
     }
@@ -620,7 +687,7 @@ impl WorkspaceFiles {
     ) -> Result<WorkspaceFileSubscription, WorkspaceFilesError> {
         if self.inner.cancel.is_cancelled() {
             return Err(WorkspaceFilesError::Io(
-                "workspace file service is shutting down".into(),
+                WorkspaceFailure::ServiceStopping.encode(),
             ));
         }
         let workspace = self.resolve_target(&request.target).await?;
@@ -638,7 +705,12 @@ impl WorkspaceFiles {
         let over_budget = tokio::task::spawn_blocking(move || exceeds_watch_budget(&root))
             .await
             .map_err(|error| {
-                WorkspaceFilesError::Io(format!("watch budget worker failed: {error}"))
+                WorkspaceFilesError::Io(
+                    WorkspaceFailure::WorkerFailed {
+                        reason: error.to_string(),
+                    }
+                    .encode(),
+                )
             })?;
         let candidate = CheckoutWatch::start(
             workspace.checkout_id.clone(),
@@ -1135,7 +1207,7 @@ fn list_directory_blocking(
     for result in builder.build() {
         if cancel.load(Ordering::Relaxed) {
             return Err(WorkspaceFilesError::Io(
-                "directory listing cancelled".into(),
+                WorkspaceRule::DirectoryCancelled.encode(),
             ));
         }
         let entry = match result {
@@ -1148,10 +1220,9 @@ fn list_directory_blocking(
         if entry.depth() == 0 {
             continue;
         }
-        let relative = entry
-            .path()
-            .strip_prefix(root)
-            .map_err(|_| WorkspaceFilesError::Authorization("entry escaped workspace".into()))?;
+        let relative = entry.path().strip_prefix(root).map_err(|_| {
+            WorkspaceFilesError::Authorization(WorkspaceRule::EntryOutside.encode())
+        })?;
         if contains_git_component(relative) {
             continue;
         }
@@ -1209,12 +1280,12 @@ fn list_directory_blocking(
             || cursor.include_ignored != include_ignored
         {
             return Err(WorkspaceFilesError::BadParams(
-                "directory cursor does not match this request; restart listing".into(),
+                WorkspaceRule::DirectoryCursorMismatch.encode(),
             ));
         }
         if cursor.fingerprint != fingerprint {
             return Err(WorkspaceFilesError::BadParams(
-                "directory changed between pages; restart listing".into(),
+                WorkspaceFailure::DirectoryChanged.encode(),
             ));
         }
         cursor.offset
@@ -1223,7 +1294,7 @@ fn list_directory_blocking(
     };
     if offset > entries.len() {
         return Err(WorkspaceFilesError::BadParams(
-            "directory cursor is out of range; restart listing".into(),
+            WorkspaceRule::DirectoryCursorRange.encode(),
         ));
     }
     let end = (offset + DIRECTORY_PAGE_SIZE).min(entries.len());
@@ -1312,7 +1383,9 @@ fn search_workspace_blocking(
         )
         .map_err(|error| WorkspaceFilesError::Io(error.to_string()))?;
     if cancel.load(Ordering::Relaxed) {
-        return Err(WorkspaceFilesError::Io("workspace search cancelled".into()));
+        return Err(WorkspaceFilesError::Io(
+            WorkspaceFailure::SearchCancelled.encode(),
+        ));
     }
     Ok(found
         .matches
@@ -1396,7 +1469,9 @@ fn search_including_ignored(
     let mut best = std::collections::BinaryHeap::with_capacity(limit + 1);
     for result in builder.build() {
         if cancel.load(Ordering::Relaxed) {
-            return Err(WorkspaceFilesError::Io("workspace search cancelled".into()));
+            return Err(WorkspaceFilesError::Io(
+                WorkspaceFailure::SearchCancelled.encode(),
+            ));
         }
         let entry = match result {
             Ok(entry) => entry,
@@ -1515,13 +1590,16 @@ fn validate_name_search_query(
 fn validate_workspace_search_query(query: &str) -> Result<(), WorkspaceFilesError> {
     if query.trim().is_empty() {
         return Err(WorkspaceFilesError::BadParams(
-            "query must not be empty".into(),
+            WorkspaceRule::QueryEmpty.encode(),
         ));
     }
     if query.chars().count() > MAX_SEARCH_QUERY_CHARS {
-        return Err(WorkspaceFilesError::BadParams(format!(
-            "query must not exceed {MAX_SEARCH_QUERY_CHARS} characters"
-        )));
+        return Err(WorkspaceFilesError::BadParams(
+            WorkspaceFailure::QueryTooLong {
+                maximum: MAX_SEARCH_QUERY_CHARS,
+            }
+            .encode(),
+        ));
     }
     Ok(())
 }
@@ -1552,17 +1630,17 @@ fn read_image_blocking(
         "tif" | "tiff" => "image/tiff",
         _ => {
             return Err(WorkspaceFilesError::Unsupported(
-                "Unsupported workspace image format".into(),
+                WorkspaceRule::UnsupportedImage.encode(),
             ));
         }
     };
     if request.offset > 0 && request.expected_content_hash.is_none() {
-        return Err(bad_path("Image continuation requires a content hash"));
+        return Err(bad_path(WorkspaceRule::ImageHash));
     }
     let before = checked_file_metadata(root, relative)?;
     if before.len() > MAX_WORKSPACE_IMAGE_BYTES as u64 {
         return Err(WorkspaceFilesError::Unsupported(
-            "Image exceeds 8 MiB preview limit".into(),
+            WorkspaceRule::ImageTooLarge.encode(),
         ));
     }
     let mut file = std::fs::File::open(root.join(relative.as_path()))
@@ -1571,7 +1649,9 @@ fn read_image_blocking(
         .metadata()
         .map_err(|e| WorkspaceFilesError::Io(e.to_string()))?;
     if !same_file_revision(&before, &opened) {
-        return Err(WorkspaceFilesError::Io("Image changed before open".into()));
+        return Err(WorkspaceFilesError::Io(
+            WorkspaceFailure::ImageChanged.encode(),
+        ));
     }
     let mut bytes = Vec::new();
     (&mut file)
@@ -1588,7 +1668,7 @@ fn read_image_blocking(
         || bytes.len() as u64 != after.len()
     {
         return Err(WorkspaceFilesError::Io(
-            "Image changed during read or exceeds preview limit".into(),
+            WorkspaceRule::ImageChangedLimit.encode(),
         ));
     }
     let hash = hash_bytes(&bytes);
@@ -1598,11 +1678,11 @@ fn read_image_blocking(
         .is_some_and(|expected| expected != &hash)
     {
         return Err(WorkspaceFilesError::Io(
-            "Image changed between chunks; reload preview".into(),
+            WorkspaceFailure::ImageChanged.encode(),
         ));
     }
     if request.offset > bytes.len() {
-        return Err(bad_path("Invalid image offset"));
+        return Err(bad_path(WorkspaceRule::ImageOffset));
     }
     let end = request
         .offset
@@ -1651,11 +1731,11 @@ fn resolve_absolute_read(
             .split('/')
             .any(|component| matches!(component, "." | ".."))
     {
-        return Err(bad_path("path must be workspace-relative"));
+        return Err(bad_path(WorkspaceRule::PathRelative));
     }
     let canonical = std::fs::canonicalize(path).map_err(|error| {
         if error.kind() == std::io::ErrorKind::NotFound {
-            WorkspaceFilesError::NotFound("file not found".into())
+            WorkspaceFilesError::NotFound(WorkspaceFailure::FileMissing.encode())
         } else {
             WorkspaceFilesError::Io(error.to_string())
         }
@@ -1670,7 +1750,12 @@ fn resolve_absolute_read(
         .map(Path::to_path_buf)
         .unwrap_or_else(|| canonical.clone());
     let relative = canonical.strip_prefix(&base).map_err(|error| {
-        WorkspaceFilesError::Io(format!("absolute path has no host root: {error}"))
+        WorkspaceFilesError::Io(
+            WorkspaceFailure::FolderUnavailable {
+                reason: error.to_string(),
+            }
+            .encode(),
+        )
     })?;
     WorkspaceRelativePath::from_resolved(relative)
         .map(|relative| AbsoluteRead::Outside { base, relative })
@@ -1713,7 +1798,12 @@ fn read_file_blocking(
     let wire_path = relative.wire_path();
     let metadata = match checked_file_metadata(root, relative) {
         Ok(metadata) => metadata,
-        Err(WorkspaceFilesError::Unsupported(message)) if message == "path is a symlink" => {
+        Err(WorkspaceFilesError::Unsupported(message))
+            if WorkspaceFailure::decode(&message)
+                == Some(WorkspaceFailure::Validation {
+                    rule: WorkspaceRule::Symlink,
+                }) =>
+        {
             let metadata = std::fs::symlink_metadata(&path)
                 .map_err(|error| WorkspaceFilesError::Io(error.to_string()))?;
             return Ok(non_text_file(
@@ -1723,7 +1813,10 @@ fn read_file_blocking(
             ));
         }
         Err(WorkspaceFilesError::Unsupported(message))
-            if message == "path is not a regular file" =>
+            if WorkspaceFailure::decode(&message)
+                == Some(WorkspaceFailure::Validation {
+                    rule: WorkspaceRule::NotFile,
+                }) =>
         {
             let metadata = std::fs::symlink_metadata(&path)
                 .map_err(|error| WorkspaceFilesError::Io(error.to_string()))?;
@@ -1752,7 +1845,9 @@ fn read_file_blocking(
 
     for attempt in 0..2 {
         if cancel.load(Ordering::Relaxed) {
-            return Err(WorkspaceFilesError::Io("file read cancelled".into()));
+            return Err(WorkspaceFilesError::Io(
+                WorkspaceFailure::ReadCancelled.encode(),
+            ));
         }
         let before = checked_file_metadata(root, relative)?;
         let bytes =
@@ -1763,7 +1858,7 @@ fn read_file_blocking(
         }
         if attempt == 1 {
             return Err(WorkspaceFilesError::Io(
-                "file changed while it was being read; retry".into(),
+                WorkspaceFailure::FileChanged.encode(),
             ));
         }
     }
@@ -1778,32 +1873,32 @@ fn checked_file_metadata(
     let components: Vec<_> = relative.as_path().components().collect();
     for (index, component) in components.iter().enumerate() {
         let Component::Normal(component) = component else {
-            return Err(bad_path("invalid file component"));
+            return Err(bad_path(WorkspaceRule::FileComponent));
         };
         current.push(component);
         let metadata = std::fs::symlink_metadata(&current).map_err(|error| {
             if error.kind() == std::io::ErrorKind::NotFound {
-                WorkspaceFilesError::NotFound("file not found".into())
+                WorkspaceFilesError::NotFound(WorkspaceFailure::FileMissing.encode())
             } else {
                 WorkspaceFilesError::Io(error.to_string())
             }
         })?;
         if mutations::is_link(&metadata) {
-            let message = if index + 1 == components.len() {
-                "path is a symlink"
+            let rule = if index + 1 == components.len() {
+                WorkspaceRule::Symlink
             } else {
-                "path traverses a symlink"
+                WorkspaceRule::SymlinkTraversal
             };
-            return Err(WorkspaceFilesError::Unsupported(message.into()));
+            return Err(WorkspaceFilesError::Unsupported(rule.encode()));
         }
         if index + 1 < components.len() && !metadata.is_dir() {
             return Err(WorkspaceFilesError::Unsupported(
-                "file parent is not a directory".into(),
+                WorkspaceRule::ParentNotDirectory.encode(),
             ));
         }
         if index + 1 == components.len() && !metadata.is_file() {
             return Err(WorkspaceFilesError::Unsupported(
-                "path is not a regular file".into(),
+                WorkspaceRule::NotFile.encode(),
             ));
         }
     }
@@ -1811,7 +1906,7 @@ fn checked_file_metadata(
         .map_err(|error| WorkspaceFilesError::Io(error.to_string()))?;
     if !canonical.starts_with(root) {
         return Err(WorkspaceFilesError::Authorization(
-            "file escaped workspace".into(),
+            WorkspaceRule::OutsideWorkspace.encode(),
         ));
     }
     std::fs::symlink_metadata(canonical).map_err(|error| WorkspaceFilesError::Io(error.to_string()))
@@ -1956,17 +2051,17 @@ fn same_file_revision(before: &std::fs::Metadata, after: &std::fs::Metadata) -> 
 fn encode_write_text(request: &WriteWorkspaceFileRequest) -> Result<Vec<u8>, WorkspaceFilesError> {
     if request.text.contains('\0') {
         return Err(WorkspaceFilesError::BadParams(
-            "write text must not contain NUL bytes".into(),
+            WorkspaceRule::WriteNul.encode(),
         ));
     }
     if request.text.contains('\r') {
         return Err(WorkspaceFilesError::BadParams(
-            "write text must use normalized LF line endings".into(),
+            WorkspaceRule::WriteLineEndings.encode(),
         ));
     }
     if request.expected_content_hash.is_empty() {
         return Err(WorkspaceFilesError::BadParams(
-            "expectedContentHash must not be empty".into(),
+            WorkspaceRule::WriteHash.encode(),
         ));
     }
     let source = match request.line_ending {
@@ -1981,9 +2076,12 @@ fn encode_write_text(request: &WriteWorkspaceFileRequest) -> Result<Vec<u8>, Wor
     }
     bytes.extend_from_slice(source.as_bytes());
     if bytes.len() as u64 > MAX_EDITABLE_FILE_BYTES {
-        return Err(WorkspaceFilesError::Unsupported(format!(
-            "write exceeds the {MAX_EDITABLE_FILE_BYTES}-byte editable limit"
-        )));
+        return Err(WorkspaceFilesError::Unsupported(
+            WorkspaceFailure::WriteTooLarge {
+                maximum: MAX_EDITABLE_FILE_BYTES,
+            }
+            .encode(),
+        ));
     }
     Ok(bytes)
 }
@@ -1991,16 +2089,15 @@ fn encode_write_text(request: &WriteWorkspaceFileRequest) -> Result<Vec<u8>, Wor
 fn validate_writable_source(bytes: &[u8]) -> Result<(), WorkspaceFilesError> {
     if bytes.contains(&0) {
         return Err(WorkspaceFilesError::Unsupported(
-            "binary files are not writable".into(),
+            WorkspaceRule::BinaryWrite.encode(),
         ));
     }
     let source = bytes.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(bytes);
-    let source = std::str::from_utf8(source).map_err(|_| {
-        WorkspaceFilesError::Unsupported("unsupported text encoding is not writable".into())
-    })?;
+    let source = std::str::from_utf8(source)
+        .map_err(|_| WorkspaceFilesError::Unsupported(WorkspaceRule::EncodingWrite.encode()))?;
     if detect_line_ending(source.as_bytes()) == WorkspaceLineEnding::Mixed {
         return Err(WorkspaceFilesError::Unsupported(
-            "mixed line endings are not writable".into(),
+            WorkspaceRule::MixedWrite.encode(),
         ));
     }
     Ok(())
@@ -2023,14 +2120,19 @@ fn write_file_blocking(
                 None,
             ));
         }
-        Err(WorkspaceFilesError::Unsupported(message)) if message.contains("symlink") => {
+        Err(WorkspaceFilesError::Unsupported(message)) if symlink_failure(&message) => {
             return Ok(write_conflict(
                 WorkspaceFileConflictReason::Replaced,
                 None,
                 None,
             ));
         }
-        Err(WorkspaceFilesError::Unsupported(message)) if message.contains("editable limit") => {
+        Err(WorkspaceFilesError::Unsupported(message))
+            if matches!(
+                WorkspaceFailure::decode(&message),
+                Some(WorkspaceFailure::WriteTooLarge { .. })
+            ) =>
+        {
             return Ok(write_conflict(
                 WorkspaceFileConflictReason::Changed,
                 None,
@@ -2056,12 +2158,14 @@ fn write_file_blocking(
         ));
     }
     if cancel.load(Ordering::Acquire) {
-        return Err(WorkspaceFilesError::Io("file write cancelled".into()));
+        return Err(WorkspaceFilesError::Io(
+            WorkspaceFailure::WriteCancelled.encode(),
+        ));
     }
 
     let parent = target
         .parent()
-        .ok_or_else(|| WorkspaceFilesError::Io("file has no parent directory".into()))?;
+        .ok_or_else(|| WorkspaceFilesError::Io(WorkspaceRule::NoParent.encode()))?;
     let temp_path = parent.join(format!("{SAVE_MARKER}{}.tmp", uuid::Uuid::new_v4()));
     let mut temp = TempFileGuard::new(temp_path.clone());
     let mut file = std::fs::OpenOptions::new()
@@ -2077,7 +2181,9 @@ fn write_file_blocking(
         .map_err(|error| WorkspaceFilesError::Io(error.to_string()))?;
 
     if cancel.load(Ordering::Acquire) {
-        return Err(WorkspaceFilesError::Io("file write cancelled".into()));
+        return Err(WorkspaceFilesError::Io(
+            WorkspaceFailure::WriteCancelled.encode(),
+        ));
     }
     let (latest_metadata, latest_bytes) = match current_write_revision(root, relative) {
         Ok(revision) => revision,
@@ -2088,14 +2194,19 @@ fn write_file_blocking(
                 None,
             ));
         }
-        Err(WorkspaceFilesError::Unsupported(message)) if message.contains("symlink") => {
+        Err(WorkspaceFilesError::Unsupported(message)) if symlink_failure(&message) => {
             return Ok(write_conflict(
                 WorkspaceFileConflictReason::Replaced,
                 None,
                 None,
             ));
         }
-        Err(WorkspaceFilesError::Unsupported(message)) if message.contains("editable limit") => {
+        Err(WorkspaceFilesError::Unsupported(message))
+            if matches!(
+                WorkspaceFailure::decode(&message),
+                Some(WorkspaceFailure::WriteTooLarge { .. })
+            ) =>
+        {
             return Ok(write_conflict(
                 WorkspaceFileConflictReason::Changed,
                 None,
@@ -2130,9 +2241,7 @@ fn write_file_blocking(
         std::fs::read(&target).map_err(|error| WorkspaceFilesError::Io(error.to_string()))?;
     let published_hash = hash_bytes(&published_bytes);
     if published_hash != hash_bytes(bytes) {
-        return Err(WorkspaceFilesError::Io(
-            "published file verification failed".into(),
-        ));
+        return Err(WorkspaceFilesError::Io(WorkspaceRule::VerifyWrite.encode()));
     }
     Ok(WriteWorkspaceFileOutcome::Written {
         file: WorkspaceFileWriteResult {
@@ -2144,6 +2253,17 @@ fn write_file_blocking(
     })
 }
 
+fn symlink_failure(message: &str) -> bool {
+    matches!(
+        WorkspaceFailure::decode(message),
+        Some(WorkspaceFailure::Validation {
+            rule: WorkspaceRule::Symlink
+                | WorkspaceRule::SymlinkTraversal
+                | WorkspaceRule::SymlinkDirectory,
+        })
+    )
+}
+
 fn current_write_revision(
     root: &Path,
     relative: &WorkspaceRelativePath,
@@ -2151,7 +2271,10 @@ fn current_write_revision(
     let metadata = checked_file_metadata(root, relative)?;
     if metadata.len() > MAX_EDITABLE_FILE_BYTES {
         return Err(WorkspaceFilesError::Unsupported(
-            "file exceeds the editable limit".into(),
+            WorkspaceFailure::WriteTooLarge {
+                maximum: MAX_EDITABLE_FILE_BYTES,
+            }
+            .encode(),
         ));
     }
     let path = root.join(relative.as_path());
@@ -2159,7 +2282,7 @@ fn current_write_revision(
     let after = checked_file_metadata(root, relative)?;
     if !same_file_revision(&metadata, &after) || bytes.len() as u64 != after.len() {
         return Err(WorkspaceFilesError::Io(
-            "file changed while preparing write; retry".into(),
+            WorkspaceRule::FileChangedPreparing.encode(),
         ));
     }
     Ok((after, bytes))
@@ -2260,19 +2383,19 @@ fn checked_directory(
     let mut current = root.to_path_buf();
     for component in directory.as_path().components() {
         let Component::Normal(component) = component else {
-            return Err(bad_path("invalid directory component"));
+            return Err(bad_path(WorkspaceRule::DirectoryComponent));
         };
         current.push(component);
         let metadata = std::fs::symlink_metadata(&current)
             .map_err(|error| WorkspaceFilesError::Io(error.to_string()))?;
         if mutations::is_link(&metadata) {
             return Err(WorkspaceFilesError::Unsupported(
-                "symlink directories cannot be traversed".into(),
+                WorkspaceRule::SymlinkDirectory.encode(),
             ));
         }
         if !metadata.is_dir() {
             return Err(WorkspaceFilesError::Unsupported(
-                "directory path is not a directory".into(),
+                WorkspaceRule::DirectoryNotDirectory.encode(),
             ));
         }
     }
@@ -2280,7 +2403,7 @@ fn checked_directory(
         .map_err(|error| WorkspaceFilesError::Io(error.to_string()))?;
     if !canonical.starts_with(&canonical_root) {
         return Err(WorkspaceFilesError::Authorization(
-            "directory escaped workspace".into(),
+            WorkspaceRule::DirectoryOutside.encode(),
         ));
     }
     Ok(canonical)
@@ -2306,8 +2429,8 @@ fn path_to_wire(path: &Path) -> Result<String, WorkspaceFilesError> {
             Component::Normal(value) => value
                 .to_str()
                 .map(str::to_owned)
-                .ok_or_else(|| WorkspaceFilesError::Unsupported("path is not UTF-8".into())),
-            _ => Err(bad_path("invalid relative path")),
+                .ok_or_else(|| WorkspaceFilesError::Unsupported(WorkspaceRule::PathUtf8.encode())),
+            _ => Err(bad_path(WorkspaceRule::RelativePath)),
         })
         .collect::<Result<Vec<_>, _>>()
         .map(|components| components.join("/"))
@@ -2338,9 +2461,9 @@ fn encode_cursor(cursor: &DirectoryCursor) -> String {
 
 fn decode_cursor(cursor: &str) -> Result<DirectoryCursor, WorkspaceFilesError> {
     let bytes = decode_hex(cursor)
-        .ok_or_else(|| WorkspaceFilesError::BadParams("invalid directory cursor".into()))?;
+        .ok_or_else(|| WorkspaceFilesError::BadParams(WorkspaceRule::DirectoryCursor.encode()))?;
     serde_json::from_slice(&bytes)
-        .map_err(|_| WorkspaceFilesError::BadParams("invalid directory cursor".into()))
+        .map_err(|_| WorkspaceFilesError::BadParams(WorkspaceRule::DirectoryCursor.encode()))
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -2512,7 +2635,10 @@ mod tests {
             &no_cancel(),
         )
         .unwrap_err();
-        assert!(stale.to_string().contains("restart listing"));
+        assert_eq!(
+            WorkspaceFailure::decode(&stale.to_string()),
+            Some(WorkspaceFailure::DirectoryChanged)
+        );
     }
 
     #[test]
@@ -2614,7 +2740,12 @@ mod tests {
             // no walk.
             let error =
                 search_workspace_blocking(&root, query, true, 200, &no_cancel()).unwrap_err();
-            assert!(error.to_string().contains("query must not be empty"));
+            assert_eq!(
+                WorkspaceFailure::decode(&error.to_string()),
+                Some(WorkspaceFailure::Validation {
+                    rule: WorkspaceRule::QueryEmpty
+                })
+            );
         }
     }
 
@@ -2873,7 +3004,12 @@ mod tests {
         let (_dir, root) = content_fixture();
         for query in ["", "   "] {
             let error = content(&root, query, None).unwrap_err();
-            assert!(error.to_string().contains("query must not be empty"));
+            assert_eq!(
+                WorkspaceFailure::decode(&error.to_string()),
+                Some(WorkspaceFailure::Validation {
+                    rule: WorkspaceRule::QueryEmpty
+                })
+            );
         }
         let long = "x".repeat(MAX_SEARCH_QUERY_CHARS + 1);
         assert!(content(&root, &long, None).is_err());

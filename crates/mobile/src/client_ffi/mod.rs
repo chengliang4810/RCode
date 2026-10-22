@@ -561,13 +561,13 @@ pub fn model_label(harness: String, model: String) -> String {
 
 #[uniffi::export]
 pub fn reasoning_label(level: String) -> String {
-    zc::catalog::reasoning_label(&level)
+    crate::l10n::reasoning_label(crate::l10n::localizer(), &level)
 }
 
 /// `now` / `34m` / `4h` / `2d`.
 #[uniffi::export]
 pub fn relative_time_label(at_ms: i64, now_ms: i64) -> String {
-    zc::relative_time_label(at_ms, now_ms)
+    crate::l10n::relative_time(crate::l10n::localizer(), at_ms, now_ms)
 }
 
 /// Stable palette slot for a project path (`"home"` without a project).

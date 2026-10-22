@@ -1155,12 +1155,13 @@ pub enum ReduceMotion {
 impl ReduceMotion {
     pub const ALL: [Self; 3] = [Self::System, Self::On, Self::Off];
 
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::System => "System",
-            Self::On => "On",
-            Self::Off => "Off",
-        }
+    pub fn label(self) -> String {
+        use rcode_presentation::TextKey;
+        crate::l10n::localizer().text(match self {
+            Self::System => TextKey::AuditSettingsAppearanceSystem,
+            Self::On => TextKey::AuditSettingsMotionOn,
+            Self::Off => TextKey::AuditSettingsMotionOff,
+        })
     }
 }
 

@@ -79,7 +79,7 @@ impl WorktreeSettingsCard {
                     .into_any_element()
             });
             options.push(if is_local {
-                option.detail("You")
+                option.detail(crate::l10n::localizer().text(TextKey::AuditSettingsWorktreesYou))
             } else {
                 option
             });
@@ -93,26 +93,31 @@ impl WorktreeSettingsCard {
             // Not registered (yet): keep the current target reachable.
             None => {
                 let muted = theme.text_muted;
-                options.push(widgets::SelectOption::new("This device").leading(move || {
-                    icon(icons::LAPTOP)
-                        .size(px(16.0))
-                        .flex_none()
-                        .text_color(muted)
-                        .into_any_element()
-                }));
+                options.push(
+                    widgets::SelectOption::new(
+                        crate::l10n::localizer().text(TextKey::PrListThisDevice),
+                    )
+                    .leading(move || {
+                        icon(icons::LAPTOP)
+                            .size(px(16.0))
+                            .flex_none()
+                            .text_color(muted)
+                            .into_any_element()
+                    }),
+                );
                 targets.push(self.target.clone());
                 options.len() - 1
             }
         };
         widgets::select(
             "worktrees-device-switcher",
-            "Device",
+            crate::l10n::localizer().text(TextKey::AuditSettingsWorktreesDevice),
             theme,
             |page: &mut Self| &mut page.device_select,
         )
         .options(options, selected)
         .menu_width(260.0)
-        .heading("Devices")
+        .heading(crate::l10n::localizer().text(TextKey::ShellSettingsNavDevices))
         .open_rightward()
         .on_select(move |page, ix, _, cx| {
             if let Some(target) = targets.get(ix) {
@@ -141,7 +146,9 @@ impl WorktreeSettingsCard {
 
     fn request(&mut self, save: Option<WorktreeSettings>, cx: &mut Context<Self>) {
         let Some(engine) = self.state.read(cx).engine().cloned() else {
-            self.settings = Loadable::Error("Device is not connected".into());
+            self.settings = Loadable::Error(
+                crate::l10n::localizer().text(TextKey::AuditSettingsWorktreesDisconnected),
+            );
             cx.notify();
             return;
         };
@@ -164,8 +171,7 @@ impl WorktreeSettingsCard {
                 .await
                 .map_err(|error| match error {
                     rcode_rpc::RpcError::UnknownMethod(_) => {
-                        "Update RCode on the selected device to configure worktree locations."
-                            .to_string()
+                        crate::l10n::localizer().text(TextKey::AuditSettingsWorktreesUpdateRequired)
                     }
                     _ => error.to_string(),
                 })
@@ -276,7 +282,11 @@ impl WorktreeSettingsCard {
             files: false,
             directories: true,
             multiple: false,
-            prompt: Some("Choose Worktree Folder".into()),
+            prompt: Some(
+                crate::l10n::localizer()
+                    .text(TextKey::SettingsWorktreesChooseAria)
+                    .into(),
+            ),
         });
         // Retargeting the card cancels this task, so a local selection cannot
         // be saved to a remote host.
@@ -373,7 +383,7 @@ impl WorktreeSettingsCard {
                                     .size(px(14.0))
                                     .text_color(theme.text_muted),
                             )
-                            .child("Up")
+                            .child(crate::l10n::localizer().text(TextKey::AuditSettingsWorktreesUp))
                             .when(has_parent, |el| {
                                 el.on_click(cx.listener(move |card, _, _, cx| {
                                     card.browse(parent.clone(), cx)
@@ -426,12 +436,10 @@ impl WorktreeSettingsCard {
                     );
                 }
                 if !listing.entries.iter().any(|entry| entry.is_dir) {
-                    entries = entries.child(
-                        div()
-                            .px(px(10.0))
-                            .py(px(8.0))
-                            .child(description(theme, "No subfolders")),
-                    );
+                    entries = entries.child(div().px(px(10.0)).py(px(8.0)).child(description(
+                        theme,
+                        &crate::l10n::localizer().text(TextKey::AuditSettingsWorktreesNoSubfolders),
+                    )));
                 }
                 browser = browser
                     .child(
@@ -445,7 +453,7 @@ impl WorktreeSettingsCard {
                 if listing.truncated {
                     browser = browser.child(div().px(px(14.0)).py(px(6.0)).child(description(
                         theme,
-                        "More folders exist than are shown here.",
+                        &crate::l10n::localizer().text(TextKey::AuditSettingsWorktreesMoreFolders),
                     )));
                 }
                 browser = browser.child(
@@ -479,12 +487,10 @@ impl WorktreeSettingsCard {
                 )
             }
             _ => {
-                browser = browser.child(
-                    div()
-                        .px(px(14.0))
-                        .py(px(10.0))
-                        .child(description(theme, "Loading folders…")),
-                )
+                browser = browser.child(div().px(px(14.0)).py(px(10.0)).child(description(
+                    theme,
+                    &crate::l10n::localizer().text(TextKey::AuditSettingsWorktreesLoadingFolders),
+                )))
             }
         }
         browser.into_any_element()
@@ -503,15 +509,19 @@ impl Render for WorktreeSettingsCard {
             Some(status) if overridden || (enabled && status.settings.use_custom_directory) => {
                 status.effective_directory.clone()
             }
-            Some(_) if enabled => "Choose a folder for new worktrees".into(),
+            Some(_) if enabled => {
+                crate::l10n::localizer().text(TextKey::AuditSettingsWorktreesChooseFolder)
+            }
             Some(status) => status.default_directory.clone(),
             None if matches!(self.settings, Loadable::Error(_)) => {
-                "Couldn't load worktree settings".into()
+                crate::l10n::localizer().text(TextKey::AuditSettingsWorktreesLoadFailed)
             }
-            None => "Loading…".into(),
+            None => crate::l10n::localizer().text(TextKey::ActionLoading),
         }];
         if overridden {
-            meta.push("Set by RCODE_WORKTREES_DIR".into());
+            meta.push(
+                crate::l10n::localizer().text(TextKey::AuditSettingsWorktreesEnvironmentOverride),
+            );
         }
         let meta = meta
             .into_iter()
@@ -554,12 +564,16 @@ impl Render for WorktreeSettingsCard {
             })
             .when(matches!(self.settings, Loadable::Error(_)), |row| {
                 row.child(
-                    widgets::text_action(&theme, widgets::ActionTone::Quiet, "Retry")
-                        .id("worktrees-retry")
-                        .tab_index(0)
-                        .role(gpui::Role::Button)
-                        .focus_visible(|s| s.border_2().border_color(theme.accent))
-                        .on_click(cx.listener(|card, _, _, cx| card.load(card.target.clone(), cx))),
+                    widgets::text_action(
+                        &theme,
+                        widgets::ActionTone::Quiet,
+                        crate::l10n::localizer().text(TextKey::ActionRetry),
+                    )
+                    .id("worktrees-retry")
+                    .tab_index(0)
+                    .role(gpui::Role::Button)
+                    .focus_visible(|s| s.border_2().border_color(theme.accent))
+                    .on_click(cx.listener(|card, _, _, cx| card.load(card.target.clone(), cx))),
                 )
             })
             .child(switcher)
@@ -629,13 +643,21 @@ impl Render for WorktreeSettingsCard {
                         div()
                             .flex_1()
                             .min_w(px(160.0))
-                            .child(widgets::row_title(&theme, "Custom worktree location"))
+                            .child(widgets::row_title(
+                                &theme,
+                                crate::l10n::localizer().text(TextKey::SettingsWorktreesCustomAria),
+                            ))
                             .child(widgets::meta_line(&theme, meta)),
                     )
                     .child(controls),
             )
             .when(self.browsing || error.is_some(), |card| card.child(detail));
-        widgets::section(&theme, "Worktrees", card).into_any_element()
+        widgets::section(
+            &theme,
+            crate::l10n::localizer().text(TextKey::AuditSettingsWorktreesTitle),
+            card,
+        )
+        .into_any_element()
     }
 }
 

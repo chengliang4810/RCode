@@ -442,7 +442,7 @@ private final class VisualControlView: UIControl {
             accessibilityTraits = selected ? [.button, .selected] : .button
         case let .toggle(on):
             accessibilityTraits = .button
-            accessibilityValue = on ? "On" : "Off"
+            accessibilityValue = on ? L10n.text("On") : L10n.text("Off")
         case let .slider(_, _, _, _, _, _, _, shown):
             accessibilityTraits = .adjustable
             accessibilityValue = shown

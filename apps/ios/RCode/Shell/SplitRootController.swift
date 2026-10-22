@@ -84,9 +84,9 @@ final class SplitRootController: UISplitViewController, UISplitViewControllerDel
 
     override var keyCommands: [UIKeyCommand]? {
         [
-            UIKeyCommand(title: "New Session", action: #selector(newSessionCommand), input: "n", modifierFlags: .command),
-            UIKeyCommand(title: "Search", action: #selector(searchCommand), input: "f", modifierFlags: [.command, .shift]),
-            UIKeyCommand(title: "Toggle Sidebar", action: #selector(toggleSidebarCommand), input: "b", modifierFlags: .command),
+            UIKeyCommand(title: L10n.text("New Session"), action: #selector(newSessionCommand), input: "n", modifierFlags: .command),
+            UIKeyCommand(title: L10n.text("Search"), action: #selector(searchCommand), input: "f", modifierFlags: [.command, .shift]),
+            UIKeyCommand(title: L10n.text("Toggle Sidebar"), action: #selector(toggleSidebarCommand), input: "b", modifierFlags: .command),
         ]
     }
 
@@ -118,7 +118,7 @@ final class SplitRootController: UISplitViewController, UISplitViewControllerDel
         showDraft(prompt: nil, focus: false)
         sidebar.showSessions()
         show(.primary)
-        Toast.show("Couldn't open session. Try again.", in: view.window)
+        Toast.show(L10n.text("Couldn't open session. Try again."), in: view.window)
     }
 
     func presentNewSession(prompt: String?) {
@@ -260,7 +260,7 @@ final class SidebarViewController: UIViewController, UISearchResultsUpdating {
         search.searchResultsUpdater = self
         search.obscuresBackgroundDuringPresentation = false
         search.hidesNavigationBarDuringPresentation = false
-        search.searchBar.placeholder = "Search"
+        search.searchBar.placeholder = L10n.text("Search")
         search.searchBar.searchTextField.accessibilityIdentifier = "sidebar-search"
         list.navigationItem.searchController = search
         list.navigationItem.hidesSearchBarWhenScrolling = false
@@ -268,16 +268,16 @@ final class SidebarViewController: UIViewController, UISearchResultsUpdating {
         let settings = UIBarButtonItem(image: UIImage(systemName: "gearshape"), primaryAction: UIAction { [weak self] _ in
             self?.router?.showSettings()
         })
-        settings.accessibilityLabel = "Settings"
+        settings.accessibilityLabel = L10n.text("Settings")
         settings.accessibilityIdentifier = "sidebar-settings"
         let options = UIBarButtonItem(image: UIImage(systemName: "ellipsis"), menu: list.optionsMenu())
-        options.accessibilityLabel = "Options"
+        options.accessibilityLabel = L10n.text("Options")
         let compose = UIBarButtonItem(image: UIImage(systemName: "plus"), primaryAction: UIAction { [weak self] _ in
             self?.router?.presentNewSession(prompt: nil)
         })
         compose.style = .prominent
         compose.tintColor = Palette.accent
-        compose.accessibilityLabel = "New session"
+        compose.accessibilityLabel = L10n.text("New session")
         compose.accessibilityIdentifier = "new-session"
         list.navigationItem.rightBarButtonItem = nil
         list.toolbarItems = [settings, options, .flexibleSpace(), compose]

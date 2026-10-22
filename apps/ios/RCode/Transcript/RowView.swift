@@ -155,7 +155,7 @@ final class RowView: UIView {
         // Painted text is invisible to accessibility: one text element per
         // row, followed by the row's native widgets (copy, disclosure…).
         let element = UIAccessibilityElement(accessibilityContainer: self)
-        element.accessibilityLabel = kind == .user ? "You: \(d.copyText)" : (d.copyText.isEmpty ? d.text : d.copyText)
+        element.accessibilityLabel = kind == .user ? L10n.format("accessibility.user-message", d.copyText) : (d.copyText.isEmpty ? d.text : d.copyText)
         element.accessibilityIdentifier = switch kind {
         case .user: "row-user"
         case .markdown: "row-markdown"
@@ -256,7 +256,7 @@ final class RowView: UIView {
                 view = WorkingIndicatorView(since: sinceMs.map { Date(timeIntervalSince1970: Double($0) / 1000) }, streaming: streaming)
             case let .detail(title):
                 let b = UIControl()
-                b.accessibilityLabel = "\(title) details"
+                b.accessibilityLabel = L10n.format("accessibility.details", title)
                 b.accessibilityTraits = .button
                 let payload = w.payload ?? ""
                 b.addAction(UIAction { [weak self] _ in
@@ -286,7 +286,7 @@ final class RowView: UIView {
             case let .toolToggle(detail, open):
                 let b = ToolToggleControl()
                 b.accessibilityTraits = .button
-                b.accessibilityLabel = open ? "Hide details" : "Show details"
+                b.accessibilityLabel = open ? L10n.text("Hide details") : L10n.text("Show details")
                 b.addAction(UIAction { [weak self] _ in
                     guard let self else { return }
                     UISelectionFeedbackGenerator().selectionChanged()
@@ -345,7 +345,7 @@ final class CopyButton: UIButton {
         let config = UIImage.SymbolConfiguration(pointSize: 13, weight: .medium)
         setImage(UIImage(systemName: "square.on.square", withConfiguration: config), for: .normal)
         tintColor = Palette.tertiary
-        accessibilityLabel = "Copy code"
+        accessibilityLabel = L10n.text("Copy code")
         addAction(UIAction { [weak self] _ in self?.copy() }, for: .touchUpInside)
     }
 
@@ -369,7 +369,7 @@ final class DisclosureControl: UIControl {
     init(expanded: Bool, chevron: Bool) {
         super.init(frame: .zero)
         accessibilityTraits = .button
-        accessibilityLabel = expanded ? "Collapse" : "Expand"
+        accessibilityLabel = expanded ? L10n.text("Collapse") : L10n.text("Expand")
         guard chevron else { return }
         let iv = UIImageView(image: UIImage(systemName: "chevron.right", withConfiguration: UIImage.SymbolConfiguration(pointSize: 10, weight: .semibold)))
         iv.tintColor = Palette.tertiary
@@ -430,7 +430,7 @@ final class WorkingIndicatorView: UIView {
 
     init(since: Date?, streaming: Bool) {
         self.since = since
-        self.word = streaming ? "Writing" : "Working"
+        self.word = streaming ? L10n.text("Writing") : L10n.text("Working")
         super.init(frame: .zero)
         isUserInteractionEnabled = false
         label.font = Fonts.ui(.sansMedium, UIFontMetrics(forTextStyle: .body).scaledValue(for: 13.5))
@@ -507,7 +507,7 @@ final class UploadRingView: UIView {
         label.textAlignment = .center
         addSubview(label)
         isAccessibilityElement = true
-        accessibilityLabel = "Uploading"
+        accessibilityLabel = L10n.text("Uploading")
         accessibilityIdentifier = "upload-progress"
     }
 

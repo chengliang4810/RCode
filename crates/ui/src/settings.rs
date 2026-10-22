@@ -151,24 +151,26 @@ impl NewThreadBackgroundEffect {
         Self::Scanlines,
     ];
 
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::None => "None",
-            Self::Dither => "Dither",
-            Self::Ascii => "ASCII",
-            Self::Halftone => "Halftone",
-            Self::Scanlines => "Scanlines",
-        }
+    pub fn label(self) -> String {
+        use rcode_presentation::TextKey;
+        crate::l10n::localizer().text(match self {
+            Self::None => TextKey::AuditSettingsEffectNone,
+            Self::Dither => TextKey::AuditSettingsEffectDither,
+            Self::Ascii => TextKey::AuditSettingsEffectAscii,
+            Self::Halftone => TextKey::AuditSettingsEffectHalftone,
+            Self::Scanlines => TextKey::AuditSettingsEffectScanlines,
+        })
     }
 
-    pub const fn description(self) -> &'static str {
-        match self {
-            Self::None => "Shows the original artwork.",
-            Self::Dither => "Rebuilds the artwork with a dithered color palette.",
-            Self::Ascii => "Recreates the artwork with colored characters on black.",
-            Self::Halftone => "Recreates the artwork with colored print dots on black.",
-            Self::Scanlines => "Adds a pronounced horizontal display-line texture.",
-        }
+    pub fn description(self) -> String {
+        use rcode_presentation::TextKey;
+        crate::l10n::localizer().text(match self {
+            Self::None => TextKey::AuditSettingsEffectNoneDetail,
+            Self::Dither => TextKey::AuditSettingsEffectDitherDetail,
+            Self::Ascii => TextKey::AuditSettingsEffectAsciiDetail,
+            Self::Halftone => TextKey::AuditSettingsEffectHalftoneDetail,
+            Self::Scanlines => TextKey::AuditSettingsEffectScanlinesDetail,
+        })
     }
 }
 
@@ -219,24 +221,26 @@ impl MathFont {
     }
 
     /// The short note beside the label in the menu.
-    pub const fn style(self) -> &'static str {
-        match self {
-            Self::Fira => "Sans",
-            Self::StixTwo | Self::Libertinus | Self::Pagella => "Serif",
-            Self::ComputerModern => "LaTeX",
-            Self::Euler => "Upright",
-        }
+    pub fn style(self) -> String {
+        use rcode_presentation::TextKey;
+        crate::l10n::localizer().text(match self {
+            Self::Fira => TextKey::AuditSettingsMathSans,
+            Self::StixTwo | Self::Libertinus | Self::Pagella => TextKey::AuditSettingsMathSerif,
+            Self::ComputerModern => TextKey::AuditSettingsMathLatex,
+            Self::Euler => TextKey::AuditSettingsMathUpright,
+        })
     }
 
-    pub const fn description(self) -> &'static str {
-        match self {
-            Self::Fira => "A sans face that sits beside the interface font.",
-            Self::StixTwo => "A Times-like serif face with the TeX look.",
-            Self::ComputerModern => "A serif face with the classic LaTeX look.",
-            Self::Libertinus => "A warm serif book face.",
-            Self::Pagella => "A Palatino serif face, from TeX Gyre Pagella.",
-            Self::Euler => "Zapf's upright, hand-drawn math.",
-        }
+    pub fn description(self) -> String {
+        use rcode_presentation::TextKey;
+        crate::l10n::localizer().text(match self {
+            Self::Fira => TextKey::AuditSettingsMathFiraDetail,
+            Self::StixTwo => TextKey::AuditSettingsMathStixDetail,
+            Self::ComputerModern => TextKey::AuditSettingsMathComputerModernDetail,
+            Self::Libertinus => TextKey::AuditSettingsMathLibertinusDetail,
+            Self::Pagella => TextKey::AuditSettingsMathPagellaDetail,
+            Self::Euler => TextKey::AuditSettingsMathEulerDetail,
+        })
     }
 
     pub const fn face(self) -> zatex::bundled::Face {
@@ -544,9 +548,8 @@ pub fn install_new_thread_composer_background(source: &Path, cx: &mut App) -> Re
     let staged = crate::attachments::stage_file_verbatim(source)?;
     // Do not persist the candidate or retire the old managed file until the
     // renderer's decoder has accepted the exact bytes we are about to save.
-    let image = crate::new_thread_background_image::decode(staged.bytes()).map_err(|_| {
-        "This background image is unsupported or damaged. Choose a valid image such as PNG or JPEG.".to_string()
-    })?;
+    let image = crate::new_thread_background_image::decode(staged.bytes())
+        .map_err(|_| crate::l10n::localizer().text(TextKey::AuditSettingsBackgroundInvalid))?;
     let proxy = image.thumbnail(64, 64).to_rgba8();
     let color = wallpaper_colors::extract(proxy.pixels().map(|pixel| pixel.0));
     install_staged_background(source, staged, color, cx)
@@ -561,7 +564,9 @@ fn install_staged_background(
     let data_dir = cx
         .try_global::<SettingsStore>()
         .map(|store| store.data_dir.clone())
-        .ok_or_else(|| "Unable to save the image. Restart RCode and try again.".to_string())?;
+        .ok_or_else(|| {
+            crate::l10n::localizer().text(TextKey::AuditSettingsBackgroundSaveUnavailable)
+        })?;
     let prepared = prepare_background_file(staged, &data_dir)?;
     commit_background(source, prepared, color, cx)
 }
@@ -589,9 +594,8 @@ fn prepare_background_file(
     data_dir: &Path,
 ) -> Result<PreparedBackgroundFile, String> {
     let backgrounds_dir = data_dir.join(NEW_THREAD_BACKGROUND_DIR);
-    std::fs::create_dir_all(&backgrounds_dir).map_err(|_| {
-        "Unable to save the image. Check folder permissions and try again.".to_string()
-    })?;
+    std::fs::create_dir_all(&backgrounds_dir)
+        .map_err(|_| crate::l10n::localizer().text(TextKey::AuditSettingsBackgroundSaveFailed))?;
 
     let extension = Path::new(&staged.name)
         .extension()
@@ -608,9 +612,7 @@ fn prepare_background_file(
         .is_err()
     {
         let _ = std::fs::remove_file(&temporary);
-        return Err(
-            "Unable to save the image. Check folder permissions and try again.".to_string(),
-        );
+        return Err(crate::l10n::localizer().text(TextKey::AuditSettingsBackgroundSaveFailed));
     }
 
     let replacement = NewThreadComposerBackground {
@@ -630,7 +632,9 @@ fn commit_background(
     let data_dir = cx
         .try_global::<SettingsStore>()
         .map(|store| store.data_dir.clone())
-        .ok_or_else(|| "Unable to save the image. Restart RCode and try again.".to_string())?;
+        .ok_or_else(|| {
+            crate::l10n::localizer().text(TextKey::AuditSettingsBackgroundSaveUnavailable)
+        })?;
     let backgrounds_dir = data_dir.join(NEW_THREAD_BACKGROUND_DIR);
     let replacement = prepared.0.as_ref().unwrap().clone();
     let mut next = current(cx);
@@ -647,9 +651,7 @@ fn commit_background(
     // updates memory first and only logs an I/O failure; for a file-backed
     // setting that order can leave disk pointing at an image we just deleted.
     if next.save(&data_dir).is_err() {
-        return Err(
-            "Unable to save the image. Check folder permissions and try again.".to_string(),
-        );
+        return Err(crate::l10n::localizer().text(TextKey::AuditSettingsBackgroundSaveFailed));
     }
     prepared.0.take();
     replace(next, SavePolicy::Immediate, cx);
@@ -665,7 +667,9 @@ pub fn remove_new_thread_composer_background(cx: &mut App) -> Result<(), String>
     let data_dir = cx
         .try_global::<SettingsStore>()
         .map(|store| store.data_dir.clone())
-        .ok_or_else(|| "Unable to remove the image. Restart RCode and try again.".to_string())?;
+        .ok_or_else(|| {
+            crate::l10n::localizer().text(TextKey::AuditSettingsBackgroundRemoveUnavailable)
+        })?;
     let mut next = current(cx);
     let previous = next.new_thread_composer_background.take();
     next.wallpaper_source = None;
@@ -674,9 +678,7 @@ pub fn remove_new_thread_composer_background(cx: &mut App) -> Result<(), String>
         return Ok(());
     }
     if next.save(&data_dir).is_err() {
-        return Err(
-            "Unable to remove the image. Check folder permissions and try again.".to_string(),
-        );
+        return Err(crate::l10n::localizer().text(TextKey::AuditSettingsBackgroundRemoveFailed));
     }
     replace(next, SavePolicy::Immediate, cx);
     remove_managed_new_thread_background(
@@ -3462,7 +3464,7 @@ mod tests {
     }
 
     #[test]
-    fn settings_without_ui_font_default_to_geist() {
+    fn settings_without_ui_font_use_the_platform_default() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
             UiSettings::path(dir.path()),
@@ -3472,7 +3474,7 @@ mod tests {
         let loaded = UiSettings::load(dir.path());
         assert_eq!(
             loaded.ui_font_family,
-            crate::typography::UiFontFamily::Geist
+            crate::typography::UiFontFamily::default()
         );
         assert_eq!(loaded.sidebar_width, 300.0);
         assert!(!loaded.sound_enabled);

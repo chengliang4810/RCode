@@ -658,12 +658,12 @@ static gboolean configure_storage(int argc, char **argv) {
         return TRUE;
     }
     if (argc != 3 || strcmp(argv[1], "--profile") || !g_path_is_absolute(argv[2])) {
-        const char *error = "Browser profile requires an absolute storage directory";
+        const char *error = "profile.invalid";
         send_packet('E', 0, error, strlen(error));
         return FALSE;
     }
     if (!storage_directory(argv[2])) {
-        const char *error = "Could not create or write the browser profile directory";
+        const char *error = "profile.unwritable";
         send_packet('E', 0, error, strlen(error));
         return FALSE;
     }
@@ -671,7 +671,7 @@ static gboolean configure_storage(int argc, char **argv) {
     profile_lock = open(lock_path, O_RDWR | O_CREAT | O_CLOEXEC, 0600);
     g_free(lock_path);
     if (profile_lock < 0 || flock(profile_lock, LOCK_EX | LOCK_NB) < 0) {
-        const char *error = "Browser profile is in use by another process or cannot be locked. Close the other RCode instance and reopen this tab.";
+        const char *error = "profile.locked";
         send_packet('E', 0, error, strlen(error));
         return FALSE;
     }
@@ -681,9 +681,8 @@ static gboolean configure_storage(int argc, char **argv) {
     gboolean writable = storage_directory(argv[2]) && storage_directory(data) && storage_directory(cache);
     int fd = writable ? open(cookies, O_RDWR | O_CREAT | O_CLOEXEC, 0600) : -1;
     if (fd < 0) {
-        gchar *error = g_strdup_printf("Could not open browser profile: %s", g_strerror(errno));
+        const char *error = "profile.unwritable";
         send_packet('E', 0, error, strlen(error));
-        g_free(error);
     } else {
         close(fd);
         WebKitWebsiteDataManager *manager = webkit_website_data_manager_new(

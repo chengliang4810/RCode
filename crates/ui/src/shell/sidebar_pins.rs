@@ -17,8 +17,13 @@ pub(super) struct PendingSidebarPins {
 pub(super) fn preferences_reply(
     value: serde_json::Value,
 ) -> Result<SidebarPreferencesState, String> {
-    serde_json::from_value(value.get("sidebarPreferences").cloned().unwrap_or_default())
-        .map_err(|_| "The engine did not confirm the sidebar changes".into())
+    serde_json::from_value(value.get("sidebarPreferences").cloned().unwrap_or_default()).map_err(
+        |_| {
+            crate::l10n::localizer()
+                .text(TextKey::AuditPinsUnconfirmed)
+                .into()
+        },
+    )
 }
 
 impl Shell {
@@ -78,14 +83,21 @@ impl Shell {
     ) -> bool {
         self.discard_stale_sidebar_pin_writes(cx);
         let Some(engine) = self.state.read(cx).engine().cloned() else {
-            self.set_pin_write_notice("Engine not connected. Sidebar was not changed.".into(), cx);
+            self.set_pin_write_notice(
+                crate::l10n::localizer()
+                    .text(TextKey::AuditPinsOffline)
+                    .into(),
+                cx,
+            );
             cx.notify();
             return false;
         };
         if let Some(pending) = &mut self.sidebar_pin_write {
             if pending.unconfirmed {
                 self.set_pin_write_notice(
-                    "Waiting for the engine to confirm the previous sidebar change.".into(),
+                    crate::l10n::localizer()
+                        .text(TextKey::AuditPinsWaiting)
+                        .into(),
                     cx,
                 );
                 cx.notify();
@@ -187,7 +199,9 @@ impl Shell {
             }
             Err(error) => {
                 self.set_pin_write_notice(
-                    format!("Couldn't save sidebar changes: {error}").into(),
+                    crate::l10n::localizer()
+                        .format_with(TextKey::AuditPinsFailed, &[("error", &error)])
+                        .into(),
                     cx,
                 );
             }
@@ -219,7 +233,12 @@ impl Shell {
             let pending = self.sidebar_pin_write.as_mut().unwrap();
             pending.queue.clear();
             pending.unconfirmed = true;
-            self.set_pin_write_notice("Couldn't confirm sidebar changes. Queued edits were cancelled; waiting for the engine before allowing more changes.".into(), cx);
+            self.set_pin_write_notice(
+                crate::l10n::localizer()
+                    .text(TextKey::AuditPinsCancelled)
+                    .into(),
+                cx,
+            );
             cx.notify();
         }
     }

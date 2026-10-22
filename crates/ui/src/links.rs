@@ -11,7 +11,7 @@ pub struct ConversationDeepLink {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HarnessConversationLink {
-    pub label: &'static str,
+    pub label: String,
     pub url: String,
 }
 
@@ -71,7 +71,7 @@ pub fn harness_conversation_link(chat: &Chat) -> Option<HarnessConversationLink>
         return None;
     }
     Some(HarnessConversationLink {
-        label: "Codex conversation link",
+        label: crate::l10n::localizer().text(rcode_presentation::TextKey::AuditCopyCodexLink),
         url: format!("codex://threads/{}", encode_component(id)),
     })
 }

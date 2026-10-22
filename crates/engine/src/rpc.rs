@@ -3788,7 +3788,10 @@ impl RpcService for EngineRpc {
                     space_cwd,
                     &self.repos.scratch_root(),
                 )
-                .map_err(|error| RpcError::Failed(error.to_string()))?;
+                .map_err(|error| {
+                    tracing::warn!(%error, "terminal working directory resolution failed");
+                    RpcError::Failed(rcode_proto::terminal_errors::TerminalOpenFailure::WorkingDirectoryUnavailable.encode())
+                })?;
                 let session = self
                     .terminals
                     .open(&cwd, p.cols, p.rows)

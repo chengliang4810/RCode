@@ -31,6 +31,7 @@ rcode-visual.workspace = true
 rcode-visual-gpu.workspace = true
 rcode-doc.workspace = true
 rcode-proto.workspace = true
+rcode-presentation.workspace = true
 rcode-client.workspace = true
 serde.workspace = true
 serde_json.workspace = true

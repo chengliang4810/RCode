@@ -130,7 +130,7 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
 
         jump.addAction(UIAction { [weak self] _ in self?.list.scrollToBottom(animated: true) }, for: .touchUpInside)
         jump.accessibilityIdentifier = "jump-to-latest"
-        jump.accessibilityLabel = "Jump to latest"
+        jump.accessibilityLabel = L10n.text("Jump to latest")
         jump.alpha = 0
         jump.transform = CGAffineTransform(scaleX: 0.6, y: 0.6)
         view.addSubview(jump)
@@ -398,8 +398,8 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
             defer { editPending = false }
             if switching { await source.finishEdit(text: nil) }
             guard let text = await source.beginEdit(id) else {
-                let alert = UIAlertController(title: "Can't edit right now", message: "Another device is editing this message, or it was just sent.", preferredStyle: .alert)
-                alert.addAction(UIAlertAction(title: "OK", style: .default))
+                let alert = UIAlertController(title: L10n.text("Can't edit right now"), message: L10n.text("Another device is editing this message, or it was just sent."), preferredStyle: .alert)
+                alert.addAction(UIAlertAction(title: L10n.text("OK"), style: .default))
                 present(alert, animated: true)
                 return
             }
@@ -416,7 +416,7 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
             editingQueueId = id
             composer.images = []
             composer.text = text
-            composer.placeholder = "Edit queued message"
+            composer.placeholder = L10n.text("Edit queued message")
             pill.banner = .editing
             pill.superview?.isHidden = false
             composer.becomeFirstResponder()
@@ -514,11 +514,11 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
             let vm = self.app.session(self.chatId)
             let pinned = vm?.pinned ?? false
             done([
-                UIAction(title: pinned ? "Unpin" : "Pin", image: UIImage(systemName: pinned ? "pin.slash" : "pin")) { _ in self.app.setPinned(self.chatId, !pinned) },
-                UIAction(title: "Copy Transcript", image: UIImage(systemName: "doc.on.doc")) { _ in
+                UIAction(title: pinned ? L10n.text("Unpin") : L10n.text("Pin"), image: UIImage(systemName: pinned ? "pin.slash" : "pin")) { _ in self.app.setPinned(self.chatId, !pinned) },
+                UIAction(title: L10n.text("Copy Transcript"), image: UIImage(systemName: "doc.on.doc")) { _ in
                     UIPasteboard.general.string = self.engine.frame().plainText()
                 },
-                UIAction(title: "Archive", image: UIImage(systemName: "archivebox"), attributes: .destructive) { _ in
+                UIAction(title: L10n.text("Archive"), image: UIImage(systemName: "archivebox"), attributes: .destructive) { _ in
                     self.app.archive(self.chatId)
                     // Beside the iPad sidebar there's nothing to pop back to.
                     if let split = self.splitViewController as? SplitRootController, !split.isCollapsed {
@@ -648,27 +648,27 @@ final class StatusPill: UIControl {
             timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { _ in render() }
         case .sending:
             grid.kind = .trailer
-            label.text = "Sending to host…"
+            label.text = L10n.text("Sending to host…")
         case .offline:
             grid.kind = .dot(StatusTone.idle)
-            label.text = "Offline — sends are saved"
+            label.text = L10n.text("Offline — sends are saved")
         case let .reconnecting(secs):
             grid.kind = .dot(StatusTone.idle)
-            label.text = "Reconnecting in \(secs)s"
+            label.text = L10n.format("reconnect.seconds", secs)
         case .notDelivered:
             grid.kind = .dot(Palette.danger)
-            label.text = "Not delivered · Tap to retry"
+            label.text = L10n.text("Not delivered · Tap to retry")
         case let .failed(message):
             grid.kind = .dot(Palette.danger)
             label.text = message
         case .editing:
             grid.kind = .dot(StatusTone.input)
-            label.text = "Editing queued message · Tap to cancel"
+            label.text = L10n.text("Editing queued message · Tap to cancel")
         }
     }
 
     static func elapsed(_ s: Int) -> String {
-        s < 60 ? "\(s)s" : s < 3600 ? "\(s / 60)m \(s % 60)s" : "\(s / 3600)h \(s / 60 % 60)m"
+        s < 60 ? L10n.format("elapsed.seconds", s) : s < 3600 ? L10n.format("elapsed.minutes", s / 60, s % 60) : L10n.format("elapsed.hours", s / 3600, s / 60 % 60)
     }
 
     override func willMove(toWindow newWindow: UIWindow?) {

@@ -174,7 +174,13 @@ impl WorkspacePathDrag {
         let path = match self.selection.as_slice() {
             [] => &self.path,
             [only] => &only.path,
-            items => return format!("{} items", items.len()).into(),
+            items => {
+                return rcode_presentation::workspace::selection_label(
+                    crate::l10n::localizer(),
+                    items.len(),
+                )
+                .into();
+            }
         };
         path.trim_end_matches('/')
             .rsplit('/')
@@ -1113,7 +1119,7 @@ impl FilesSurface {
                         }
                     }
                     Err(error) => {
-                        let message = error.to_string();
+                        let message = error.display_message();
                         if directory.is_empty() {
                             surface.error = Some(message.clone().into());
                         }

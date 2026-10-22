@@ -83,7 +83,9 @@ pub fn render(source: &str, palette: &Palette) -> Result<String, String> {
             .count()
             > 2048
     {
-        return Err("Diagram exceeds preview complexity limit".into());
+        return Err(crate::l10n::localizer()
+            .text(rcode_presentation::TextKey::AuditDiagramComplex)
+            .into());
     }
     let _guard = RENDER_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     std::panic::catch_unwind(|| {
@@ -130,11 +132,17 @@ pub fn render(source: &str, palette: &Palette) -> Result<String, String> {
             mermaid_rs_renderer::render_with_options(source, options).map_err(|e| e.to_string())?;
         let svg = restyle(svg, palette);
         if svg.len() > 2 * 1024 * 1024 {
-            return Err("Diagram output exceeds preview size limit".into());
+            return Err(crate::l10n::localizer()
+                .text(rcode_presentation::TextKey::AuditDiagramLarge)
+                .into());
         }
         Ok(svg)
     })
-    .unwrap_or_else(|_| Err("Diagram could not be rendered".into()))
+    .unwrap_or_else(|_| {
+        Err(crate::l10n::localizer()
+            .text(rcode_presentation::TextKey::AuditDiagramFailed)
+            .into())
+    })
 }
 
 /// The diagram type: the first word after any front matter and comments.

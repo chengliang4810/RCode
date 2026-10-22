@@ -14,6 +14,8 @@ use windows_webview as native;
 pub mod model;
 pub(crate) mod profile;
 mod view;
+mod error;
+use error::BrowserError;
 
 use crate::composer::{ComposerInput, ComposerInputEvent};
 use gpui::{
@@ -397,10 +399,7 @@ impl BrowserSurface {
             };
             self.page.loading = result.is_ok();
             if let Err(error) = result {
-                self.page.error = Some(
-                    crate::l10n::localizer()
-                        .format_with(TextKey::BrowserOpenFailed, &[("reason", error.as_str())]),
-                );
+                self.page.error = Some(error.display_message());
             }
             window.focus(&self.focus, cx);
         }

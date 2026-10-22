@@ -14,6 +14,7 @@ use serde_json::Value;
 use tokio::sync::mpsc;
 
 use crate::state::{AppState, EngineHandle};
+use rcode_proto::workspace_errors::WorkspaceFailure;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FilesRequestContext {
@@ -50,12 +51,16 @@ impl FilesRequestContext {
 
 #[derive(Debug, thiserror::Error)]
 pub enum FilesClientError {
+    #[error("workspace application failure: {0:?}")]
+    Application(WorkspaceFailure),
     #[error("workspace request could not be encoded: {0}")]
     Encode(String),
     #[error("workspace response was invalid: {0}")]
     Decode(String),
     #[error("workspace connection unavailable: {0}")]
     Transport(String),
+    #[error("connection closed")]
+    Closed,
     #[error("workspace request failed: {0}")]
     Request(String),
     /// The host predates this method.
@@ -65,7 +70,27 @@ pub enum FilesClientError {
 
 impl FilesClientError {
     pub fn retryable(&self) -> bool {
-        matches!(self, Self::Transport(_))
+        matches!(self, Self::Transport(_) | Self::Closed)
+    }
+
+    /// Keep diagnostic Display text for logs; UI copy follows the app language.
+    pub fn display_message(&self) -> String {
+        use rcode_presentation::TextKey;
+        let (key, reason) = match self {
+            Self::Application(failure) => {
+                return rcode_presentation::workspace::workspace_failure(
+                    crate::l10n::localizer(),
+                    failure,
+                );
+            }
+            Self::Closed => return crate::l10n::localizer().text(TextKey::FilesConnectionClosed),
+            Self::Encode(reason) => (TextKey::FilesRequestEncodeFailed, reason),
+            Self::Decode(reason) => (TextKey::FilesResponseInvalid, reason),
+            Self::Transport(reason) => (TextKey::FilesConnectionUnavailable, reason),
+            Self::Request(reason) => (TextKey::FilesRequestFailed, reason),
+            Self::Unsupported(reason) => (TextKey::FilesHostUnsupported, reason),
+        };
+        crate::l10n::localizer().format_with(key, &[("reason", reason)])
     }
 }
 
@@ -73,8 +98,11 @@ impl From<RpcError> for FilesClientError {
     fn from(error: RpcError) -> Self {
         match error {
             RpcError::Transport(message) => Self::Transport(message),
-            RpcError::Closed => Self::Transport("connection closed".into()),
+            RpcError::Closed => Self::Closed,
             RpcError::UnknownMethod(method) => Self::Unsupported(method),
+            RpcError::Failed(message) if WorkspaceFailure::decode(&message).is_some() => {
+                Self::Application(WorkspaceFailure::decode(&message).unwrap())
+            }
             other => Self::Request(other.to_string()),
         }
     }
@@ -168,13 +196,15 @@ impl WorkspaceFilesClient {
                     break;
                 };
                 if !cursors.insert(cursor.clone()) {
-                    return Err(FilesClientError::Decode("Repeated directory cursor".into()));
+                    return Err(FilesClientError::Application(
+                        WorkspaceFailure::DirectoryCursorRepeated,
+                    ));
                 }
                 request.cursor = Some(cursor);
                 let next = self.list_directory(request.clone()).await?;
                 if next.checkout_id != page.checkout_id {
-                    return Err(FilesClientError::Decode(
-                        "Workspace changed between directory pages".into(),
+                    return Err(FilesClientError::Application(
+                        WorkspaceFailure::DirectoryChanged,
                     ));
                 }
                 for entry in &next.entries {
@@ -236,8 +266,8 @@ impl WorkspaceFilesClient {
         // Outside files carry no checkout identity — the device resolves
         // them by absolute path.
         if checkout_id.is_empty() && !path.starts_with('/') {
-            return Err(FilesClientError::Decode(
-                "Workspace checkout identity unavailable".into(),
+            return Err(FilesClientError::Application(
+                WorkspaceFailure::CheckoutUnavailable,
             ));
         }
         let mut request = rcode_proto::ReadWorkspaceImageRequest {
@@ -264,8 +294,8 @@ impl WorkspaceFilesClient {
                 || mime.as_ref().is_some_and(|m| m != &chunk.mime_type)
                 || size.is_some_and(|s| s != chunk.size)
             {
-                return Err(FilesClientError::Decode(
-                    "Image identity or size changed".into(),
+                return Err(FilesClientError::Application(
+                    WorkspaceFailure::ImageChanged,
                 ));
             }
             let part = base64::engine::general_purpose::STANDARD
@@ -276,8 +306,8 @@ impl WorkspaceFilesClient {
                 || chunk.next_offset > chunk.size
                 || chunk.done != (chunk.next_offset == chunk.size)
             {
-                return Err(FilesClientError::Decode(
-                    "Invalid image chunk offset".into(),
+                return Err(FilesClientError::Application(
+                    WorkspaceFailure::ImageChunkInvalid,
                 ));
             }
             bytes.extend(part);
@@ -289,8 +319,8 @@ impl WorkspaceFilesClient {
             mime = Some(chunk.mime_type);
             size = Some(chunk.size);
         }
-        Err(FilesClientError::Decode(
-            "Image chunk limit exceeded".into(),
+        Err(FilesClientError::Application(
+            WorkspaceFailure::ImageChunkLimit,
         ))
     }
 
@@ -350,7 +380,7 @@ pub fn request_params<Request: Serialize>(
         .map_err(|error| FilesClientError::Encode(error.to_string()))?;
     if let Some(target_device_id) = target_device_id {
         let object = value.as_object_mut().ok_or_else(|| {
-            FilesClientError::Encode("workspace request must serialize as an object".into())
+            FilesClientError::Application(WorkspaceFailure::RequestObjectRequired)
         })?;
         object.insert(
             "targetDeviceId".into(),

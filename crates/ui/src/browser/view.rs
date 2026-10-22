@@ -292,9 +292,7 @@ impl BrowserSurface {
         let title: String = if has_error {
             text(TextKey::BrowserEmptyErrorTitle)
         } else if starting {
-            // The native host is still starting WebKitGTK. Upstream shipped
-            // this state with an English literal; it awaits a TextKey.
-            "Starting browser…".to_string()
+            text(TextKey::BrowserStarting)
         } else if external && self.page.url.is_some() {
             text(TextKey::BrowserEmptyExternalTitle)
         } else {
@@ -305,7 +303,7 @@ impl BrowserSurface {
         let description = if let Some(error) = &self.page.error {
             error.clone()
         } else if starting {
-            "You can keep working while your page opens.".into()
+            String::new()
         } else if external {
             text(TextKey::BrowserEmptyExternalBody)
         } else {

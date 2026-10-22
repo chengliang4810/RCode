@@ -1,4 +1,9 @@
 terminal-title = 终端
+
+terminal-limit-reached = 打开的终端过多（最多 { $maximum } 个）。
+terminal-working-directory-unavailable = 此会话的工作目录不可用。
+terminal-startup-failed = 终端启动失败：{ $reason }
+terminal-launch-failed = 无法启动 { $shell }：{ $reason }
 terminal-new = 新建终端
 terminal-close = 关闭终端
 terminal-hide = 隐藏终端

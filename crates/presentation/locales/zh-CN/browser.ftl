@@ -1,4 +1,17 @@
 browser-title = 浏览器
+
+browser-starting = 正在启动浏览器…
+browser-cache-unavailable = 无法找到浏览器缓存目录。
+browser-startup-failed = 无法启动浏览器：{ $reason }。请检查 WebKitGTK 4.1 运行时与显示环境。
+browser-startup-invalid = 浏览器返回了无效的启动响应，请重新打开此标签页。
+browser-startup-stopped = 浏览器初始化意外中止，请重新打开此标签页。
+browser-profile-invalid = 浏览器配置需要使用绝对路径的存储目录。
+browser-profile-unwritable = 无法创建或写入浏览器配置目录。
+browser-profile-locked = 浏览器配置正被占用或无法锁定，请关闭其他 RCode 实例后重新打开此标签页。
+browser-window-required = 浏览器需要原生 Windows 窗口。
+browser-main-thread-required = 浏览器必须在主线程中创建。
+browser-parent-missing = 浏览器所在窗口已不可用。
+browser-temporary-logins = 此 macOS 版本上的登录仅临时保留。请使用 macOS 14 或更高版本，或在默认浏览器中打开此页面以保留登录。
 browser-back = 后退
 browser-forward = 前进
 browser-reload = 刷新

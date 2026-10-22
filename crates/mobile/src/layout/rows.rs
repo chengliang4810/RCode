@@ -9,12 +9,15 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+
+use crate::l10n::localizer;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use rcode_doc::parts::MessagePart;
 use rcode_doc::parts::MessageStatus;
 use rcode_doc::schema::{MessageRole, SessionMessageEntry};
 use rcode_markdown::parser::{IncrementalParser, TopBlock};
+use rcode_presentation::TextKey;
 use rcode_text::WhiteSpace;
 
 use super::display::{ColorRole, DisplayBuilder, FadeEdge, TextRun, WidgetKind};
@@ -479,16 +482,15 @@ impl RowBuilder {
                             ..
                         } => {
                             let text = if *resolved {
-                                "Answered a question".to_owned()
+                                localizer().text(TextKey::MobileQuestionAnswered)
                             } else {
                                 // Show the model-authored question prompt.
                                 match request {
                                     rcode_proto::InteractionRequest::Questions { questions } => {
-                                        questions
-                                            .first()
-                                            .map_or("Awaiting your answer…".to_owned(), |q| {
-                                                q.question.clone()
-                                            })
+                                        questions.first().map_or_else(
+                                            || localizer().text(TextKey::MobileQuestionAwaiting),
+                                            |q| q.question.clone(),
+                                        )
                                     }
                                 }
                             };
@@ -523,7 +525,8 @@ impl RowBuilder {
                             id, source_title, ..
                         } => {
                             let gap = gap_for(&rows, false);
-                            let text = format!("Forked from {source_title}");
+                            let text = localizer()
+                                .format_with(TextKey::MobileForkedFrom, &[("title", source_title)]);
                             rows.push(Placed {
                                 core: Arc::new(chip_row(
                                     ctx,
@@ -669,7 +672,11 @@ impl RowBuilder {
         let expanded = self.expanded.contains(&key);
         let more = prepare_plain(
             ctx,
-            if expanded { "Show less" } else { "Show more" },
+            &localizer().text(if expanded {
+                TextKey::MobileShowLess
+            } else {
+                TextKey::MobileShowMore
+            }),
             mstyle,
             ctx.typo.px(mlh),
             ColorRole::TextSecondary,

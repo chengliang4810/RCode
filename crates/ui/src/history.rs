@@ -1169,7 +1169,10 @@ fn visible_ref_count(refs: &[GitHistoryRef], available_width: f32) -> usize {
 
 fn format_date(value: &str) -> String {
     DateTime::parse_from_rfc3339(value)
-        .map(|date| date.format("%b %-d, %Y").to_string())
+        .map(|date| match crate::l10n::localizer().locale() {
+            rcode_presentation::Locale::ZhCn => date.format("%Y年%-m月%-d日").to_string(),
+            rcode_presentation::Locale::EnUs => date.format("%b %-d, %Y").to_string(),
+        })
         .unwrap_or_else(|_| "—".to_string())
 }
 
@@ -1276,7 +1279,9 @@ impl Render for HistoryAuthorTooltip {
 
 fn history_author_name(name: &str) -> SharedString {
     if name.trim().is_empty() {
-        "Unknown".into()
+        crate::l10n::localizer()
+            .text(TextKey::AuditHistoryUnknown)
+            .into()
     } else {
         name.to_string().into()
     }
@@ -3948,7 +3953,7 @@ impl GitHistory {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let label = if copied {
-            "Copied".to_string()
+            crate::l10n::localizer().text(TextKey::FilesCopied)
         } else {
             sha.chars().take(7).collect()
         };
@@ -4940,7 +4945,10 @@ mod tests {
 
     #[test]
     fn author_avatar_fallback_uses_the_first_visible_initial() {
-        assert_eq!(history_author_name(""), SharedString::from("Unknown"));
+        assert_eq!(
+            history_author_name(""),
+            SharedString::from(crate::l10n::localizer().text(TextKey::AuditHistoryUnknown))
+        );
         assert_eq!(history_author_initial("  josé"), SharedString::from("J"));
         assert_eq!(history_author_initial("   "), SharedString::from("?"));
     }

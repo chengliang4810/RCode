@@ -441,17 +441,21 @@ impl Shell {
         let theme = Theme::of(cx).clone();
         let len = self.pull_request_pane.tabs.len();
         let mut rows = div().flex().flex_col().gap(px(2.0));
-        for (action, label) in [
-            (TabCloseAction::This, "Close tab"),
-            (TabCloseAction::Others, "Close other tabs"),
-            (TabCloseAction::Left, "Close tabs to the left"),
-            (TabCloseAction::Right, "Close tabs to the right"),
+        for (action, label_key) in [
+            (TabCloseAction::This, TextKey::AuditTabClose),
+            (TabCloseAction::Others, TextKey::AuditTabOthers),
+            (TabCloseAction::Left, TextKey::AuditTabLeft),
+            (TabCloseAction::Right, TextKey::AuditTabRight),
         ] {
+            let label = crate::l10n::localizer().text(label_key);
+            let action_id = label_key.id();
             let enabled = ix < len && !tabs_to_close(len, ix, action).is_empty();
             rows = rows.child(
-                popover::menu_row(&theme, false, label)
-                    .id(SharedString::from(format!("pull-request-tab-menu-{label}")))
-                    .debug_selector(move || format!("pull-request-tab-menu-{label}"))
+                popover::menu_row(&theme, false, label.clone())
+                    .id(SharedString::from(format!(
+                        "pull-request-tab-menu-{action_id}"
+                    )))
+                    .debug_selector(move || format!("pull-request-tab-menu-{action_id}"))
                     .when(!enabled, |el| el.opacity(0.4).cursor_default())
                     .on_click(cx.listener(move |this, _, _, cx| {
                         if !enabled {

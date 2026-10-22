@@ -39,7 +39,7 @@ struct SessionChrome: Equatable {
     var subtitle = ""
     var running = false
     var canSteer = false
-    var placeholder = "Message"
+    var placeholder = L10n.text("Message")
     var chips: [ComposerChip] = []
     var banner: Banner = .none
     var questions: (requestId: String, items: [Question])?
@@ -104,10 +104,10 @@ final class FixtureSessionSource: SessionSource {
     init(title: String, subtitle: String) {
         chrome.title = title
         chrome.subtitle = subtitle
-        chrome.placeholder = "Message Claude"
+        chrome.placeholder = L10n.text("Message Claude")
         chrome.chips = [
             ComposerChip(id: "model", title: "Opus 4.5", symbol: nil, icon: BrandMarks.image(for: "claude-code", side: 13)),
-            ComposerChip(id: "effort", title: "High", symbol: "gauge.with.dots.needle.67percent"),
+            ComposerChip(id: "effort", title: L10n.text("High"), symbol: "gauge.with.dots.needle.67percent"),
             ComposerChip(id: "branch", title: "ios-rewrite", symbol: nil, icon: BranchIcon.sized()),
         ]
         for i in 0..<3 {
@@ -144,7 +144,7 @@ final class FixtureSessionSource: SessionSource {
         entries.append(DebugEntry(id: "a\(n)", user: false, text: "", streaming: true))
         update {
             $0.running = true
-            $0.banner = .working(since: Date(), word: "Thinking")
+            $0.banner = .working(since: Date(), word: L10n.text("Thinking"))
         }
         let words = fixture.split(separator: " ", omittingEmptySubsequences: false).map(String.init)
         var i = 0
@@ -210,7 +210,7 @@ final class FixtureSessionSource: SessionSource {
     func chipMenu(_ id: String) -> UIMenu? {
         switch id {
         case "model":
-            return UIMenu(title: "Model", children: ["Opus 4.5", "Sonnet 4.5", "Haiku 4.5"].map { m in
+            return UIMenu(title: L10n.text("Model"), children: ["Opus 4.5", "Sonnet 4.5", "Haiku 4.5"].map { m in
                 UIAction(title: m, state: chrome.chips.first { $0.id == "model" }?.title == m ? .on : .off) { [weak self] _ in
                     self?.update { c in
                         if let i = c.chips.firstIndex(where: { $0.id == "model" }) { c.chips[i] = ComposerChip(id: "model", title: m, symbol: nil, icon: BrandMarks.image(for: "claude-code", side: 13)) }
@@ -218,7 +218,7 @@ final class FixtureSessionSource: SessionSource {
                 }
             })
         case "effort":
-            return UIMenu(title: "Reasoning effort", children: ["Low", "Medium", "High", "Max"].map { e in
+            return UIMenu(title: L10n.text("Reasoning effort"), children: [L10n.text("Low"), L10n.text("Medium"), L10n.text("High"), L10n.text("Max")].map { e in
                 UIAction(title: e, state: chrome.chips.first { $0.id == "effort" }?.title == e ? .on : .off) { [weak self] _ in
                     self?.update { c in
                         if let i = c.chips.firstIndex(where: { $0.id == "effort" }) { c.chips[i] = ComposerChip(id: "effort", title: e, symbol: "gauge.with.dots.needle.67percent") }

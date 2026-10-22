@@ -1704,7 +1704,7 @@ impl Render for SidebarPane {
 /// A button in the "Check for Updates…" dialog.
 #[derive(Debug, Clone, Copy)]
 enum UpdatePromptButton {
-    Close(&'static str),
+    Close(TextKey),
     CheckAgain,
     Download,
     Restart,
@@ -2691,11 +2691,17 @@ impl Shell {
                                 .into()
                         });
                         let body = match sound {
-                            crate::sound::Sound::Done => "Run finished",
-                            crate::sound::Sound::Request => "Waiting on your input",
-                            crate::sound::Sound::Attention => "Run failed",
+                            crate::sound::Sound::Done => {
+                                crate::l10n::localizer().text(TextKey::AuditNotifyFinished)
+                            }
+                            crate::sound::Sound::Request => {
+                                crate::l10n::localizer().text(TextKey::AuditNotifyInput)
+                            }
+                            crate::sound::Sound::Attention => {
+                                crate::l10n::localizer().text(TextKey::AuditNotifyFailed)
+                            }
                         };
-                        crate::notify::post(&title, body, Some(&chat_id));
+                        crate::notify::post(&title, &body, Some(&chat_id));
                     }
                 }
             }
@@ -2715,10 +2721,16 @@ impl Shell {
                     && !(self.settings.notifications_background_only && app_focused)
                 {
                     let body = match connectivity {
-                        rcode_proto::ConnectivityState::Offline => "Your device is offline",
-                        _ => "RCode is trying to reconnect",
+                        rcode_proto::ConnectivityState::Offline => {
+                            crate::l10n::localizer().text(TextKey::AuditNotifyOffline)
+                        }
+                        _ => crate::l10n::localizer().text(TextKey::AuditNotifyReconnecting),
                     };
-                    crate::notify::post("Connection unavailable", body, None);
+                    crate::notify::post(
+                        &crate::l10n::localizer().text(TextKey::AuditNotifyUnavailable),
+                        &body,
+                        None,
+                    );
                 }
             }
         }
@@ -3133,7 +3145,9 @@ impl Shell {
                         .read(cx)
                         .selected_chat_row()
                         .and_then(|c| c.title.clone())
-                        .unwrap_or_else(|| "Side chat".into());
+                        .unwrap_or_else(|| {
+                            crate::l10n::localizer().text(TextKey::AuditSideChat).into()
+                        });
                     (*surface, title.into(), false, None)
                 }),
                 RightSurface::Subagent(id) => self
@@ -5120,14 +5134,26 @@ impl Shell {
             .flex_col()
             .gap(px(2.0))
             .when(has_path, |menu| {
-                menu.child(item("chat-copy-path", "Path".into()).on_click(
-                    cx.listener(move |this, _, _, cx| this.copy_chat_path(&path_chat_id, cx)),
-                ))
+                menu.child(
+                    item(
+                        "chat-copy-path",
+                        crate::l10n::localizer().text(TextKey::AuditCopyPath).into(),
+                    )
+                    .on_click(
+                        cx.listener(move |this, _, _, cx| this.copy_chat_path(&path_chat_id, cx)),
+                    ),
+                )
             })
             .child(
-                item("chat-copy-rcode", "RCode conversation link".into()).on_click(cx.listener(
-                    move |this, _, _, cx| this.copy_rcode_conversation_link(&link_chat_id, cx),
-                )),
+                item(
+                    "chat-copy-rcode",
+                    crate::l10n::localizer()
+                        .text(TextKey::AuditCopyConversationLink)
+                        .into(),
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.copy_rcode_conversation_link(&link_chat_id, cx)
+                })),
             )
             .when_some(harness_link, |menu, link| {
                 menu.child(
@@ -5138,9 +5164,15 @@ impl Shell {
             })
             .when(session_id, |menu| {
                 menu.child(
-                    item("chat-copy-session", "Harness session ID".into()).on_click(cx.listener(
-                        move |this, _, _, cx| this.copy_harness_session_id(&session_chat_id, cx),
-                    )),
+                    item(
+                        "chat-copy-session",
+                        crate::l10n::localizer()
+                            .text(TextKey::AuditCopySessionId)
+                            .into(),
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.copy_harness_session_id(&session_chat_id, cx)
+                    })),
                 )
             })
             .child(
@@ -5166,13 +5198,13 @@ impl Shell {
             cx.write_to_clipboard(ClipboardItem::new_string(link));
             self.show_notice(
                 crate::toast::ToastKind::Success,
-                "RCode conversation link copied",
+                crate::l10n::localizer().text(TextKey::AuditCopyConversationDone),
                 cx,
             );
         } else {
             self.show_notice(
                 crate::toast::ToastKind::Error,
-                "Conversation link is not ready yet",
+                crate::l10n::localizer().text(TextKey::AuditCopyConversationUnready),
                 cx,
             );
         }
@@ -5192,7 +5224,8 @@ impl Shell {
             cx.write_to_clipboard(ClipboardItem::new_string(link.url));
             self.show_notice(
                 crate::toast::ToastKind::Success,
-                format!("{} copied", link.label),
+                crate::l10n::localizer()
+                    .format_with(TextKey::AuditCopyNamed, &[("name", &link.label)]),
                 cx,
             );
         }
@@ -5212,7 +5245,7 @@ impl Shell {
             cx.write_to_clipboard(ClipboardItem::new_string(id));
             self.show_notice(
                 crate::toast::ToastKind::Success,
-                "Harness session ID copied",
+                crate::l10n::localizer().text(TextKey::AuditCopySessionDone),
                 cx,
             );
         }
@@ -5231,7 +5264,11 @@ impl Shell {
             .map(str::to_owned);
         if let Some(path) = path {
             cx.write_to_clipboard(ClipboardItem::new_string(path));
-            self.show_notice(crate::toast::ToastKind::Success, "Path copied", cx);
+            self.show_notice(
+                crate::toast::ToastKind::Success,
+                crate::l10n::localizer().text(TextKey::AuditCopyPathDone),
+                cx,
+            );
         }
         self.close_chat_menu(cx);
         cx.notify();
@@ -5794,7 +5831,11 @@ impl Shell {
     /// Fire a Mutate op; failures surface in the sidebar notice strip.
     fn mutate(&mut self, params: serde_json::Value, cx: &mut Context<Self>) {
         let Some(engine) = self.state.read(cx).engine().cloned() else {
-            self.show_notice(crate::toast::ToastKind::Error, "Engine not connected", cx);
+            self.show_notice(
+                crate::toast::ToastKind::Error,
+                crate::l10n::localizer().text(TextKey::AuditEngineDisconnected),
+                cx,
+            );
             cx.notify();
             return;
         };
@@ -5855,7 +5896,7 @@ impl Shell {
             if surface == ChatRenameSurface::SessionCard {
                 self.show_notice(
                     crate::toast::ToastKind::Error,
-                    "Open this side chat's parent to rename it",
+                    crate::l10n::localizer().text(TextKey::AuditSideChatRenameParent),
                     cx,
                 );
             }
@@ -5863,10 +5904,13 @@ impl Shell {
             return;
         }
         let input = cx.new(|cx| {
-            ComposerInput::new("Session title", cx)
-                .with_single_line()
-                .with_text_metrics(13.0, 17.0)
-                .with_accessibility_role(gpui::Role::TextInput)
+            ComposerInput::new(
+                crate::l10n::localizer().text(TextKey::AuditSessionTitle),
+                cx,
+            )
+            .with_single_line()
+            .with_text_metrics(13.0, 17.0)
+            .with_accessibility_role(gpui::Role::TextInput)
         });
         input.update(cx, |input, cx| {
             input.set_text(current, cx);
@@ -6298,7 +6342,9 @@ impl Shell {
         };
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             self.discard_working_tree = Some(DiscardWorkingTreeFlow::Failed(
-                "Engine is not connected.".into(),
+                crate::l10n::localizer()
+                    .text(TextKey::AuditEngineDisconnectedPeriod)
+                    .into(),
             ));
             cx.notify();
             return;
@@ -7631,9 +7677,9 @@ impl Shell {
                             .text_size(crate::typography::ui_rems(10.0))
                             .text_color(theme.text_muted)
                             .child(SharedString::from(if archived {
-                                "Unarchive"
+                                crate::l10n::localizer().text(TextKey::AuditUnarchive)
                             } else {
-                                "Archive"
+                                crate::l10n::localizer().text(TextKey::AuditArchive)
                             })),
                     )
                 })
@@ -8127,9 +8173,13 @@ impl Shell {
                                 .items_center()
                                 .justify_end()
                                 .aria_label(if show_archive {
-                                    if archived { "Unarchive" } else { "Archive" }
+                                    if archived {
+                                        crate::l10n::localizer().text(TextKey::AuditUnarchive)
+                                    } else {
+                                        crate::l10n::localizer().text(TextKey::AuditArchive)
+                                    }
                                 } else {
-                                    "Session time"
+                                    crate::l10n::localizer().text(TextKey::AuditSessionTime)
                                 })
                                 .when(show_archive, |el| {
                                     el.cursor_pointer()
@@ -9182,32 +9232,53 @@ impl Shell {
             let update = update.read(cx);
             match update.prompt()? {
                 Prompt::Checking => (
-                    "Checking for updates…".into(),
-                    format!("You're on RCode {current}.").into(),
-                    vec![UpdatePromptButton::Close("Cancel")],
+                    crate::l10n::localizer()
+                        .text(TextKey::AuditUpdateChecking)
+                        .into(),
+                    crate::l10n::localizer()
+                        .format_with(
+                            TextKey::AuditUpdateYourVersion,
+                            &[("version", &current.to_string())],
+                        )
+                        .into(),
+                    vec![UpdatePromptButton::Close(TextKey::AuditActionCancel)],
                 ),
                 Prompt::CheckFailed(message) => (
-                    "Couldn't check for updates".into(),
+                    crate::l10n::localizer()
+                        .text(TextKey::AuditUpdateCheckFailed)
+                        .into(),
                     message.clone(),
                     vec![
-                        UpdatePromptButton::Close("Close"),
+                        UpdatePromptButton::Close(TextKey::AuditActionClose),
                         UpdatePromptButton::CheckAgain,
                     ],
                 ),
                 Prompt::Result => match update.available() {
                     None => (
-                        "RCode is up to date".into(),
-                        format!("Version {current} is the newest release.").into(),
-                        vec![UpdatePromptButton::Close("OK")],
+                        crate::l10n::localizer()
+                            .text(TextKey::AuditUpdateCurrent)
+                            .into(),
+                        crate::l10n::localizer()
+                            .format_with(
+                                TextKey::AuditUpdateNewest,
+                                &[("version", &current.to_string())],
+                            )
+                            .into(),
+                        vec![UpdatePromptButton::Close(TextKey::AuditActionOk)],
                     ),
                     Some(latest) => {
-                        let title: SharedString = format!("RCode {latest} is available").into();
+                        let title: SharedString = crate::l10n::localizer()
+                            .format_with(
+                                TextKey::AuditUpdateAvailable,
+                                &[("version", &latest.to_string())],
+                            )
+                            .into();
                         if let Some(blocker) = update.blocker() {
                             (
                                 title,
-                                blocker.to_string().into(),
+                                AppUpdate::blocker_text(blocker).into(),
                                 vec![
-                                    UpdatePromptButton::Close("Later"),
+                                    UpdatePromptButton::Close(TextKey::AuditActionLater),
                                     UpdatePromptButton::OpenDownloads,
                                 ],
                             )
@@ -9215,32 +9286,49 @@ impl Shell {
                             match update.flow() {
                                 Flow::Idle => (
                                     title,
-                                    format!("You're on {current}.").into(),
+                                    crate::l10n::localizer()
+                                        .format_with(
+                                            TextKey::AuditUpdateOnVersion,
+                                            &[("version", &current.to_string())],
+                                        )
+                                        .into(),
                                     vec![
-                                        UpdatePromptButton::Close("Later"),
+                                        UpdatePromptButton::Close(TextKey::AuditActionLater),
                                         UpdatePromptButton::Download,
                                     ],
                                 ),
                                 Flow::Downloading { .. } | Flow::Installed => (
                                     title,
-                                    "Downloading the update in the background — you can keep working."
+                                    crate::l10n::localizer()
+                                        .text(TextKey::AuditUpdateBackground)
                                         .into(),
-                                    vec![UpdatePromptButton::Close("Hide")],
+                                    vec![UpdatePromptButton::Close(TextKey::AuditActionHide)],
                                 ),
                                 Flow::Ready { version, .. } => (
-                                    format!("RCode {version} is ready").into(),
-                                    "Restart to finish updating. If you don't, it installs the next time you quit RCode."
+                                    crate::l10n::localizer()
+                                        .format_with(
+                                            TextKey::AuditUpdateReadyTitle,
+                                            &[("version", &version.to_string())],
+                                        )
+                                        .into(),
+                                    crate::l10n::localizer()
+                                        .text(TextKey::AuditUpdateRestartBody)
                                         .into(),
                                     vec![
-                                        UpdatePromptButton::Close("Later"),
+                                        UpdatePromptButton::Close(TextKey::AuditActionLater),
                                         UpdatePromptButton::Restart,
                                     ],
                                 ),
                                 Flow::Failed { message, .. } => (
                                     title,
-                                    format!("The download failed: {message}").into(),
+                                    crate::l10n::localizer()
+                                        .format_with(
+                                            TextKey::AuditUpdateDownloadFailed,
+                                            &[("error", message)],
+                                        )
+                                        .into(),
                                     vec![
-                                        UpdatePromptButton::Close("Later"),
+                                        UpdatePromptButton::Close(TextKey::AuditActionLater),
                                         UpdatePromptButton::Download,
                                     ],
                                 ),
@@ -9251,16 +9339,19 @@ impl Shell {
                         ) {
                             (
                                 title,
-                                "Run `rcode update` in a terminal to install it.".into(),
-                                vec![UpdatePromptButton::Close("OK")],
+                                crate::l10n::localizer()
+                                    .text(TextKey::AuditUpdateCli)
+                                    .into(),
+                                vec![UpdatePromptButton::Close(TextKey::AuditActionOk)],
                             )
                         } else {
                             (
                                 title,
-                                "This copy of RCode wasn't set up by an installer (for example, a source build), so it can't update itself."
+                                crate::l10n::localizer()
+                                    .text(TextKey::AuditUpdateUnmanaged)
                                     .into(),
                                 vec![
-                                    UpdatePromptButton::Close("Later"),
+                                    UpdatePromptButton::Close(TextKey::AuditActionLater),
                                     UpdatePromptButton::OpenDownloads,
                                 ],
                             )
@@ -9277,51 +9368,63 @@ impl Shell {
             .gap(px(8.0));
         for button in buttons {
             row = row.child(match button {
-                UpdatePromptButton::Close(label) => {
-                    popover::btn_ghost(&theme, label, "update-prompt-close")
-                        .id("update-prompt-close")
-                        .on_click(cx.listener(|_, _, _, cx| {
-                            if let Some(update) = crate::app_update::AppUpdate::global(cx) {
-                                update.update(cx, |update, cx| update.dismiss_prompt(cx));
-                            }
-                        }))
-                }
-                UpdatePromptButton::CheckAgain => popover::btn_primary(&theme, "Try again")
-                    .id("update-prompt-check")
-                    .on_click(cx.listener(|_, _, _, cx| {
-                        if let Some(update) = crate::app_update::AppUpdate::global(cx) {
-                            update.update(cx, |update, cx| update.check_for_updates(cx));
-                        }
-                    })),
-                UpdatePromptButton::Download => popover::btn_primary(&theme, "Download")
-                    .id("update-prompt-download")
-                    .on_click(cx.listener(|_, _, _, cx| {
-                        if let Some(update) = crate::app_update::AppUpdate::global(cx) {
-                            update.update(cx, |update, cx| update.start_download(cx));
-                        }
-                    })),
-                UpdatePromptButton::Restart => popover::btn_primary(&theme, "Restart to update")
-                    .id("update-prompt-restart")
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        let Some(update) = crate::app_update::AppUpdate::global(cx) else {
-                            return;
-                        };
-                        let staged = update.read(cx).staged();
+                UpdatePromptButton::Close(label) => popover::btn_ghost(
+                    &theme,
+                    crate::l10n::localizer().text(label),
+                    "update-prompt-close",
+                )
+                .id("update-prompt-close")
+                .on_click(cx.listener(|_, _, _, cx| {
+                    if let Some(update) = crate::app_update::AppUpdate::global(cx) {
                         update.update(cx, |update, cx| update.dismiss_prompt(cx));
-                        if let Some(staged) = staged {
-                            this.apply_staged_update(staged, cx);
-                        }
-                    })),
-                UpdatePromptButton::OpenDownloads => {
-                    popover::btn_primary(&theme, "Open download page")
-                        .id("update-prompt-downloads")
-                        .on_click(cx.listener(|_, _, _, cx| {
-                            cx.open_url(rcode_update::LATEST_RELEASE_PAGE);
-                            if let Some(update) = crate::app_update::AppUpdate::global(cx) {
-                                update.update(cx, |update, cx| update.dismiss_prompt(cx));
-                            }
-                        }))
-                }
+                    }
+                })),
+                UpdatePromptButton::CheckAgain => popover::btn_primary(
+                    &theme,
+                    crate::l10n::localizer().text(TextKey::AuditTryAgain),
+                )
+                .id("update-prompt-check")
+                .on_click(cx.listener(|_, _, _, cx| {
+                    if let Some(update) = crate::app_update::AppUpdate::global(cx) {
+                        update.update(cx, |update, cx| update.check_for_updates(cx));
+                    }
+                })),
+                UpdatePromptButton::Download => popover::btn_primary(
+                    &theme,
+                    crate::l10n::localizer().text(TextKey::AuditDownload),
+                )
+                .id("update-prompt-download")
+                .on_click(cx.listener(|_, _, _, cx| {
+                    if let Some(update) = crate::app_update::AppUpdate::global(cx) {
+                        update.update(cx, |update, cx| update.start_download(cx));
+                    }
+                })),
+                UpdatePromptButton::Restart => popover::btn_primary(
+                    &theme,
+                    crate::l10n::localizer().text(TextKey::AuditUpdateRestart),
+                )
+                .id("update-prompt-restart")
+                .on_click(cx.listener(|this, _, _, cx| {
+                    let Some(update) = crate::app_update::AppUpdate::global(cx) else {
+                        return;
+                    };
+                    let staged = update.read(cx).staged();
+                    update.update(cx, |update, cx| update.dismiss_prompt(cx));
+                    if let Some(staged) = staged {
+                        this.apply_staged_update(staged, cx);
+                    }
+                })),
+                UpdatePromptButton::OpenDownloads => popover::btn_primary(
+                    &theme,
+                    crate::l10n::localizer().text(TextKey::AuditUpdateDownloadPage),
+                )
+                .id("update-prompt-downloads")
+                .on_click(cx.listener(|_, _, _, cx| {
+                    cx.open_url(rcode_update::LATEST_RELEASE_PAGE);
+                    if let Some(update) = crate::app_update::AppUpdate::global(cx) {
+                        update.update(cx, |update, cx| update.dismiss_prompt(cx));
+                    }
+                })),
             });
         }
         let card = popover::dialog_card(&theme)
@@ -9906,19 +10009,20 @@ impl Shell {
                 if !chat_id.is_empty() {
                     menu = menu.child(popover::menu_separator());
                 }
-                for (ix, (action, label)) in [
-                    (TabCloseAction::This, "Close tab"),
-                    (TabCloseAction::Others, "Close other tabs"),
-                    (TabCloseAction::Left, "Close tabs to the left"),
-                    (TabCloseAction::Right, "Close tabs to the right"),
+                for (ix, (action, label_key)) in [
+                    (TabCloseAction::This, TextKey::AuditTabClose),
+                    (TabCloseAction::Others, TextKey::AuditTabOthers),
+                    (TabCloseAction::Left, TextKey::AuditTabLeft),
+                    (TabCloseAction::Right, TextKey::AuditTabRight),
                 ]
                 .into_iter()
                 .enumerate()
                 {
+                    let label = crate::l10n::localizer().text(label_key);
                     let enabled = !self.tabs_to_close(surface, action, cx).is_empty();
                     let key = key.clone();
-                    let row = popover::menu_row(&theme, false, label)
-                        .id(SharedString::from(label))
+                    let row = popover::menu_row(&theme, false, label.clone())
+                        .id(("tab-close-action", ix))
                         .when(!enabled, |el| el.opacity(0.4).cursor_default())
                         .on_click(cx.listener(move |this, _, window, cx| {
                             if !enabled {
@@ -10006,56 +10110,65 @@ impl Shell {
 
         if let Some(flow) = self.discard_working_tree.clone() {
             let card = match flow {
-                DiscardWorkingTreeFlow::Confirm(_) => {
-                    popover::dialog_card(&theme)
-                        .child(popover::dialog_title(
-                            &theme,
-                            "Discard working tree changes?",
-                        ))
-                        .child(div().mt(px(6.0)).child(popover::dialog_body(
-                            &theme,
-                            "Discard all uncommitted changes in this working tree? This can’t be undone.",
-                        )))
-                        .child(
-                            div()
-                                .mt(px(16.0))
-                                .flex()
-                                .flex_row()
-                                .justify_end()
-                                .gap(px(8.0))
-                                .child(
-                                    popover::btn_ghost(
-                                        &theme,
-                                        "Cancel",
-                                        "discard-working-tree-cancel",
-                                    )
-                                    .id("discard-working-tree-cancel")
-                                    .on_click(cx.listener(|this, _, _, cx| {
+                DiscardWorkingTreeFlow::Confirm(_) => popover::dialog_card(&theme)
+                    .child(popover::dialog_title(
+                        &theme,
+                        crate::l10n::localizer().text(TextKey::AuditDiscardTitle),
+                    ))
+                    .child(div().mt(px(6.0)).child(popover::dialog_body(
+                        &theme,
+                        crate::l10n::localizer().text(TextKey::AuditDiscardBody),
+                    )))
+                    .child(
+                        div()
+                            .mt(px(16.0))
+                            .flex()
+                            .flex_row()
+                            .justify_end()
+                            .gap(px(8.0))
+                            .child(
+                                popover::btn_ghost(
+                                    &theme,
+                                    crate::l10n::localizer().text(TextKey::ActionCancel),
+                                    "discard-working-tree-cancel",
+                                )
+                                .id("discard-working-tree-cancel")
+                                .on_click(cx.listener(
+                                    |this, _, _, cx| {
                                         this.discard_working_tree = None;
                                         cx.notify();
-                                    })),
+                                    },
+                                )),
+                            )
+                            .child(
+                                popover::btn_danger(
+                                    &theme,
+                                    crate::l10n::localizer().text(TextKey::AuditDiscard),
                                 )
-                                .child(
-                                    popover::btn_danger(&theme, "Discard changes")
-                                        .id("discard-working-tree-confirm")
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.confirm_discard_working_tree(cx)
-                                        })),
-                                ),
-                        )
-                        .into_any_element()
-                }
+                                .id("discard-working-tree-confirm")
+                                .on_click(cx.listener(
+                                    |this, _, _, cx| this.confirm_discard_working_tree(cx),
+                                )),
+                            ),
+                    )
+                    .into_any_element(),
                 DiscardWorkingTreeFlow::Failed(error) => popover::dialog_card(&theme)
-                    .child(popover::dialog_title(&theme, "Couldn’t discard changes"))
+                    .child(popover::dialog_title(
+                        &theme,
+                        crate::l10n::localizer().text(TextKey::AuditDiscardFailed),
+                    ))
                     .child(div().mt(px(6.0)).child(popover::dialog_body(&theme, error)))
                     .child(
                         div().mt(px(16.0)).flex().justify_end().child(
-                            popover::btn_primary(&theme, "Close")
-                                .id("discard-working-tree-error-close")
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.discard_working_tree = None;
-                                    cx.notify();
-                                })),
+                            popover::btn_primary(
+                                &theme,
+                                crate::l10n::localizer().text(TextKey::AuditActionClose),
+                            )
+                            .id("discard-working-tree-error-close")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.discard_working_tree = None;
+                                cx.notify();
+                            })),
                         ),
                     )
                     .into_any_element(),
@@ -10397,10 +10510,13 @@ impl Shell {
                                 )),
                         )
                         .child(
-                            popover::btn_primary(&theme_owned, "Add a project")
-                                .id("onboarding-add-space")
-                                .mt(px(20.0))
-                                .on_click(cx.listener(|this, _, _, cx| this.open_add_space(cx))),
+                            popover::btn_primary(
+                                &theme_owned,
+                                crate::l10n::localizer().text(TextKey::AuditAddProject),
+                            )
+                            .id("onboarding-add-space")
+                            .mt(px(20.0))
+                            .on_click(cx.listener(|this, _, _, cx| this.open_add_space(cx))),
                         ),
                 ))
                 .into_any_element()
@@ -11351,7 +11467,8 @@ impl Shell {
             let workspace_path = self.workspace_path_for_surface(surface, cx);
             let accessible_name = detail.as_ref().unwrap_or(&title);
             let accessible_label = if dirty {
-                format!("{accessible_name}, unsaved changes")
+                crate::l10n::localizer()
+                    .format_with(TextKey::AuditUnsavedTab, &[("name", &accessible_name)])
             } else {
                 accessible_name.to_string()
             };
@@ -14851,7 +14968,7 @@ mod exit_regressions {
         );
         redraw(cx);
         let others = cx
-            .debug_bounds("pull-request-tab-menu-Close other tabs")
+            .debug_bounds("pull-request-tab-menu-audit-tab-others")
             .unwrap();
         cx.simulate_click(others.center(), gpui::Modifiers::default());
         redraw(cx);

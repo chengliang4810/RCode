@@ -7,6 +7,8 @@
 //! pending-input detection) lives in free functions/structs with unit tests;
 //! the gpui element only feeds them measurements.
 
+use rcode_presentation::TextKey;
+
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::path::PathBuf;
@@ -9037,7 +9039,7 @@ impl Composer {
                     message_id: message_id.clone(),
                 };
                 let command = serde_json::to_value(&command)
-                    .map_err(|e| format!("Send failed: {e}"))?;
+                    .map_err(|e| crate::l10n::localizer().format_with(TextKey::ConversationSendFailed, &[("error", &e.to_string())]))?;
                 let mut params = serde_json::json!({ "chatId": chat_id, "command": command });
                 if !transfers.is_empty() {
                     params["transfers"] = serde_json::Value::Array(transfers);
@@ -9052,7 +9054,7 @@ impl Composer {
                     std::time::Duration::from_secs(30),
                 )
                 .await
-                .map_err(|e| format!("Send failed: {e}"))?;
+                .map_err(|e| crate::l10n::localizer().format_with(TextKey::ConversationSendFailed, &[("error", &e.to_string())]))?;
                 Ok(None)
             }
             .await;

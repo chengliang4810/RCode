@@ -1623,7 +1623,7 @@ impl FilesSurface {
                     }
                     Err(error) => {
                         tracing::warn!(path = %task_path, error = %error, "workspace file save failed");
-                        document.fail_save(revision, error.to_string());
+                        document.fail_save(revision, error.display_message());
                     }
                 }
                 let save_again = document.can_autosave();
@@ -3423,7 +3423,7 @@ fn read_error_message(error: &super::client::FilesClientError) -> SharedString {
                 .text(TextKey::FilesFileNotFound)
                 .into()
         }
-        _ => error.to_string().into(),
+        _ => error.display_message().into(),
     }
 }
 
@@ -3590,7 +3590,7 @@ mod tests {
     }
 
     /// A missing file gets its own wording — the transport's RPC framing
-    /// never reaches the reader — while every other failure keeps its own.
+    /// never reaches the reader; other failures use their localized category.
     #[test]
     fn missing_files_and_outside_reads_show_their_own_wording() {
         assert_eq!(
@@ -3604,7 +3604,8 @@ mod tests {
                 "gone".into()
             ))
             .to_string(),
-            "workspace connection unavailable: gone"
+            crate::l10n::localizer()
+                .format_with(TextKey::FilesConnectionUnavailable, &[("reason", "gone")])
         );
         assert_eq!(
             read_only_message(Some(WorkspaceReadOnlyReason::OutsideWorkspace)),

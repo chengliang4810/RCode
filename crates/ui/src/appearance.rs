@@ -39,13 +39,22 @@ pub enum AppearanceMode {
 }
 
 impl AppearanceMode {
-    /// Menu/label text.
-    pub fn label(self) -> &'static str {
+    /// Stable control identity, independent of the display language.
+    pub fn id(self) -> &'static str {
         match self {
             Self::System => "System",
             Self::Light => "Light",
             Self::Dark => "Dark",
         }
+    }
+
+    pub fn label(self) -> String {
+        use rcode_presentation::TextKey;
+        crate::l10n::localizer().text(match self {
+            Self::System => TextKey::AuditSettingsAppearanceSystem,
+            Self::Light => TextKey::AuditSettingsAppearanceLight,
+            Self::Dark => TextKey::AuditSettingsAppearanceDark,
+        })
     }
 
     /// Shared glyph for appearance controls throughout the app.

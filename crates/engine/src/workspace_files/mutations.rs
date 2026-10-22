@@ -23,7 +23,7 @@ impl WorkspaceFiles {
             return Ok(rejected(
                 request.operation_id,
                 Reason::WorkspaceChanged,
-                "Workspace changed; refresh before deleting",
+                &WorkspaceRule::MutationChanged.encode(),
             ));
         }
         let cancel = Arc::new(AtomicBool::new(false));
@@ -49,7 +49,14 @@ impl WorkspaceFiles {
             result
         })
         .await
-        .map_err(|e| WorkspaceFilesError::Io(format!("delete worker failed: {e}")))?;
+        .map_err(|e| {
+            WorkspaceFilesError::Io(
+                WorkspaceFailure::WorkerFailed {
+                    reason: e.to_string(),
+                }
+                .encode(),
+            )
+        })?;
         cancel_on_drop.disarm();
         Ok(result)
     }
@@ -97,7 +104,7 @@ impl WorkspaceFiles {
             return Ok(rejected(
                 request.operation_id,
                 Reason::WorkspaceChanged,
-                "Workspace changed; refresh before moving",
+                &WorkspaceRule::MutationChanged.encode(),
             ));
         }
         let cancel = Arc::new(AtomicBool::new(false));
@@ -123,7 +130,14 @@ impl WorkspaceFiles {
             result
         })
         .await
-        .map_err(|e| WorkspaceFilesError::Io(format!("move worker failed: {e}")))?;
+        .map_err(|e| {
+            WorkspaceFilesError::Io(
+                WorkspaceFailure::WorkerFailed {
+                    reason: e.to_string(),
+                }
+                .encode(),
+            )
+        })?;
         cancel_on_drop.disarm();
         Ok(result)
     }
@@ -135,7 +149,10 @@ fn delete_blocking(
     cancel: &AtomicBool,
 ) -> MutationResult<()> {
     if request.operation_id.is_empty() || request.operation_id.len() > 128 {
-        return Err((Reason::InvalidPath, "Invalid operation identity".into()));
+        return Err((
+            Reason::InvalidPath,
+            WorkspaceRule::OperationIdentity.encode(),
+        ));
     }
     let (relative, metadata) = source(
         &workspace.root,
@@ -146,11 +163,11 @@ fn delete_blocking(
     if metadata.is_dir() && !request.recursive {
         return Err((
             Reason::InvalidDestination,
-            "Deleting a folder requires recursive confirmation".into(),
+            WorkspaceRule::DeleteRecursive.encode(),
         ));
     }
     if cancel.load(Ordering::Acquire) {
-        return Err((Reason::Busy, "Delete cancelled before execution".into()));
+        return Err((Reason::Busy, WorkspaceRule::MutationCancelled.encode()));
     }
     let target = workspace.root.join(relative.as_path());
     if metadata.is_dir() {
@@ -159,7 +176,10 @@ fn delete_blocking(
         std::fs::remove_dir_all(target).map_err(|e| {
             (
                 Reason::PartialFailure,
-                format!("Folder deletion did not complete; refresh to see remaining files: {e}"),
+                WorkspaceFailure::Native {
+                    reason: e.to_string(),
+                }
+                .encode(),
             )
         })
     } else {
@@ -196,7 +216,10 @@ fn io_error(error: std::io::Error) -> (Reason, String) {
             ErrorKind::Unsupported | ErrorKind::CrossesDevices => Reason::Unsupported,
             _ => Reason::InvalidDestination,
         },
-        error.to_string(),
+        WorkspaceFailure::Native {
+            reason: error.to_string(),
+        }
+        .encode(),
     )
 }
 
@@ -248,7 +271,7 @@ fn source(
     if relative.wire_path() != path {
         return Err((
             Reason::InvalidPath,
-            "Path must use canonical workspace-relative spelling".into(),
+            WorkspaceRule::CanonicalSpelling.encode(),
         ));
     }
     let parent = WorkspaceRelativePath(relative.as_path().parent().unwrap_or(Path::new("")).into());
@@ -257,7 +280,7 @@ fn source(
     if is_link(&metadata) || !(metadata.is_file() || metadata.is_dir()) {
         return Err((
             Reason::Unsupported,
-            "Links and special files cannot be mutated".into(),
+            WorkspaceRule::MutationUnsupported.encode(),
         ));
     }
     let actual_kind = if metadata.is_dir() {
@@ -268,7 +291,7 @@ fn source(
     if actual_kind != kind || expected.is_empty() || revision(&metadata) != expected {
         return Err((
             Reason::SourceChanged,
-            "Entry changed; refresh before trying again".into(),
+            WorkspaceRule::MutationSourceChanged.encode(),
         ));
     }
     Ok((relative, metadata))
@@ -280,7 +303,10 @@ fn move_blocking(
     cancel: &AtomicBool,
 ) -> MutationResult<WorkspaceEntry> {
     if request.operation_id.is_empty() || request.operation_id.len() > 128 {
-        return Err((Reason::InvalidPath, "Invalid operation identity".into()));
+        return Err((
+            Reason::InvalidPath,
+            WorkspaceRule::OperationIdentity.encode(),
+        ));
     }
     let (source, metadata) = source(
         &workspace.root,
@@ -291,14 +317,17 @@ fn move_blocking(
     let destination =
         WorkspaceRelativePath::file(&request.destination_path).map_err(domain_error)?;
     if destination.wire_path() != request.destination_path {
-        return Err((Reason::InvalidPath, "Invalid destination spelling".into()));
+        return Err((
+            Reason::InvalidPath,
+            WorkspaceRule::DestinationSpelling.encode(),
+        ));
     }
     if destination == source
         || (metadata.is_dir() && destination.as_path().starts_with(source.as_path()))
     {
         return Err((
             Reason::InvalidDestination,
-            "Cannot move an entry into itself".into(),
+            WorkspaceRule::MoveIntoSelf.encode(),
         ));
     }
     let parent = WorkspaceRelativePath(
@@ -310,7 +339,7 @@ fn move_blocking(
     );
     checked_directory(&workspace.root, &parent).map_err(domain_error)?;
     if cancel.load(Ordering::Acquire) {
-        return Err((Reason::Busy, "Move cancelled before execution".into()));
+        return Err((Reason::Busy, WorkspaceRule::MutationCancelled.encode()));
     }
     move_entry_no_replace(&workspace.root, source.as_path(), destination.as_path())?;
     let target = workspace.root.join(destination.as_path());
@@ -347,10 +376,12 @@ fn move_entry_no_replace(root: &Path, source: &Path, destination: &Path) -> Muta
                     if let Err(rollback) = move_no_replace(root, &temporary, source) {
                         return Err((
                             Reason::PartialFailure,
-                            format!(
-                                "Rename could not complete ({error}) or restore its original name ({rollback}); recover the entry at {}",
-                                temporary.display()
-                            ),
+                            WorkspaceFailure::RecoveryRequired {
+                                path: temporary.to_string_lossy().into_owned(),
+                                reason: error.to_string(),
+                                rollback: rollback.to_string(),
+                            }
+                            .encode(),
                         ));
                     }
                     return Err(io_error(error));

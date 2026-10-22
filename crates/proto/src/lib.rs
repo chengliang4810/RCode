@@ -18,8 +18,10 @@ pub mod native;
 pub mod preview;
 pub mod projectless;
 pub mod sidebar_pins;
+pub mod terminal_errors;
 pub mod view;
 pub mod workspace;
+pub mod workspace_errors;
 
 pub use agent::*;
 pub use entities::*;

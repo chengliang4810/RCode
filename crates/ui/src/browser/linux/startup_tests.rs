@@ -28,7 +28,7 @@ while not (root / 'release').exists():
         sys.exit(1)
     time.sleep(.005)
 if (root / 'fail').exists():
-    packet(b'E', 0, 'Synthetic storage initialization failure')
+    packet(b'E', 0, 'profile.unwritable')
     sys.exit(1)
 packet(b'R', 0, '')
 while True:
@@ -189,12 +189,13 @@ fn delayed_startup_error_is_delivered_to_the_page_and_can_be_retried(cx: &mut Te
             assert!(!b.page.loading);
             assert!(b.native.is_none());
             assert!(b.native_startup.is_none());
-            assert!(
-                b.page
-                    .error
-                    .as_deref()
-                    .unwrap()
-                    .contains("Synthetic storage initialization failure")
+            assert_eq!(
+                b.page.error.as_deref(),
+                Some(
+                    crate::l10n::localizer()
+                        .text(TextKey::BrowserProfileUnwritable)
+                        .as_str()
+                )
             );
         })
         .unwrap();

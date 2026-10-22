@@ -89,9 +89,17 @@ impl<T: Default> WorkspaceQuery<T> {
     /// serve (one that predates empty-query search) quietly shows nothing.
     fn progress(&self) -> Option<SharedString> {
         if self.indexing {
-            Some("Indexing…".into())
+            Some(
+                crate::l10n::localizer()
+                    .text(TextKey::AuditPaletteIndexing)
+                    .into(),
+            )
         } else if self.loading {
-            Some("Searching…".into())
+            Some(
+                crate::l10n::localizer()
+                    .text(TextKey::AuditPaletteSearching)
+                    .into(),
+            )
         } else {
             None
         }
@@ -101,9 +109,17 @@ impl<T: Default> WorkspaceQuery<T> {
     /// failure.
     fn status(&self) -> Option<SharedString> {
         if self.indexing {
-            Some("Indexing…".into())
+            Some(
+                crate::l10n::localizer()
+                    .text(TextKey::AuditPaletteIndexing)
+                    .into(),
+            )
         } else if self.loading {
-            Some("Searching…".into())
+            Some(
+                crate::l10n::localizer()
+                    .text(TextKey::AuditPaletteSearching)
+                    .into(),
+            )
         } else {
             self.error.clone()
         }
@@ -151,19 +167,25 @@ fn palette_workspace(shell: &Shell, cx: &App) -> Option<WorkspaceFilesClient> {
 /// `what` ("file" or "content") names the search in the message.
 fn search_error_message(error: &FilesClientError, what: &str) -> SharedString {
     match error {
-        FilesClientError::Unsupported(_) => {
-            let subject = if what == "content" {
-                "file contents"
+        FilesClientError::Unsupported(_) => crate::l10n::localizer()
+            .text(if what == "content" {
+                TextKey::AuditPaletteUpdateContent
             } else {
-                "files"
-            };
-            format!("The session's device runs an older rcode — update it to search its {subject}")
+                TextKey::AuditPaletteUpdateFiles
+            })
+            .into(),
+        FilesClientError::Application(failure) => {
+            rcode_presentation::workspace::workspace_failure(crate::l10n::localizer(), failure)
                 .into()
         }
-        FilesClientError::Transport(_) => "The session's device is unreachable".into(),
+        FilesClientError::Transport(_) | FilesClientError::Closed => crate::l10n::localizer()
+            .text(TextKey::AuditPaletteUnreachable)
+            .into(),
         FilesClientError::Encode(_)
         | FilesClientError::Decode(_)
-        | FilesClientError::Request(_) => "Search failed".into(),
+        | FilesClientError::Request(_) => crate::l10n::localizer()
+            .text(TextKey::AuditPaletteFailed)
+            .into(),
     }
 }
 
@@ -197,12 +219,12 @@ pub(super) enum Tab {
 impl Tab {
     pub(super) const ALL: [Tab; 4] = [Tab::All, Tab::Threads, Tab::Commands, Tab::Files];
 
-    fn label(self) -> &'static str {
+    fn label(self) -> String {
         match self {
-            Self::All => "All",
-            Self::Threads => "Threads",
-            Self::Commands => "Commands",
-            Self::Files => "Files",
+            Self::All => crate::l10n::localizer().text(TextKey::AuditPaletteAll),
+            Self::Threads => crate::l10n::localizer().text(TextKey::AuditPaletteThreads),
+            Self::Commands => crate::l10n::localizer().text(TextKey::AuditPaletteCommands),
+            Self::Files => crate::l10n::localizer().text(TextKey::AuditPaletteFiles),
         }
     }
 
@@ -234,15 +256,17 @@ enum Section {
 }
 
 impl Section {
-    fn title(self) -> &'static str {
+    fn title(self) -> String {
         match self {
-            Self::RecentFiles => "Recent Files",
-            Self::QuickActions => "Quick Actions",
-            Self::RecentThreads => "Recent Threads",
-            Self::Threads => "Threads",
-            Self::Commands => "Commands",
-            Self::Files => "Files",
-            Self::InFiles => "In Files",
+            Self::RecentFiles => crate::l10n::localizer().text(TextKey::AuditPaletteRecentFiles),
+            Self::QuickActions => crate::l10n::localizer().text(TextKey::AuditPaletteQuickActions),
+            Self::RecentThreads => {
+                crate::l10n::localizer().text(TextKey::AuditPaletteRecentThreads)
+            }
+            Self::Threads => crate::l10n::localizer().text(TextKey::AuditPaletteThreads),
+            Self::Commands => crate::l10n::localizer().text(TextKey::AuditPaletteCommands),
+            Self::Files => crate::l10n::localizer().text(TextKey::AuditPaletteFiles),
+            Self::InFiles => crate::l10n::localizer().text(TextKey::AuditPaletteInFiles),
         }
     }
 }
@@ -257,7 +281,7 @@ enum Command {
 }
 
 impl Command {
-    fn label(&self) -> &'static str {
+    fn stable_id(&self) -> &'static str {
         match self {
             Self::NewChat => "New chat",
             Self::NewProject => "New project",
@@ -266,6 +290,22 @@ impl Command {
             Self::Theme(AppearanceMode::Light) => "Switch to light theme",
             Self::Theme(AppearanceMode::Dark) => "Switch to dark theme",
             Self::ArchiveThread => "Archive thread",
+        }
+    }
+
+    fn label(&self) -> String {
+        self.label_with(crate::l10n::localizer())
+    }
+
+    fn label_with(&self, localizer: &rcode_presentation::Localizer) -> String {
+        match self {
+            Self::NewChat => localizer.text(TextKey::AuditCommandNewChat),
+            Self::NewProject => localizer.text(TextKey::AuditCommandNewProject),
+            Self::Settings => localizer.text(TextKey::AuditCommandSettings),
+            Self::Theme(AppearanceMode::System) => localizer.text(TextKey::AuditCommandThemeSystem),
+            Self::Theme(AppearanceMode::Light) => localizer.text(TextKey::AuditCommandThemeLight),
+            Self::Theme(AppearanceMode::Dark) => localizer.text(TextKey::AuditCommandThemeDark),
+            Self::ArchiveThread => localizer.text(TextKey::AuditCommandArchive),
         }
     }
 
@@ -310,7 +350,7 @@ impl PaletteRow {
 
     fn key(&self) -> RowKey {
         let id = match &self.kind {
-            RowKind::Command(command) => format!("command:{}", command.label()),
+            RowKind::Command(command) => format!("command:{}", command.stable_id()),
             RowKind::Chat(id) => format!("chat:{id}"),
             RowKind::File { path, .. } => format!("file:{path}"),
             RowKind::Content(found) => {
@@ -326,7 +366,7 @@ impl PaletteRow {
 struct PaletteSection {
     section: Section,
     rows: Vec<PaletteRow>,
-    /// Shown beside the title: "Searching…", or why the search failed.
+    /// Search progress or failure shown beside the section title.
     status: Option<SharedString>,
 }
 
@@ -371,7 +411,9 @@ fn commands_for(query: &str, is_dark: bool, can_archive: bool) -> Vec<Command> {
     ]
     .into_iter()
     .chain(can_archive.then_some(Command::ArchiveThread))
-    .filter(|command| matches_query(query, command.label()))
+    .filter(|command| {
+        matches_query(query, &command.label()) || matches_query(query, command.stable_id())
+    })
     .collect()
 }
 
@@ -458,7 +500,11 @@ impl Shell {
         }
         self.close_add_space(cx);
         let search = cx.new(|cx| {
-            ComposerInput::with_context("Search threads, commands and files…", "PaletteSearch", cx)
+            ComposerInput::with_context(
+                crate::l10n::localizer().text(TextKey::AuditPaletteSearch),
+                "PaletteSearch",
+                cx,
+            )
         });
         let events = cx.subscribe(&search, |this, _, event, cx| {
             if matches!(event, ComposerInputEvent::Edited) {
@@ -956,7 +1002,7 @@ impl Shell {
                     .id(("command-action", ix))
                     .rounded(px(popover::PALETTE_ITEM_RADIUS))
                     .role(gpui::Role::Button)
-                    .aria_label(label)
+                    .aria_label(label.clone())
                     .min_h(px(30.0))
                     .py(px(4.0))
                     .on_click(cx.listener(move |this, _, window, cx| {
@@ -1205,8 +1251,8 @@ impl Shell {
             .when(sections.is_empty(), |el| {
                 el.child(palette_empty(
                     &theme,
-                    "No results",
-                    "Try a command, chat title, project, or device.",
+                    crate::l10n::localizer().text(TextKey::AuditPaletteEmpty),
+                    crate::l10n::localizer().text(TextKey::AuditPaletteEmptyHint),
                 ))
             });
         let body = palette_results_fade(body, &scroll);
@@ -1314,11 +1360,7 @@ impl Shell {
 
 /// A section's title, in the sidebar's secondary text style, with its
 /// search status trailing.
-fn palette_section_header(
-    theme: &Theme,
-    title: &'static str,
-    status: Option<SharedString>,
-) -> gpui::Div {
+fn palette_section_header(theme: &Theme, title: String, status: Option<SharedString>) -> gpui::Div {
     div()
         .px(px(16.0))
         .pt(px(2.0))
@@ -1761,6 +1803,21 @@ mod tests {
     }
 
     #[test]
+    fn localized_commands_keep_their_stable_row_identity() {
+        use rcode_presentation::{LanguagePreference, Localizer};
+        let en = Localizer::new(LanguagePreference::EnUs);
+        let zh = Localizer::new(LanguagePreference::ZhCn);
+        let command = Command::Theme(AppearanceMode::Dark);
+        assert_eq!(command.label_with(&en), "Switch to dark theme");
+        assert_eq!(command.label_with(&zh), "切换到深色主题");
+        let key = PaletteRow::new(Section::Commands, RowKind::Command(command)).key();
+        assert_eq!(
+            key,
+            RowKey(Section::Commands, "command:Switch to dark theme".into())
+        );
+    }
+
+    #[test]
     fn archive_is_offered_only_with_a_focused_chat() {
         assert!(!commands_for("archive", true, false).contains(&Command::ArchiveThread));
         assert_eq!(
@@ -2064,7 +2121,10 @@ mod tests {
         cx.run_until_parked();
         let empty = palette_section(window, Section::Files, cx).unwrap();
         assert!(empty.rows.is_empty());
-        assert_eq!(empty.status.as_deref(), Some("Indexing…"));
+        assert_eq!(
+            empty.status.as_deref(),
+            Some(crate::l10n::localizer().text(TextKey::AuditPaletteIndexing)).as_deref()
+        );
         assert!(engine.take(methods::WARM_WORKSPACE_SEARCH, cx).is_empty());
 
         cx.executor().advance_clock(FILE_INDEX_RETRY);
@@ -2077,7 +2137,10 @@ mod tests {
         cx.run_until_parked();
         let partial = palette_section(window, Section::Files, cx).unwrap();
         assert_eq!(partial.rows.len(), 1);
-        assert_eq!(partial.status.as_deref(), Some("Indexing…"));
+        assert_eq!(
+            partial.status.as_deref(),
+            Some(crate::l10n::localizer().text(TextKey::AuditPaletteIndexing)).as_deref()
+        );
         let selected = partial.rows[0].key();
         window
             .update(cx, |shell, _, cx| {
@@ -2202,7 +2265,10 @@ mod tests {
             cx.run_until_parked();
             let files = palette_section(window, Section::Files, cx).unwrap();
             assert!(files.rows.is_empty());
-            assert_eq!(files.status.as_deref(), Some("Search failed"));
+            assert_eq!(
+                files.status.as_deref(),
+                Some(crate::l10n::localizer().text(TextKey::AuditPaletteFailed)).as_deref()
+            );
             cx.executor().advance_clock(Duration::from_secs(10));
             assert!(engine.take(methods::WARM_WORKSPACE_SEARCH, cx).is_empty());
             assert!(engine.take(methods::SEARCH_WORKSPACE_FILES, cx).is_empty());
@@ -2226,7 +2292,10 @@ mod tests {
         assert_eq!(requests[0]["params"]["query"], "co");
         let searching = palette_section(window, Section::Files, cx).unwrap();
         assert!(searching.rows.is_empty());
-        assert_eq!(searching.status.as_deref(), Some("Searching…"));
+        assert_eq!(
+            searching.status.as_deref(),
+            Some(crate::l10n::localizer().text(TextKey::AuditPaletteSearching)).as_deref()
+        );
 
         engine.reply(
             &requests[0],
@@ -2398,7 +2467,7 @@ mod tests {
                 .unwrap()
                 .status
                 .as_deref(),
-            Some("Indexing…")
+            Some(crate::l10n::localizer().text(TextKey::AuditPaletteIndexing)).as_deref()
         );
 
         type_query(window, "needles", cx);
@@ -2432,7 +2501,10 @@ mod tests {
         cx.run_until_parked();
         let partial = palette_section(window, Section::InFiles, cx).unwrap();
         assert_eq!(partial.rows.len(), 1);
-        assert_eq!(partial.status.as_deref(), Some("Indexing…"));
+        assert_eq!(
+            partial.status.as_deref(),
+            Some(crate::l10n::localizer().text(TextKey::AuditPaletteIndexing)).as_deref()
+        );
         let selected = partial.rows[0].key();
         window
             .update(cx, |shell, _, cx| {
@@ -2565,7 +2637,10 @@ mod tests {
         engine.fail(&retry[0], "search failed");
         cx.run_until_parked();
         let section = palette_section(window, Section::InFiles, cx).unwrap();
-        assert_eq!(section.status.as_deref(), Some("Search failed"));
+        assert_eq!(
+            section.status.as_deref(),
+            Some(crate::l10n::localizer().text(TextKey::AuditPaletteFailed)).as_deref()
+        );
         cx.executor().advance_clock(Duration::from_secs(10));
         assert!(
             engine
@@ -2586,7 +2661,7 @@ mod tests {
         assert!(
             in_files
                 .status
-                .is_some_and(|status| status.contains("update it to search its file contents"))
+                .is_some_and(|status| status == crate::l10n::localizer().text(TextKey::AuditPaletteUpdateContent))
         );
     }
 

@@ -275,3 +275,13 @@ conversation-goal-duration-hours = { $count }时
 conversation-goal-duration-days = { $count }天
 
 conversation-load-earlier = 加载更早消息
+
+# 移动端会话控件。模型与用户正文保持原文。
+mobile-question-answered = 已回答问题
+mobile-question-awaiting = 等待你的回答…
+mobile-forked-from = 分支自 { $title }
+mobile-show-less = 收起
+mobile-show-more = 展开更多
+mobile-new-file = 新文件
+mobile-diff-truncated = 差异已截断，仅显示 { $total } 行中的前 { $limit } 行
+mobile-more-lines = … 还有 { $count } 行

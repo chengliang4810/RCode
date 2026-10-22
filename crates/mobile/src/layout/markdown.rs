@@ -404,7 +404,8 @@ pub(crate) fn prepare_runs(
         let (content, link) = match &s.image {
             Some(img) => (
                 if img.alt.is_empty() {
-                    "image".to_owned()
+                    crate::l10n::localizer()
+                        .text(rcode_presentation::TextKey::ConversationAttachedImage)
                 } else {
                     img.alt.clone()
                 },

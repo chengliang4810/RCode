@@ -589,7 +589,7 @@ mod pinned_session_tests {
                         .sidebar_notice
                         .as_deref()
                         .unwrap()
-                        .contains("Couldn't save sidebar changes")
+                        .contains(&crate::l10n::localizer().format_with(rcode_presentation::TextKey::AuditPinsFailed, &[("error", "rejected")]))
                 );
             })
             .unwrap();

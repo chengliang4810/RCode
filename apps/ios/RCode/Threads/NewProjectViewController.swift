@@ -19,7 +19,7 @@ final class NewProjectViewController: UIViewController, UICollectionViewDelegate
     init(app: AppModel) {
         self.app = app
         super.init(nibName: nil, bundle: nil)
-        title = "New Project"
+        title = L10n.text("New Project")
     }
 
     required init?(coder: NSCoder) { fatalError() }
@@ -38,7 +38,7 @@ final class NewProjectViewController: UIViewController, UICollectionViewDelegate
         let reg = UICollectionView.CellRegistration<UICollectionViewListCell, String> { [weak self] cell, _, name in
             guard let entry = self?.listing?.entries.first(where: { $0.name == name }) else {
                 var c = UIListContentConfiguration.cell()
-                c.text = name == ".." ? "Parent Folder" : name
+                c.text = name == ".." ? L10n.text("Parent Folder") : name
                 c.image = UIImage(systemName: "arrow.turn.left.up")
                 cell.contentConfiguration = c
                 return
@@ -85,8 +85,8 @@ final class NewProjectViewController: UIViewController, UICollectionViewDelegate
         // Host picker lives in the navigation bar.
         let hosts = app.hostOptions
         device = hosts.first(where: \.online) ?? hosts.first
-        navigationItem.rightBarButtonItem = UIBarButtonItem(title: device?.name ?? "No hosts", menu: UIMenu(title: "Device", children: hosts.map { h in
-            UIAction(title: h.name, subtitle: h.online ? "Online" : "Offline", image: UIImage(systemName: "desktopcomputer")) { [weak self] _ in
+        navigationItem.rightBarButtonItem = UIBarButtonItem(title: device?.name ?? L10n.text("No hosts"), menu: UIMenu(title: L10n.text("Device"), children: hosts.map { h in
+            UIAction(title: h.name, subtitle: h.online ? L10n.text("Online") : L10n.text("Offline"), image: UIImage(systemName: "desktopcomputer")) { [weak self] _ in
                 self?.device = h
                 self?.navigationItem.rightBarButtonItem?.title = h.name
                 self?.load(nil)
@@ -101,12 +101,12 @@ final class NewProjectViewController: UIViewController, UICollectionViewDelegate
 
     private func load(_ path: String?) {
         guard let device else {
-            status.text = "No desktop devices yet — open RCode on a computer to add one."
+            status.text = L10n.text("No desktop devices yet — open RCode on a computer to add one.")
             useButton.isEnabled = false
             return
         }
         loading = true
-        status.text = "Loading…"
+        status.text = L10n.text("Loading…")
         // Until this device answers, nothing from the last one can be used.
         useButton.isEnabled = false
         loadGeneration += 1
@@ -117,7 +117,7 @@ final class NewProjectViewController: UIViewController, UICollectionViewDelegate
             guard generation == loadGeneration else { return }
             loading = false
             guard let listing else {
-                status.text = device.online ? "Couldn't read that folder." : "\(device.name) is offline."
+                status.text = device.online ? L10n.text("Couldn't read that folder.") : L10n.format("host.offline", device.name)
                 // Keep browsing the last good folder only on the same device.
                 useButton.isEnabled = self.listing != nil && self.listingDevice == device.id
                 return
@@ -134,11 +134,11 @@ final class NewProjectViewController: UIViewController, UICollectionViewDelegate
             await dataSource.apply(s, animatingDifferences: false)
             let name = (listing.path as NSString).lastPathComponent
             var c = useButton.configuration
-            c?.title = "Use “\(name.isEmpty ? listing.path : name)”"
+            c?.title = L10n.format("folder.use", name.isEmpty ? listing.path : name)
             useButton.configuration = c
             useButton.isEnabled = true
             status.text = listing.path
-            title = name.isEmpty ? "New Project" : name
+            title = name.isEmpty ? L10n.text("New Project") : name
         }
     }
 
@@ -169,7 +169,7 @@ final class NewProjectViewController: UIViewController, UICollectionViewDelegate
             let ok = created != nil
             if let created { onCreated?(created) }
             useButton.configuration?.showsActivityIndicator = false
-            if ok { dismiss(animated: true) } else { status.text = "Couldn't create the project on \(device.name)." }
+            if ok { dismiss(animated: true) } else { status.text = L10n.format("project.create-failed", device.name) }
         }
     }
 }

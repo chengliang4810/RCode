@@ -1,6 +1,7 @@
 use std::{collections::HashSet, time::Duration};
 
 use gpui::Context;
+use rcode_presentation::TextKey;
 use rcode_proto::{WorkspaceFileChangeKind, WorkspaceFileChanges};
 
 use super::{FilesEvent, FilesSurface, client::WorkspaceFilesClient, model::parent_path};
@@ -32,7 +33,11 @@ impl FilesSurface {
                                     Ok(frame) => surface.apply_workspace_changes(frame, cx),
                                     Err(error) => {
                                         surface.watch_error = Some(
-                                            format!("File updates could not be decoded: {error}")
+                                            crate::l10n::localizer()
+                                                .format_with(
+                                                    TextKey::FilesWatchDecodeFailed,
+                                                    &[("reason", &error.to_string())],
+                                                )
                                                 .into(),
                                         );
                                         cx.notify();
@@ -45,8 +50,11 @@ impl FilesSurface {
                         }
                         if this
                             .update(cx, |surface, cx| {
-                                surface.watch_error =
-                                    Some("File updates interrupted — retrying".into());
+                                surface.watch_error = Some(
+                                    crate::l10n::localizer()
+                                        .text(TextKey::FilesWatchInterrupted)
+                                        .into(),
+                                );
                                 cx.notify();
                             })
                             .is_err()
@@ -57,7 +65,7 @@ impl FilesSurface {
                     Err(error) => {
                         if this
                             .update(cx, |surface, cx| {
-                                surface.watch_error = Some(error.to_string().into());
+                                surface.watch_error = Some(error.display_message().into());
                                 cx.notify();
                             })
                             .is_err()

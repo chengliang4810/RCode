@@ -1,5 +1,6 @@
 //! WebKitGTK renders offscreen in an isolated helper process. GPUI composites
 //! its frames, so browser content uses the same clipping and blur as other UI.
+use super::BrowserError;
 use super::model::{PageState, Presentation};
 use gpui::{Bounds, Pixels, RenderImage};
 use rcode_presentation::TextKey;
@@ -72,16 +73,16 @@ struct Route {
     evaluation: Mutex<Option<Value>>,
 }
 
-fn helper_path() -> Result<std::path::PathBuf, String> {
+fn helper_path() -> Result<std::path::PathBuf, BrowserError> {
     let root = std::env::var_os("XDG_CACHE_HOME")
         .map(std::path::PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|p| std::path::PathBuf::from(p).join(".cache")))
-        .ok_or("Could not locate the browser cache directory")?
+        .ok_or(BrowserError::Message(TextKey::BrowserCacheUnavailable))?
         .join("rcode/browser");
     extract_helper(&root)
 }
 
-fn extract_helper(root: &std::path::Path) -> Result<std::path::PathBuf, String> {
+fn extract_helper(root: &std::path::Path) -> Result<std::path::PathBuf, BrowserError> {
     use sha2::{Digest, Sha256};
     const HELPER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/rcode-webkit"));
     let hash = format!("{:x}", Sha256::digest(HELPER));
@@ -115,16 +116,14 @@ fn extract_helper(root: &std::path::Path) -> Result<std::path::PathBuf, String> 
     Ok(path)
 }
 
-fn read_startup(stdout: &mut impl Read) -> Result<(), String> {
+fn read_startup(stdout: &mut impl Read) -> Result<(), BrowserError> {
     let mut header = [0u8; 9];
     stdout.read_exact(&mut header).map_err(|error| {
-        format!(
-            "Browser helper could not start: {error}. Check the WebKitGTK 4.1 runtime and display."
-        )
+        BrowserError::WithReason(TextKey::BrowserStartupFailed, error.to_string())
     })?;
     let length = u32::from_le_bytes(header[5..9].try_into().unwrap()) as usize;
     if length > 16384 || header[1..5] != [0; 4] {
-        return Err("Invalid browser startup response".into());
+        return Err(BrowserError::Message(TextKey::BrowserStartupInvalid));
     }
     let mut message = vec![0; length];
     stdout
@@ -132,8 +131,13 @@ fn read_startup(stdout: &mut impl Read) -> Result<(), String> {
         .map_err(|error| error.to_string())?;
     match header[0] {
         b'R' if message.is_empty() => Ok(()),
-        b'E' => Err(String::from_utf8_lossy(&message).into_owned()),
-        _ => Err("Invalid browser startup response".into()),
+        b'E' => Err(match message.as_slice() {
+            b"profile.invalid" => BrowserError::Message(TextKey::BrowserProfileInvalid),
+            b"profile.unwritable" => BrowserError::Message(TextKey::BrowserProfileUnwritable),
+            b"profile.locked" => BrowserError::Message(TextKey::BrowserProfileLocked),
+            _ => BrowserError::Native(String::from_utf8_lossy(&message).into_owned()),
+        }),
+        _ => Err(BrowserError::Message(TextKey::BrowserStartupInvalid)),
     }
 }
 
@@ -162,7 +166,7 @@ impl BrowserData {
         }
     }
     /// Blocking initialization, called only by the dedicated startup thread.
-    fn worker(&self) -> Result<Arc<Worker>, String> {
+    fn worker(&self) -> Result<Arc<Worker>, BrowserError> {
         let mut current = self.current.lock().unwrap();
         if let Some(worker) = current.as_ref() {
             if worker
@@ -193,10 +197,7 @@ impl BrowserData {
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
             .spawn()
-            .map_err(|e| {
-                crate::l10n::localizer()
-                    .format_with(TextKey::BrowserErrorWebkit, &[("reason", &e.to_string())])
-            })?;
+            .map_err(|e| BrowserError::WithReason(TextKey::BrowserErrorWebkit, e.to_string()))?;
         let stdin = child.stdin.take().unwrap();
         let stdout = child.stdout.take().unwrap();
         // Report startup/storage failures on the page instead of silently opening
@@ -214,7 +215,9 @@ impl BrowserData {
                 let _ = child.wait();
                 return Err(match result {
                     Ok(Err(error)) => error,
-                    Err(error) => format!("Browser startup did not complete: {error}"),
+                    Err(error) => {
+                        BrowserError::WithReason(TextKey::BrowserStartupFailed, error.to_string())
+                    }
                     _ => unreachable!(),
                 });
             }
@@ -350,14 +353,16 @@ impl BrowserData {
     }
 }
 impl Worker {
-    fn send(&self, id: u32, mut command: Value) -> Result<(), String> {
+    fn send(&self, id: u32, mut command: Value) -> Result<(), BrowserError> {
         command["id"] = id.into();
         let data = serde_json::to_vec(&command).map_err(|e| e.to_string())?;
         let mut stdin = self.stdin.lock().unwrap();
-        let pipe = stdin.as_mut().ok_or("Browser helper is shutting down")?;
+        let pipe = stdin
+            .as_mut()
+            .ok_or(BrowserError::Message(TextKey::BrowserErrorStopped))?;
         pipe.write_all(&(data.len() as u32).to_le_bytes())
             .and_then(|_| pipe.write_all(&data))
-            .map_err(|e| e.to_string())
+            .map_err(|e| BrowserError::Native(e.to_string()))
     }
 }
 
@@ -382,7 +387,7 @@ impl NativePage {
     pub fn start(
         data: BrowserData,
         tx: Sender<NativeEvent>,
-    ) -> Result<tokio::sync::oneshot::Receiver<Result<Self, String>>, String> {
+    ) -> Result<tokio::sync::oneshot::Receiver<Result<Self, BrowserError>>, BrowserError> {
         let (ready, result) = tokio::sync::oneshot::channel();
         std::thread::Builder::new()
             .name("browser-startup".into())
@@ -392,11 +397,13 @@ impl NativePage {
                 // this thread. The UI never waits for an abandoned startup.
                 let _ = ready.send(page);
             })
-            .map_err(|error| format!("Could not start browser initialization: {error}"))?;
+            .map_err(|error| {
+                BrowserError::WithReason(TextKey::BrowserStartupFailed, error.to_string())
+            })?;
         Ok(result)
     }
 
-    fn new(data: &BrowserData, tx: Sender<NativeEvent>) -> Result<Self, String> {
+    fn new(data: &BrowserData, tx: Sender<NativeEvent>) -> Result<Self, BrowserError> {
         let worker = data.worker()?;
         let id = worker.next_id.fetch_add(1, Ordering::Relaxed);
         let route = Arc::new(Route {
@@ -429,7 +436,7 @@ impl NativePage {
             pressed: std::cell::Cell::new(None),
         })
     }
-    pub fn load(&self, url: &str) -> Result<(), String> {
+    pub fn load(&self, url: &str) -> Result<(), BrowserError> {
         self.worker.send(self.id, json!({"cmd":"load","url":url}))
     }
     pub fn reload(&self) {
@@ -504,7 +511,7 @@ impl super::BrowserSurface {
         &mut self,
         window: &mut gpui::Window,
         cx: &mut gpui::Context<Self>,
-    ) -> Result<(), String> {
+    ) -> Result<(), BrowserError> {
         if self.native_startup.is_some() {
             // navigate() has already updated page.url. Use that latest address
             // when startup completes instead of starting a second helper.
@@ -514,7 +521,7 @@ impl super::BrowserSurface {
         self.native_startup = Some(cx.spawn_in(window, async move |this, cx| {
             let result = ready
                 .await
-                .unwrap_or_else(|_| Err("Browser initialization stopped unexpectedly".into()));
+                .unwrap_or_else(|_| Err(BrowserError::Message(TextKey::BrowserStartupStopped)));
             let _ = this.update_in(cx, |this, _, cx| {
                 this.native_startup = None;
                 let result = result.and_then(|mut native| {
@@ -529,7 +536,7 @@ impl super::BrowserSurface {
                 });
                 this.page.loading = result.is_ok();
                 if let Err(error) = result {
-                    this.page.error = Some(format!("Could not open this page: {error}"));
+                    this.page.error = Some(error.display_message());
                 }
                 cx.emit(super::BrowserEvent::Changed);
                 cx.notify();
@@ -947,9 +954,12 @@ mod storage_tests {
     fn startup_surfaces_storage_errors_and_rejects_invalid_packets() {
         assert!(read_startup(&mut &b"R\0\0\0\0\0\0\0\0"[..]).is_ok());
         let mut packet = b"E\0\0\0\0".to_vec();
-        packet.extend_from_slice(&6u32.to_le_bytes());
-        packet.extend_from_slice(b"locked");
-        assert_eq!(read_startup(&mut packet.as_slice()), Err("locked".into()));
+        packet.extend_from_slice(&14u32.to_le_bytes());
+        packet.extend_from_slice(b"profile.locked");
+        assert_eq!(
+            read_startup(&mut packet.as_slice()),
+            Err(BrowserError::Message(TextKey::BrowserProfileLocked))
+        );
         assert!(read_startup(&mut &b"R\0"[..]).is_err());
         assert!(read_startup(&mut &b"R\0\0\0\0\xff\xff\xff\xff"[..]).is_err());
     }

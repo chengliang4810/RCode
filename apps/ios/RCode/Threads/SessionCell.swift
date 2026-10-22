@@ -93,12 +93,12 @@ final class SessionCell: UICollectionViewListCell {
     /// Desktop precedence: a failed send beats everything; then the live
     /// state; unseen-and-finished reads "Done"; otherwise the time.
     static func corner(_ vm: SessionRowVM) -> (word: String, color: UIColor, glyph: StatusGlyph.Kind)? {
-        if vm.sendFailed { return ("Failed", Palette.danger, .dot(Palette.danger)) }
+        if vm.sendFailed { return (L10n.text("Failed"), Palette.danger, .dot(Palette.danger)) }
         switch vm.status {
-        case .working: return ("Working", StatusTone.working, .spinner)
-        case .awaiting: return ("Input", StatusTone.input, .dot(StatusTone.input))
-        case .errored: return ("Failed", StatusTone.failed, .dot(StatusTone.failed))
-        case .completed: return vm.unseen ? ("Done", StatusTone.done, .check(StatusTone.done)) : nil
+        case .working: return (L10n.text("Working"), StatusTone.working, .spinner)
+        case .awaiting: return (L10n.text("Input"), StatusTone.input, .dot(StatusTone.input))
+        case .errored: return (L10n.text("Failed"), StatusTone.failed, .dot(StatusTone.failed))
+        case .completed: return vm.unseen ? (L10n.text("Done"), StatusTone.done, .check(StatusTone.done)) : nil
         case .idle: return nil
         }
     }
@@ -114,7 +114,7 @@ final class SessionCell: UICollectionViewListCell {
         // the title's leading edge (a separately framed tile drifted high).
         let metaFont = Fonts.ui(.sans, TypeScale.size(13.5))
         let tileSide = (14 * TypeScale.factor).rounded()
-        let tile = NSTextAttachment(image: ProjectTile.image(name: vm.hasProject ? vm.projectName : "Home", colorIndex: vm.colorIndex, side: tileSide))
+        let tile = NSTextAttachment(image: ProjectTile.image(name: vm.hasProject ? vm.projectName : L10n.text("Home"), colorIndex: vm.colorIndex, side: tileSide))
         tile.bounds = CGRect(x: 0, y: (metaFont.xHeight - tileSide) / 2, width: tileSide, height: tileSide)
         let metaText = NSMutableAttributedString(attachment: tile)
         metaText.append(NSAttributedString(string: "  " + vm.projectName, attributes: [.font: metaFont, .foregroundColor: Palette.secondary]))
@@ -288,7 +288,7 @@ final class SectionHeaderCell: UICollectionViewListCell {
         shownCollapsed = s.collapsed
         accessibilityIdentifier = "section-\(s.id)"
         accessibilityLabel = "\(s.title), \(s.count)"
-        accessibilityValue = s.collapsed ? "Collapsed" : "Expanded"
+        accessibilityValue = s.collapsed ? L10n.text("Collapsed") : L10n.text("Expanded")
         setNeedsLayout()
     }
 

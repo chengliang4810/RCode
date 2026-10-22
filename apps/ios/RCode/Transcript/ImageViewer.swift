@@ -33,9 +33,9 @@ final class ImageViewer: UIViewController, UIScrollViewDelegate {
         scroll.addSubview(imageView)
 
         let close = Glass.circleButton(symbol: "xmark", size: 44, pointSize: 15, action: UIAction { [weak self] _ in self?.dismiss(animated: true) })
-        close.accessibilityLabel = "Close image preview"
+        close.accessibilityLabel = L10n.text("Close image preview")
         let share = Glass.circleButton(symbol: "square.and.arrow.up", size: 44, pointSize: 15, action: UIAction { [weak self] _ in self?.share() })
-        share.accessibilityLabel = "Share image"
+        share.accessibilityLabel = L10n.text("Share image")
         for b in [close, share] { view.addSubview(b) }
         NSLayoutConstraint.activate([
             close.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor, constant: 16),

@@ -32,13 +32,13 @@ final class PairingViewController: UIViewController {
         title.font = Fonts.ui(.sansSemibold, 34)
         title.textColor = Palette.text
         let tagline = UILabel()
-        tagline.text = "Your coding agents, from anywhere."
+        tagline.text = L10n.text("Your coding agents, from anywhere.")
         tagline.font = Fonts.ui(.sans, 17)
         tagline.textColor = Palette.secondary
 
         // The host is an address the user's own tunnel exposes; the token is
         // the one the desktop app shows for pairing.
-        hostField.placeholder = "Host, e.g. https://laptop.tailnet.ts.net:27655"
+        hostField.placeholder = L10n.text("Host, e.g. https://laptop.tailnet.ts.net:27655")
         hostField.accessibilityIdentifier = "pair-host"
         hostField.borderStyle = .roundedRect
         hostField.autocapitalizationType = .none
@@ -47,14 +47,14 @@ final class PairingViewController: UIViewController {
         hostField.textContentType = .URL
         hostField.text = Self.lastHost
 
-        tokenField.placeholder = "Pairing token"
+        tokenField.placeholder = L10n.text("Pairing token")
         tokenField.accessibilityIdentifier = "pair-token"
         tokenField.borderStyle = .roundedRect
         tokenField.autocapitalizationType = .none
         tokenField.autocorrectionType = .no
 
         var primary = UIButton.Configuration.filled()
-        primary.title = "Pair"
+        primary.title = L10n.text("Pair")
         primary.baseBackgroundColor = Palette.text
         primary.baseForegroundColor = Palette.background
         primary.cornerStyle = .capsule
@@ -106,12 +106,12 @@ final class PairingViewController: UIViewController {
         // and its two halves also name the store this device caches into.
         let token = (tokenField.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         guard let url = URL(string: host), url.scheme == "http" || url.scheme == "https", url.host != nil else {
-            status.text = "That host is not a URL."
+            status.text = L10n.text("That host is not a URL.")
             return
         }
         let parts = token.split(separator: "@", maxSplits: 1, omittingEmptySubsequences: false)
         guard parts.count == 2, !parts[0].isEmpty, !parts[1].isEmpty else {
-            status.text = "The token looks like `user@org`."
+            status.text = L10n.text("The token looks like `user@org`.")
             return
         }
         status.text = nil
@@ -120,7 +120,7 @@ final class PairingViewController: UIViewController {
             let started = app.pair(host: host, userId: String(parts[0]), orgId: String(parts[1]))
             pair.configuration?.showsActivityIndicator = false
             if !started {
-                status.text = "Could not reach that host with that token."
+                status.text = L10n.text("Could not reach that host with that token.")
             }
         }
     }

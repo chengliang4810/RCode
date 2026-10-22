@@ -8,6 +8,8 @@
 //! chunk opacity veil over the text runs (see [`super::veil`]) — opacity only,
 //! zero translate, applied after layout-relevant properties are fixed.
 
+use rcode_presentation::TextKey;
+
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::ops::Range;
@@ -2706,9 +2708,9 @@ fn render_code_block_source_with_actions(
                 cx.new(move |_| {
                     CodeBlockTooltip(
                         if fit_content {
-                            "Use horizontal scrolling"
+                            crate::l10n::localizer().text(TextKey::AuditCodeScroll)
                         } else {
-                            "Fit content"
+                            crate::l10n::localizer().text(TextKey::AuditCodeFit)
                         }
                         .into(),
                     )

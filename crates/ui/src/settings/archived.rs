@@ -124,7 +124,11 @@ impl ArchivedPage {
             return;
         }
         let Some(engine) = self.state.read(cx).engine().cloned() else {
-            self.error = Some("Engine not connected".into());
+            self.error = Some(
+                crate::l10n::localizer()
+                    .text(TextKey::ShellEngineOffline)
+                    .into(),
+            );
             cx.notify();
             return;
         };
@@ -525,10 +529,10 @@ impl Render for ArchivedPage {
                         .size(px(16.0))
                         .text_color(gpui::white()),
                 )
-                .child(SharedString::from(if deleting {
-                    "Deleting…"
+                .child(crate::l10n::localizer().text(if deleting {
+                    TextKey::AuditSettingsDeleting
                 } else {
-                    "Delete all"
+                    TextKey::ShellArchivedDeleteAll
                 }))
         });
         let scrollbar = popover::rail(self, "archived-page-scrollbar", &theme, cx);

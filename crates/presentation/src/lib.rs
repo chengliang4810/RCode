@@ -37,8 +37,10 @@ use fluent_bundle::concurrent::FluentBundle;
 use fluent_bundle::{FluentArgs, FluentResource};
 use unic_langid::LanguageIdentifier;
 
+pub mod assessment;
 pub mod time;
 pub mod tools;
+pub mod workspace;
 
 /// What the user chose, before it meets the system's own preference.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]

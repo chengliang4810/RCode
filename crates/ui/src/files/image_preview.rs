@@ -117,7 +117,7 @@ impl ImagePreview {
                                     path: path.clone(),
                                 })
                                 .await
-                                .map_err(|e| e.to_string())?
+                                .map_err(|e| e.display_message())?
                                 .checkout_id
                         }
                     }
@@ -128,7 +128,7 @@ impl ImagePreview {
                 let (mime, bytes) = client
                     .read_image(path, checkout)
                     .await
-                    .map_err(|e| e.to_string())?;
+                    .map_err(|e| e.display_message())?;
                 executor
                     .spawn(async move { decode_image(&mime, bytes) })
                     .await

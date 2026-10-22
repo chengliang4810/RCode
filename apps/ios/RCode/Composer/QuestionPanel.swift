@@ -31,7 +31,7 @@ final class QuestionPanel: UIView, UITextFieldDelegate, UITextViewDelegate {
         question.numberOfLines = 0
         options.axis = .vertical
         options.spacing = 6
-        other.placeholder = "Other…"
+        other.placeholder = L10n.text("Other…")
         other.font = Fonts.ui(.sans, 16)
         other.borderStyle = .none
         other.backgroundColor = Palette.chip.withAlphaComponent(0.6)
@@ -54,12 +54,12 @@ final class QuestionPanel: UIView, UITextFieldDelegate, UITextViewDelegate {
         editor.accessibilityIdentifier = "question-editor"
 
         var backConfig = UIButton.Configuration.plain()
-        backConfig.title = "Back"
+        backConfig.title = L10n.text("Back")
         backConfig.baseForegroundColor = Palette.secondary
         back.configuration = backConfig
         back.addAction(UIAction { [weak self] _ in self?.go(-1) }, for: .touchUpInside)
         var nextConfig = UIButton.Configuration.prominentGlass()
-        nextConfig.title = "Next"
+        nextConfig.title = L10n.text("Next")
         nextConfig.baseBackgroundColor = Palette.text
         nextConfig.baseForegroundColor = Palette.background
         nextConfig.cornerStyle = .capsule
@@ -110,7 +110,7 @@ final class QuestionPanel: UIView, UITextFieldDelegate, UITextViewDelegate {
 
     private func render() {
         guard let q = current else { return }
-        header.text = items.count > 1 ? "\(q.header.isEmpty ? "Question" : q.header) · \(page + 1) of \(items.count)" : (q.header.isEmpty ? "Question" : q.header)
+        header.text = items.count > 1 ? L10n.format("question.page", q.header.isEmpty ? L10n.text("Question") : q.header, page + 1, items.count) : (q.header.isEmpty ? L10n.text("Question") : q.header)
         question.text = q.text
         options.arrangedSubviews.forEach { $0.removeFromSuperview() }
         let chosen = picks[q.id] ?? []
@@ -141,7 +141,7 @@ final class QuestionPanel: UIView, UITextFieldDelegate, UITextViewDelegate {
         editor.text = custom[q.id]
         back.isHidden = page == 0
         var n = nextButton.configuration
-        n?.title = page == items.count - 1 ? "Submit" : "Next"
+        n?.title = page == items.count - 1 ? L10n.text("Submit") : L10n.text("Next")
         nextButton.configuration = n
         nextButton.isEnabled = answered(q)
         onHeightChange?()
@@ -256,7 +256,7 @@ final class QueuePanel: UIView {
         }
         if items.count > 3 {
             let more = UILabel()
-            more.text = "+\(items.count - 3) more queued"
+            more.text = L10n.count("queue.more", items.count - 3)
             more.font = Fonts.ui(.sansMedium, 12.5)
             more.textColor = Palette.tertiary
             more.textAlignment = .center
@@ -283,18 +283,18 @@ final class QueuePanel: UIView {
         sendConfig.image = UIImage(systemName: "arrow.up.circle.fill", withConfiguration: UIImage.SymbolConfiguration(pointSize: 20, weight: .regular))
         sendConfig.baseForegroundColor = Palette.text
         let send = UIButton(configuration: sendConfig, primaryAction: UIAction { [weak self] _ in self?.onAction?(item.id, .sendNow) })
-        send.accessibilityLabel = "Send"
+        send.accessibilityLabel = L10n.text("Send")
         var moreConfig = UIButton.Configuration.plain()
         moreConfig.image = UIImage(systemName: "ellipsis", withConfiguration: UIImage.SymbolConfiguration(pointSize: 14, weight: .semibold))
         moreConfig.baseForegroundColor = Palette.secondary
         let more = UIButton(configuration: moreConfig)
-        more.accessibilityLabel = "More queue actions"
+        more.accessibilityLabel = L10n.text("More queue actions")
         more.showsMenuAsPrimaryAction = true
         more.menu = UIMenu(children: [
-            UIAction(title: "Edit", image: UIImage(systemName: "pencil")) { [weak self] _ in self?.onAction?(item.id, .edit) },
-            UIAction(title: "Move Up", image: UIImage(systemName: "arrow.up"), attributes: index == 0 ? .disabled : []) { [weak self] _ in self?.onAction?(item.id, .moveUp) },
-            UIAction(title: "Move Down", image: UIImage(systemName: "arrow.down"), attributes: index == count - 1 ? .disabled : []) { [weak self] _ in self?.onAction?(item.id, .moveDown) },
-            UIAction(title: "Remove", image: UIImage(systemName: "trash"), attributes: .destructive) { [weak self] _ in self?.onAction?(item.id, .remove) },
+            UIAction(title: L10n.text("Edit"), image: UIImage(systemName: "pencil")) { [weak self] _ in self?.onAction?(item.id, .edit) },
+            UIAction(title: L10n.text("Move Up"), image: UIImage(systemName: "arrow.up"), attributes: index == 0 ? .disabled : []) { [weak self] _ in self?.onAction?(item.id, .moveUp) },
+            UIAction(title: L10n.text("Move Down"), image: UIImage(systemName: "arrow.down"), attributes: index == count - 1 ? .disabled : []) { [weak self] _ in self?.onAction?(item.id, .moveDown) },
+            UIAction(title: L10n.text("Remove"), image: UIImage(systemName: "trash"), attributes: .destructive) { [weak self] _ in self?.onAction?(item.id, .remove) },
         ])
         for s in [icon, thumb, label, send, more] {
             s.translatesAutoresizingMaskIntoConstraints = false

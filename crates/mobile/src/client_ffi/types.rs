@@ -43,23 +43,73 @@ pub enum CoreError {
 impl From<zc::ClientError> for CoreError {
     fn from(err: zc::ClientError) -> Self {
         use zc::ClientError as E;
+        let present =
+            |message: String| crate::l10n::host_failure(crate::l10n::localizer(), &message);
         match err {
-            E::NotFound(message) => CoreError::NotFound { message },
-            E::InvalidArgument(message) => CoreError::InvalidArgument { message },
-            E::HostUnavailable(message) => CoreError::HostUnavailable { message },
-            E::Unsupported(message) => CoreError::Unsupported { message },
-            E::Network(message) => CoreError::Network { message },
-            E::HostError(message) => CoreError::HostError { message },
-            E::Auth(message) => CoreError::Auth { message },
-            E::Storage(message) => CoreError::Storage { message },
-            E::NotImplemented(message) => CoreError::NotImplemented { message },
+            E::NotFound(message) => CoreError::NotFound {
+                message: present(message),
+            },
+            E::InvalidArgument(message) => CoreError::InvalidArgument {
+                message: present(message),
+            },
+            E::HostUnavailable(message) => CoreError::HostUnavailable {
+                message: present(message),
+            },
+            E::Unsupported(message) => CoreError::Unsupported {
+                message: present(message),
+            },
+            E::Network(message) => CoreError::Network {
+                message: present(message),
+            },
+            E::HostError(message) => CoreError::HostError {
+                message: present(message),
+            },
+            E::Auth(message) => CoreError::Auth {
+                message: present(message),
+            },
+            E::Storage(message) => CoreError::Storage {
+                message: present(message),
+            },
+            E::NotImplemented(message) => CoreError::NotImplemented {
+                message: present(message),
+            },
             E::Closed => CoreError::Closed,
-            E::Internal(message) => CoreError::Internal { message },
+            E::Internal(message) => CoreError::Internal {
+                message: present(message),
+            },
         }
     }
 }
 
 pub type CoreResult<T> = Result<T, CoreError>;
+
+#[cfg(test)]
+mod host_error_localization_tests {
+    use super::*;
+
+    #[test]
+    fn host_error_mapping_keeps_the_category_and_hides_known_wire_codes() {
+        use rcode_proto::workspace_errors::WorkspaceFailure;
+        let wire = WorkspaceFailure::FileMissing.encode();
+        let error = CoreError::from(zc::ClientError::HostError(format!(
+            "ReadWorkspaceFile: {wire}"
+        )));
+        let CoreError::HostError { message } = error else {
+            panic!("the host-error category must survive presentation mapping");
+        };
+        assert_eq!(
+            message,
+            crate::l10n::host_failure(crate::l10n::localizer(), &wire)
+        );
+        assert!(!message.contains("rcode.workspace:"));
+        assert_eq!(
+            CoreError::from(zc::ClientError::HostError("legacy host error".into())),
+            CoreError::HostError {
+                message: "legacy host error".into()
+            },
+        );
+    }
+}
 
 // ── config / credentials ──────────────────────────────────────────────────
 
@@ -400,7 +450,11 @@ impl From<&zc::SessionRow> for SessionRow {
         Self {
             id: r.id.clone(),
             revision: r.revision,
-            title: r.title.clone(),
+            title: if r.has_title {
+                r.title.clone()
+            } else {
+                crate::l10n::localizer().text(rcode_presentation::TextKey::ShellNewSessionFallback)
+            },
             has_title: r.has_title,
             preview: r.preview.clone(),
             project: r.project.as_ref().map(|p| ProjectRef {
@@ -422,7 +476,7 @@ impl From<&zc::SessionRow> for SessionRow {
             host_indicator: r.host_indicator.into(),
             working_since_ms: r.working_since_ms,
             last_activity_ms: r.last_activity_ms,
-            time_label: r.time_label.clone(),
+            time_label: crate::l10n::relative_time_now(r.last_activity_ms),
             created_at_ms: r.created_at_ms,
             unseen: r.unseen,
             archived: r.archived,

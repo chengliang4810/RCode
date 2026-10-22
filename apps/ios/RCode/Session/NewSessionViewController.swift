@@ -114,7 +114,7 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
         dismissTap.delegate = self
         view.addGestureRecognizer(dismissTap)
         view.backgroundColor = Palette.background
-        title = "New Session"
+        title = L10n.text("New Session")
         if !embedded {
             navigationItem.leftBarButtonItem = UIBarButtonItem(systemItem: .close, primaryAction: UIAction { [weak self] _ in
                 self?.dismiss(animated: true)
@@ -124,7 +124,7 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
         mark.image = BrandMarks.image(for: draft.harness, side: 34)
         mark.tintColor = Palette.text
         mark.contentMode = .center
-        hero.text = "What are we building?"
+        hero.text = L10n.text("What are we building?")
         hero.numberOfLines = 2
         hero.font = Fonts.ui(.sansSemibold, 22)
         hero.textColor = Palette.text
@@ -138,7 +138,7 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
         view.addSubview(heroStack)
 
         composer.translatesAutoresizingMaskIntoConstraints = false
-        composer.placeholder = "Describe the task"
+        composer.placeholder = L10n.text("Describe the task")
         composer.chipsAlwaysVisible = true
         composer.attachMenu = { [weak self] in
             guard let self else { return UIMenu() }
@@ -287,12 +287,12 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
             chips.append(ComposerChip(id: "project", title: p.groupName, symbol: nil, icon: ProjectTile.image(name: p.groupName, colorIndex: p.colorIndex)))
             chips.append(ComposerChip(id: "host", title: p.deviceName, symbol: "desktopcomputer"))
             if p.git {
-                chips.append(ComposerChip(id: "branch", title: draft.worktree ? "New worktree" : (draft.branch ?? "Current branch"), symbol: nil, icon: BranchIcon.sized()))
+                chips.append(ComposerChip(id: "branch", title: draft.worktree ? L10n.text("New worktree") : (draft.branch ?? L10n.text("Current branch")), symbol: nil, icon: BranchIcon.sized()))
             }
         } else {
             let host = app.hostOptions.first { $0.id == draft.hostId }
-            chips.append(ComposerChip(id: "project", title: "No project", symbol: "tray"))
-            chips.append(ComposerChip(id: "host", title: host?.name ?? "Choose host", symbol: "desktopcomputer"))
+            chips.append(ComposerChip(id: "project", title: L10n.text("No project"), symbol: "tray"))
+            chips.append(ComposerChip(id: "host", title: host?.name ?? L10n.text("Choose host"), symbol: "desktopcomputer"))
         }
         let model = models.first { $0.harness == draft.harness && $0.id == draft.model } ?? models.first { $0.harness == draft.harness }
         // Never the harness name in place of a model: a model this host
@@ -300,7 +300,7 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
         let modelTitle = model?.label ?? draft.model.map { modelLabel(harness: draft.harness, model: $0) } ?? fallbackModels(harness: draft.harness).first?.label ?? HarnessNames.label(draft.harness)
         chips.append(ComposerChip(id: "model", title: modelTitle, symbol: nil, icon: BrandMarks.image(for: draft.harness, side: 13)))
         if let efforts = model?.efforts, !efforts.isEmpty {
-            chips.append(ComposerChip(id: "effort", title: (draft.effort ?? efforts[efforts.count / 2]).capitalized, symbol: "gauge.with.dots.needle.67percent"))
+            chips.append(ComposerChip(id: "effort", title: reasoningLabel(level: draft.effort ?? efforts[efforts.count / 2]), symbol: "gauge.with.dots.needle.67percent"))
         }
         composer.chips = chips
         composer.chipMenus = [
@@ -335,13 +335,13 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
             }
         })]
         sections.append(UIMenu(options: .displayInline, children: [
-            UIAction(title: "No Project…", image: UIImage(systemName: "tray"), state: draft.projectId == nil ? .on : .off) { [weak self] _ in
+            UIAction(title: L10n.text("No Project…"), image: UIImage(systemName: "tray"), state: draft.projectId == nil ? .on : .off) { [weak self] _ in
                 guard let self else { return }
                 self.draft.projectId = nil
                 self.draft.hostId = self.draft.hostId ?? self.app.hostOptions.first(where: \.online)?.id ?? self.app.hostOptions.first?.id
                 self.loadModels()
             },
-            UIAction(title: "New Project…", image: UIImage(systemName: "folder.badge.plus")) { [weak self] _ in
+            UIAction(title: L10n.text("New Project…"), image: UIImage(systemName: "folder.badge.plus")) { [weak self] _ in
                 guard let self else { return }
                 let vc = NewProjectViewController(app: self.app)
                 vc.onCreated = { [weak self] id in
@@ -353,7 +353,7 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
                 self.present(UINavigationController(rootViewController: vc), animated: true)
             },
         ]))
-        return UIMenu(title: "Project", children: sections)
+        return UIMenu(title: L10n.text("Project"), children: sections)
     }
 
     /// Keep the host when it has a checkout of the project, else the first
@@ -379,15 +379,15 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
     private func hostMenu() -> UIMenu {
         let checkouts = self.checkouts
         if !checkouts.isEmpty {
-            return UIMenu(title: "Run on", children: checkouts.map { p in
+            return UIMenu(title: L10n.text("Run on"), children: checkouts.map { p in
                 let shared = checkouts.filter { $0.device == p.device }.count > 1
-                return UIAction(title: p.deviceName, subtitle: shared ? p.path : (p.online ? "Online" : "Offline"), image: UIImage(systemName: "desktopcomputer"), state: p.id == draft.projectId ? .on : .off) { [weak self] _ in
+                return UIAction(title: p.deviceName, subtitle: shared ? p.path : (p.online ? L10n.text("Online") : L10n.text("Offline")), image: UIImage(systemName: "desktopcomputer"), state: p.id == draft.projectId ? .on : .off) { [weak self] _ in
                     self?.pickCheckout(p)
                 }
             })
         }
-        return UIMenu(title: "Run on", children: app.hostOptions.map { h in
-            UIAction(title: h.name, subtitle: h.online ? "Online" : "Offline", image: UIImage(systemName: "desktopcomputer"), state: h.id == draft.hostId ? .on : .off) { [weak self] _ in
+        return UIMenu(title: L10n.text("Run on"), children: app.hostOptions.map { h in
+            UIAction(title: h.name, subtitle: h.online ? L10n.text("Online") : L10n.text("Offline"), image: UIImage(systemName: "desktopcomputer"), state: h.id == draft.hostId ? .on : .off) { [weak self] _ in
                 self?.draft.hostId = h.id
                 self?.loadModels()
             }
@@ -395,12 +395,12 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
     }
 
     private func branchMenu() -> UIMenu {
-        UIMenu(title: "Checkout", children: [
-            UIAction(title: "New worktree", state: draft.worktree ? .on : .off) { [weak self] _ in
+        UIMenu(title: L10n.text("Checkout"), children: [
+            UIAction(title: L10n.text("New worktree"), state: draft.worktree ? .on : .off) { [weak self] _ in
                 self?.draft.worktree.toggle()
                 self?.refreshChips()
             },
-            UIMenu(title: "Branch", options: .displayInline, children: [UIDeferredMenuElement { [weak self] done in
+            UIMenu(title: L10n.text("Branch"), options: .displayInline, children: [UIDeferredMenuElement { [weak self] done in
                 guard let self, let p = self.project else { return done([]) }
                 Task { @MainActor in
                     let refs = await self.app.refs(projectId: p.id)
@@ -417,7 +417,7 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
 
     private func modelMenu() -> UIMenu {
         let byHarness = Dictionary(grouping: models, by: \.harness)
-        return UIMenu(title: "Model", children: byHarness.keys.sorted().map { h in
+        return UIMenu(title: L10n.text("Model"), children: byHarness.keys.sorted().map { h in
             UIMenu(title: byHarness[h]!.first!.harnessLabel, image: BrandMarks.image(for: h, side: 16), options: .displayInline, children: byHarness[h]!.map { m in
                 UIAction(title: m.label, state: m.harness == draft.harness && m.id == draft.model ? .on : .off) { [weak self] _ in
                     self?.draft.harness = m.harness
@@ -431,8 +431,8 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
 
     private func effortMenu() -> UIMenu {
         let model = models.first { $0.harness == draft.harness && $0.id == draft.model } ?? models.first { $0.harness == draft.harness }
-        return UIMenu(title: "Reasoning effort", children: (model?.efforts ?? []).map { e in
-            UIAction(title: e.capitalized, state: e == draft.effort ? .on : .off) { [weak self] _ in
+        return UIMenu(title: L10n.text("Reasoning effort"), children: (model?.efforts ?? []).map { e in
+            UIAction(title: reasoningLabel(level: e), state: e == draft.effort ? .on : .off) { [weak self] _ in
                 self?.draft.effort = e
                 self?.refreshChips()
             }
@@ -443,8 +443,8 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
     private func create(text: String, images: [StagedImage]) -> Bool {
         app.lastDraft = draft
         guard let chatId = app.createSession(draft: draft, text: text, images: images) else {
-            let alert = UIAlertController(title: "Couldn't start the session", message: "Choose a project or a host that can run it.", preferredStyle: .alert)
-            alert.addAction(UIAlertAction(title: "OK", style: .default))
+            let alert = UIAlertController(title: L10n.text("Couldn't start the session"), message: L10n.text("Choose a project or a host that can run it."), preferredStyle: .alert)
+            alert.addAction(UIAlertAction(title: L10n.text("OK"), style: .default))
             present(alert, animated: true)
             return false
         }

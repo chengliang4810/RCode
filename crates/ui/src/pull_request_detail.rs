@@ -1530,12 +1530,7 @@ fn status_style(localizer: &Localizer, raw: &str) -> (String, &'static str, Stat
 }
 
 fn humanize(localizer: &Localizer, raw: &str) -> String {
-    let text = raw.replace('_', " ").to_lowercase();
-    let mut chars = text.chars();
-    chars
-        .next()
-        .map(|first| first.to_uppercase().collect::<String>() + chars.as_str())
-        .unwrap_or_else(|| localizer.text(TextKey::PrDetailStatusNotReported))
+    rcode_presentation::assessment::check_status(localizer, raw)
 }
 
 fn status_chip(localizer: &Localizer, raw: &str, theme: &Theme) -> AnyElement {
@@ -2071,7 +2066,7 @@ impl Render for PullRequestDetailPage {
                                                         assessment
                                                             .blockers
                                                             .iter()
-                                                            .map(|blocker| blocker.label())
+                                                            .map(|blocker| rcode_presentation::assessment::blocker(localizer, *blocker))
                                                             .collect::<Vec<_>>()
                                                             .join(" · ")
                                                     }),
@@ -2082,14 +2077,14 @@ impl Render for PullRequestDetailPage {
                                                     .text_color(theme.text)
                                                     .child(localizer.format_with(
                                                         TextKey::PrDetailNext,
-                                                        &[("action", action.label())],
+                                                        &[("action", &rcode_presentation::assessment::action(localizer, *action))],
                                                     ))
                                             }))
                                             .children(assessment.missing.iter().map(|missing| {
                                                 div()
                                                     .text_size(crate::typography::ui_rems(11.0))
                                                     .text_color(theme.text_muted)
-                                                    .child(missing.label())
+                                                    .child(rcode_presentation::assessment::missing(localizer, *missing))
                                             }))
                                             .child(
                                                 div()

@@ -275,15 +275,14 @@ impl Pickers {
         } else {
             ModelRail::All
         };
-        self.show_compact_list(rail, "Search models…", cx);
+        self.show_compact_list(
+            rail,
+            crate::l10n::localizer().text(TextKey::PickersSearchModels),
+            cx,
+        );
     }
 
-    fn show_compact_list(
-        &mut self,
-        rail: ModelRail,
-        placeholder: &'static str,
-        cx: &mut Context<Self>,
-    ) {
+    fn show_compact_list(&mut self, rail: ModelRail, placeholder: String, cx: &mut Context<Self>) {
         self.setting_menu = None;
         self.compact_model_list = true;
         self.model_rail = rail;
@@ -329,7 +328,7 @@ impl Pickers {
 
     /// Clear the shared filter for a new page without letting the clear's
     /// Edited event reset the highlight anchored right after.
-    fn reset_compact_search(&mut self, placeholder: &'static str, cx: &mut Context<Self>) {
+    fn reset_compact_search(&mut self, placeholder: String, cx: &mut Context<Self>) {
         self.search_reset_muted = !self.search.read(cx).text().is_empty();
         self.search.update(cx, |input, cx| {
             input.set_placeholder(placeholder, cx);
@@ -419,7 +418,10 @@ impl Pickers {
                     div()
                         .id(SharedString::from(format!("compact-group-{start}")))
                         .role(gpui::Role::Button)
-                        .aria_label(SharedString::from(format!("Jump to {name}")))
+                        .aria_label(crate::l10n::localizer().format_with(
+                            TextKey::AuditSettingsModelsJump,
+                            &[("name", name.as_ref())],
+                        ))
                         .tooltip(move |_, cx| cx.new(|_| PickerHint(hint.clone())).into())
                         // A row-height square with the rows' corners, so the
                         // strip sits on the card's grid like the list below.
@@ -522,9 +524,15 @@ impl Pickers {
     fn compact_title_text(name: &ModelName) -> SharedString {
         match name {
             ModelName::Named(label) => label.clone(),
-            ModelName::Loading => "Loading models…".into(),
-            ModelName::None { no_agents: true } => "No agents available".into(),
-            ModelName::None { .. } => "Select model".into(),
+            ModelName::Loading => crate::l10n::localizer()
+                .text(TextKey::AuditModelsLoading)
+                .into(),
+            ModelName::None { no_agents: true } => crate::l10n::localizer()
+                .text(TextKey::AuditModelsNoAgents)
+                .into(),
+            ModelName::None { .. } => crate::l10n::localizer()
+                .text(TextKey::AuditModelsSelect)
+                .into(),
         }
     }
 
@@ -1018,12 +1026,13 @@ impl Pickers {
                     .tooltip(move |_, cx| {
                         cx.new(|_| {
                             PickerHint(
-                                if fast {
-                                    "Fast mode on · Turn off"
-                                } else {
-                                    "Fast mode off · Turn on"
-                                }
-                                .into(),
+                                crate::l10n::localizer()
+                                    .text(if fast {
+                                        TextKey::AuditSettingsModelsFastOn
+                                    } else {
+                                        TextKey::AuditSettingsModelsFastOff
+                                    })
+                                    .into(),
                             )
                         })
                         .into()

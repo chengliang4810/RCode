@@ -7,8 +7,11 @@
 
 use std::sync::Arc;
 
+use crate::l10n::localizer;
+
 use rcode_doc::parts::{MessagePart, SubagentStatus};
 use rcode_markdown::parser::{Block, BlockTree, IncrementalParser, InlineRun, InlineStyle};
+use rcode_presentation::{Localizer, TextKey};
 use rcode_proto::ToolCall;
 use rcode_text::WhiteSpace;
 
@@ -111,14 +114,17 @@ pub(crate) struct DiffRowP {
 
 /// Desktop summary: thought segment first, then the shared tool summary.
 fn group_summary(thoughts: usize, calls: &[(ToolCall, bool)]) -> String {
+    group_summary_for(localizer(), thoughts, calls)
+}
+
+fn group_summary_for(localizer: &Localizer, thoughts: usize, calls: &[(ToolCall, bool)]) -> String {
     let mut segments: Vec<String> = Vec::new();
     match thoughts {
         0 => {}
-        1 => segments.push("thought process".into()),
-        n => segments.push(format!("thought {n} times")),
+        n => segments.push(localizer.format_count(TextKey::ToolSummaryThoughts, "count", n as i64)),
     }
     if !calls.is_empty() {
-        let s = rcode_proto::view::tool_group_summary(calls);
+        let s = rcode_presentation::tools::tool_group_summary(localizer, calls);
         let mut c = s.chars();
         let lowered = c
             .next()
@@ -126,12 +132,12 @@ fn group_summary(thoughts: usize, calls: &[(ToolCall, bool)]) -> String {
             .unwrap_or_default();
         segments.push(lowered);
     }
-    let mut out = segments.join(" · ");
-    if let Some(first) = out.get(0..1) {
-        let up = first.to_uppercase();
-        out.replace_range(0..1, &up);
+    let out = segments.join(" · ");
+    let mut chars = out.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+        None => out,
     }
-    out
 }
 
 fn tool_icon(call: &ToolCall) -> &'static str {
@@ -186,9 +192,13 @@ fn call_text(call: &ToolCall) -> String {
             None => path.clone(),
         },
         ToolCall::EditFile { path, .. } => path.clone(),
-        ToolCall::ApplyPatch { path } => path.clone().unwrap_or_else(|| "workspace".into()),
+        ToolCall::ApplyPatch { path } => path
+            .clone()
+            .unwrap_or_else(|| localizer().text(TextKey::ToolPatchWorkspace)),
         ToolCall::Search { pattern, path } => match path {
-            Some(p) => format!("{pattern} in {p}"),
+            Some(p) => {
+                localizer().format_with(TextKey::ToolSearchIn, &[("pattern", pattern), ("path", p)])
+            }
             None => pattern.clone(),
         },
         ToolCall::Glob { pattern } => pattern.clone(),
@@ -265,7 +275,7 @@ fn lines_block(ctx: &mut Ctx, st: &Styles, text: &str, wrap: Option<usize>) -> O
     let more = (extra > 0).then(|| {
         prepare_plain(
             ctx,
-            &format!("… {extra} more lines"),
+            &localizer().format_count(TextKey::MobileMoreLines, "count", extra as i64),
             st.label,
             st.out_lh,
             ColorRole::TextFaint,
@@ -321,14 +331,18 @@ fn diff_block(ctx: &mut Ctx, st: &Styles, diff: &rcode_proto::ToolDiff) -> Optio
         return None;
     }
     let total = raw.iter().filter(|r| r.0 != DiffKind::Hunk).count();
-    let mut notice = if diff.old_text.is_none() {
-        Some("New file".to_owned())
+    let mut notice: Option<String> = if diff.old_text.is_none() {
+        Some(localizer().text(TextKey::MobileNewFile))
     } else {
         None
     };
     if total > DIFF_MAX_LINES {
-        notice = Some(format!(
-            "Diff truncated — showing first {DIFF_MAX_LINES} of {total} lines"
+        notice = Some(localizer().format_with(
+            TextKey::MobileDiffTruncated,
+            &[
+                ("limit", &DIFF_MAX_LINES.to_string()),
+                ("total", &total.to_string()),
+            ],
         ));
         let mut kept = 0;
         raw.retain(|r| {
@@ -1063,7 +1077,8 @@ impl RowBuilder {
                         subagent_status,
                         ..
                     } => {
-                        let (label, detail) = rcode_proto::view::tool_chip_content(call);
+                        let (label, detail) =
+                            rcode_presentation::tools::tool_chip_content(localizer(), call);
                         // Subagent lifecycle is distinct from `resolved`: under
                         // eager-done the spawn call resolves while the subagent
                         // still runs (desktop transcript.rs `running`/`failed`).
@@ -1135,7 +1150,7 @@ impl RowBuilder {
                             icon: tool_icon(call).to_owned(),
                             label: prepare_plain(
                                 ctx,
-                                label,
+                                &label,
                                 if agents { medium } else { st.label },
                                 st.lh,
                                 color,
@@ -1175,7 +1190,7 @@ impl RowBuilder {
                             icon: "tool-chat-round-line".into(),
                             label: prepare_plain(
                                 ctx,
-                                "Thought process",
+                                &localizer().text(TextKey::ConversationThoughtProcess),
                                 st.label,
                                 st.lh,
                                 ColorRole::TextSecondary,
@@ -1751,6 +1766,8 @@ mod tests {
 
     #[test]
     fn summary_matches_desktop_wording() {
+        let en = Localizer::with_system_locale(rcode_presentation::LanguagePreference::EnUs, None);
+        let zh = Localizer::with_system_locale(rcode_presentation::LanguagePreference::ZhCn, None);
         let calls = vec![
             (
                 ToolCall::Exec {
@@ -1772,13 +1789,18 @@ mod tests {
             ),
         ];
         assert_eq!(
-            group_summary(0, &calls),
+            group_summary_for(&en, 0, &calls),
             "Ran 2 commands · read 1 file · 1 failed"
         );
         assert_eq!(
-            group_summary(1, &calls),
+            group_summary_for(&en, 1, &calls),
             "Thought process · ran 2 commands · read 1 file · 1 failed"
         );
-        assert_eq!(group_summary(3, &[]), "Thought 3 times");
+        assert_eq!(group_summary_for(&en, 3, &[]), "Thought 3 times");
+        assert_eq!(
+            group_summary_for(&zh, 1, &calls),
+            "思考了 1 次 · 运行了 2 个命令 · 读取了 1 个文件 · 1 个失败"
+        );
+        assert_eq!(group_summary_for(&zh, 3, &[]), "思考了 3 次");
     }
 }

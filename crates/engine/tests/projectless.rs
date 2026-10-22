@@ -113,7 +113,9 @@ fn complete_assistant_count(core: &EngineCore) -> usize {
 /// row, else its scratch folder under the engine data dir.
 fn expected_cwd(chat_cwd: &str, data_dir: &std::path::Path) -> String {
     if chat_cwd == "~" {
-        return std::env::var("HOME").expect("HOME set in test env");
+        return std::env::var("HOME")
+            .or_else(|_| std::env::var("USERPROFILE"))
+            .expect("home directory set in test env");
     }
     assert!(
         rcode_proto::projectless::is_scratch_cwd(chat_cwd),
@@ -150,7 +152,9 @@ async fn projectless_terminal_resolves_home_and_preserves_explicit_paths() {
     )
     .expect("engine core assembles");
     let client = rcode_rpc::memory_client(core.rpc_service());
-    let home = std::env::var("HOME").expect("HOME set in test env");
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .expect("home directory set in test env");
 
     // `None` expects the chat's own scratch folder: a new chat with no cwd,
     // or `~` from an older client, never runs in home.
@@ -249,9 +253,9 @@ async fn projectless_terminal_resolves_home_and_preserves_explicit_paths() {
         )
         .await
         .expect_err("explicit missing path must not fall back to home");
-    assert!(
-        err.to_string()
-            .contains("Session working directory is unavailable")
+    assert_eq!(
+        rcode_proto::terminal_errors::TerminalOpenFailure::decode(&err.to_string()),
+        Some(rcode_proto::terminal_errors::TerminalOpenFailure::WorkingDirectoryUnavailable),
     );
     assert!(core.workspace.read_spaces().unwrap().is_empty());
     core.shutdown().await;

@@ -51,21 +51,21 @@ enum WallpaperStore {
     /// Desktop labels / descriptions.
     static func label(_ e: WallpaperEffect) -> String {
         switch e {
-        case .none: "None"
-        case .dither: "Dither"
+        case .none: L10n.text("None")
+        case .dither: L10n.text("Dither")
         case .ascii: "ASCII"
-        case .halftone: "Halftone"
-        case .scanlines: "Scanlines"
+        case .halftone: L10n.text("Halftone")
+        case .scanlines: L10n.text("Scanlines")
         }
     }
 
     static func detail(_ e: WallpaperEffect) -> String {
         switch e {
-        case .none: "Shows the original artwork."
-        case .dither: "Rebuilds the artwork with a dithered color palette."
-        case .ascii: "Recreates the artwork with colored characters."
-        case .halftone: "Recreates the artwork with colored print dots."
-        case .scanlines: "Adds a pronounced horizontal display-line texture."
+        case .none: L10n.text("Shows the original artwork.")
+        case .dither: L10n.text("Rebuilds the artwork with a dithered color palette.")
+        case .ascii: L10n.text("Recreates the artwork with colored characters.")
+        case .halftone: L10n.text("Recreates the artwork with colored print dots.")
+        case .scanlines: L10n.text("Adds a pronounced horizontal display-line texture.")
         }
     }
 
@@ -306,7 +306,7 @@ final class WallpaperPicker: NSObject, PHPickerViewControllerDelegate {
             retainSelf = nil
             return
         }
-        let name = provider.suggestedName ?? "Photo"
+        let name = provider.suggestedName ?? L10n.text("Photo")
         // The file, not a decoded UIImage: it's downsampled as it's read.
         provider.loadFileRepresentation(forTypeIdentifier: UTType.image.identifier) { [weak self] url, _ in
             if let url { WallpaperStore.set(fileURL: url, name: name) }
