@@ -10,6 +10,7 @@ on:
       - 'scripts/run-macos-browser-fixture.sh'
       - 'scripts/test-browser-storage.py'
       - 'scripts/ci/run-macos-fixture.sh'
+      - 'scripts/mobile/test-ios.sh'
       - 'scripts/fixtures/preview-server/**'
       - 'dist/macos/Info.plist'
       - 'apps/mobile/**'
@@ -25,6 +26,7 @@ on:
       - 'scripts/run-macos-browser-fixture.sh'
       - 'scripts/test-browser-storage.py'
       - 'scripts/ci/run-macos-fixture.sh'
+      - 'scripts/mobile/test-ios.sh'
       - 'scripts/fixtures/preview-server/**'
       - 'dist/macos/Info.plist'
       - 'apps/mobile/**'
@@ -78,6 +80,7 @@ jobs:
               || path === 'Cargo.lock'
               || path === 'Cargo.toml'
               || path === 'rust-toolchain.toml'
+              || path === 'scripts/mobile/test-ios.sh'
               || path === '.github/workflows/macos.yml'
               || path?.startsWith('.github/actions/flutter-setup/');
             return files.some(file => affectsMobile(file.filename)
@@ -224,13 +227,13 @@ jobs:
       - name: Dart controllers against a real authenticated engine
         run: cargo test --locked -p rcode-engine --test flutter_direct -- --ignored --nocapture
 
-  # The iOS build exercises Flutter plugins, the small Runner bridge and Rust
-  # visual linkage. Dart widget regressions run in mobile-core on Linux.
+  # Keep an unsigned shipping-app build, then execute the integration target on
+  # a dedicated simulator with a real local engine and native Rust rendering.
   mobile-ios:
     needs: [changes, mobile-core, macos-frame-source]
     if: needs.changes.outputs.mobile == 'true'
     runs-on: macos-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Rust toolchain and simulator targets
@@ -251,6 +254,18 @@ jobs:
       - name: Build Flutter iOS simulator app
         working-directory: apps/mobile
         run: flutter build ios --debug --simulator --no-codesign --no-pub
+      - name: Run iOS simulator against the authenticated engine
+        timeout-minutes: 45
+        env:
+          RCODE_MOBILE_QA_ARTIFACTS: ${{ runner.temp }}/rcode-mobile-ios-runtime
+        run: bash scripts/mobile/test-ios.sh
+      - name: Upload iOS runtime screenshots and logs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: rcode-mobile-ios-runtime
+          path: ${{ runner.temp }}/rcode-mobile-ios-runtime
+          if-no-files-found: ignore
 
   mobile-android:
     needs: [changes, mobile-core]
