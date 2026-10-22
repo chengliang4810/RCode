@@ -1,19 +1,18 @@
 //! Client side: request/stream multiplexing over string frames + the WebSocket dialer.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use futures::{SinkExt, StreamExt};
 use tokio::sync::{mpsc, oneshot};
 use tokio_tungstenite::tungstenite::Message as WsMessage;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
 use crate::{ClientFrame, RpcError, ServerFrame};
 
-/// Per-stream queue depth. Bounded: route_frame awaits a full queue, pausing
-/// the connection reader — transport backpressure instead of unbounded growth
-/// when a consumer stalls behind a fast producer (watch frames every 120ms
-/// during streaming used to pile up whole-transcript payloads here).
+/// Per-stream queue depth. A lagging consumer loses its subscription and can
+/// resubscribe; it cannot block the shared connection reader or grow forever.
 const STREAM_QUEUE_CAP: usize = 256;
 
 enum Pending {
@@ -27,11 +26,30 @@ enum Pending {
 
 struct Shared {
     pending: Mutex<HashMap<u64, Pending>>,
+    connected: AtomicBool,
 }
 
 impl Shared {
     fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<u64, Pending>> {
         self.pending.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn disconnected(&self) {
+        self.connected.store(false, Ordering::Release);
+        let drained: Vec<_> = self.lock().drain().map(|(_, pending)| pending).collect();
+        for pending in drained {
+            match pending {
+                Pending::Call(reply) => {
+                    let _ = reply.send(Err(RpcError::Closed));
+                }
+                Pending::CheckedStream {
+                    ready: Some(reply), ..
+                } => {
+                    let _ = reply.send(Err(RpcError::Closed));
+                }
+                Pending::Stream(_) | Pending::CheckedStream { ready: None, .. } => {}
+            }
+        }
     }
 }
 
@@ -42,6 +60,7 @@ pub struct RpcClient {
     shared: Arc<Shared>,
     next_id: AtomicU64,
     reader: tokio::task::JoinHandle<()>,
+    transport: Option<tokio::task::JoinHandle<()>>,
 }
 
 /// Owned stream receiver whose drop immediately cancels the server task.
@@ -90,6 +109,7 @@ impl RpcClient {
     pub fn new(out: mpsc::Sender<String>, mut inbound: mpsc::Receiver<String>) -> Self {
         let shared = Arc::new(Shared {
             pending: Mutex::new(HashMap::new()),
+            connected: AtomicBool::new(true),
         });
         let reader_shared = shared.clone();
         let reader_out = out.clone();
@@ -110,32 +130,21 @@ impl RpcClient {
                     route_frame(&reader_shared, &reader_out, frame).await;
                 }
             }
-            // Connection closed: fail everything still pending.
-            let drained: Vec<Pending> = {
-                let mut pending = reader_shared.lock();
-                pending.drain().map(|(_, p)| p).collect()
-            };
-            for entry in drained {
-                match entry {
-                    Pending::Call(tx) => {
-                        let _ = tx.send(Err(RpcError::Closed));
-                    }
-                    Pending::CheckedStream {
-                        ready: Some(ready), ..
-                    } => {
-                        let _ = ready.send(Err(RpcError::Closed));
-                    }
-                    Pending::Stream(_) | Pending::CheckedStream { ready: None, .. } => {}
-                }
-                // Stream item receivers end by sender drop.
-            }
+            reader_shared.disconnected();
         });
         Self {
             out,
             shared,
             next_id: AtomicU64::new(1),
             reader,
+            transport: None,
         }
+    }
+
+    /// Whether the transport is currently connected. A reconnecting client
+    /// keeps its identity while each connection's subscriptions end on loss.
+    pub fn is_connected(&self) -> bool {
+        self.shared.connected.load(Ordering::Acquire)
     }
 
     /// Unary request.
@@ -261,6 +270,9 @@ impl RpcClient {
     }
 
     async fn send(&self, frame: ClientFrame) -> Result<(), RpcError> {
+        if !self.is_connected() {
+            return Err(RpcError::Closed);
+        }
         let json = serde_json::to_string(&frame)
             .map_err(|e| RpcError::Transport(format!("serialize frame: {e}")))?;
         self.out.send(json).await.map_err(|_| RpcError::Closed)
@@ -269,7 +281,11 @@ impl RpcClient {
 
 impl Drop for RpcClient {
     fn drop(&mut self) {
+        if let Some(transport) = self.transport.take() {
+            transport.abort();
+        }
         self.reader.abort();
+        self.shared.disconnected();
     }
 }
 
@@ -393,40 +409,158 @@ fn wire_error(error: String) -> RpcError {
 /// stranger on port 27654 would hang the app at boot rather than degrade it.
 const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
-/// Dial a WebSocket RPC server (`ws://127.0.0.1:{ipc_port}`).
+/// Dial local IPC and reconnect after a later transport loss. Outstanding
+/// requests fail and subscriptions end; callers resubscribe after reconnect.
 pub async fn connect_ws(url: &str) -> Result<RpcClient, RpcError> {
-    let (ws, _) = tokio::time::timeout(CONNECT_TIMEOUT, tokio_tungstenite::connect_async(url))
+    connect_reconnecting(url, None).await
+}
+
+/// Connect to the external listener with a header credential. Connection loss
+/// never replays requests: writes with a lost reply have an unknown outcome.
+pub async fn connect_ws_authenticated(url: &str, api_key: &str) -> Result<RpcClient, RpcError> {
+    crate::validate_api_key(api_key)?;
+    connect_reconnecting(url, Some(api_key.to_owned())).await
+}
+
+type Socket =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+
+async fn dial(url: &str, api_key: Option<&str>) -> Result<Socket, RpcError> {
+    let mut request = url
+        .into_client_request()
+        .map_err(|_| RpcError::Transport("invalid WebSocket address".into()))?;
+    if let Some(api_key) = api_key {
+        let credential = format!("Bearer {api_key}")
+            .parse()
+            .map_err(|_| RpcError::Transport("invalid connection credential".into()))?;
+        request.headers_mut().insert("Authorization", credential);
+    }
+    let result = tokio::time::timeout(CONNECT_TIMEOUT, tokio_tungstenite::connect_async(request))
         .await
-        .map_err(|_| RpcError::Transport(format!("timed out dialing {url}")))?
-        .map_err(|e| RpcError::Transport(e.to_string()))?;
-    let (mut sink, mut stream) = ws.split();
+        .map_err(|_| RpcError::Transport("WebSocket connection timed out".into()))?;
+    match result {
+        Ok((socket, _)) => Ok(socket),
+        Err(tokio_tungstenite::tungstenite::Error::Http(response))
+            if response.status().as_u16() == 401 || response.status().as_u16() == 403 =>
+        {
+            Err(RpcError::Transport(
+                "WebSocket authentication rejected".into(),
+            ))
+        }
+        Err(_) => Err(RpcError::Transport(
+            "could not connect to WebSocket server".into(),
+        )),
+    }
+}
+
+async fn connect_reconnecting(url: &str, api_key: Option<String>) -> Result<RpcClient, RpcError> {
+    let socket = dial(url, api_key.as_deref()).await?;
     let (out_tx, mut out_rx) = mpsc::channel::<String>(256);
     let (in_tx, in_rx) = mpsc::channel::<String>(256);
-    tokio::spawn(async move {
+    let mut client = RpcClient::new(out_tx, in_rx);
+    let shared = client.shared.clone();
+    let url = url.to_owned();
+    client.transport = Some(tokio::spawn(async move {
+        let mut next_socket = Some(socket);
+        let mut retry = std::time::Duration::from_millis(250);
         loop {
-            tokio::select! {
-                frame = out_rx.recv() => match frame {
-                    Some(text) => {
-                        if sink.send(WsMessage::Text(text)).await.is_err() {
-                            break;
+            let socket = match next_socket.take() {
+                Some(socket) => socket,
+                None => {
+                    // No queued frame may cross a connection boundary. Pending
+                    // IDs were failed below; late frames are filtered too.
+                    while out_rx.try_recv().is_ok() {}
+                    tokio::time::sleep(retry).await;
+                    match dial(&url, api_key.as_deref()).await {
+                        Ok(socket) => socket,
+                        Err(_) => {
+                            retry = (retry * 2).min(std::time::Duration::from_secs(5));
+                            continue;
                         }
                     }
-                    None => {
-                        let _ = sink.send(WsMessage::Close(None)).await;
-                        break;
-                    }
-                },
-                message = stream.next() => match message {
-                    Some(Ok(WsMessage::Text(text))) => {
-                        if in_tx.send(text).await.is_err() {
-                            break;
+                }
+            };
+            retry = std::time::Duration::from_millis(250);
+            shared.connected.store(true, Ordering::Release);
+            let (mut sink, mut stream) = socket.split();
+            let mut heartbeat = tokio::time::interval(std::time::Duration::from_secs(15));
+            heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            let mut received = tokio::time::Instant::now();
+            loop {
+                tokio::select! {
+                    frame = out_rx.recv() => match frame {
+                        Some(text) => {
+                            // Requests may finish queueing after disconnect.
+                            // Their removed IDs must never reach the new peer.
+                            let live = serde_json::from_str::<ClientFrame>(&text).ok()
+                                .is_some_and(|frame| frame.cancel || shared.lock().contains_key(&frame.id));
+                            if !live { continue; }
+                            if !matches!(tokio::time::timeout(CONNECT_TIMEOUT, sink.send(WsMessage::Text(text))).await, Ok(Ok(()))) {
+                                break;
+                            }
                         }
+                        None => return,
+                    },
+                    message = stream.next() => match message {
+                        Some(Ok(WsMessage::Text(text))) => {
+                            received = tokio::time::Instant::now();
+                            if !matches!(tokio::time::timeout(CONNECT_TIMEOUT, in_tx.send(text)).await, Ok(Ok(()))) { break; }
+                        }
+                        Some(Ok(WsMessage::Ping(payload))) => {
+                            received = tokio::time::Instant::now();
+                            if !matches!(tokio::time::timeout(CONNECT_TIMEOUT, sink.send(WsMessage::Pong(payload))).await, Ok(Ok(()))) { break; }
+                        }
+                        Some(Ok(WsMessage::Pong(_))) => received = tokio::time::Instant::now(),
+                        Some(Ok(WsMessage::Close(_))) | Some(Err(_)) | None => break,
+                        Some(Ok(_)) => {}
+                    },
+                    _ = heartbeat.tick() => {
+                        if received.elapsed() >= std::time::Duration::from_secs(45) { break; }
+                        if !matches!(tokio::time::timeout(CONNECT_TIMEOUT, sink.send(WsMessage::Ping(Vec::new()))).await, Ok(Ok(()))) { break; }
                     }
-                    Some(Ok(WsMessage::Close(_))) | Some(Err(_)) | None => break,
-                    Some(Ok(_)) => {}
-                },
+                }
             }
+            shared.disconnected();
+            while out_rx.try_recv().is_ok() {}
         }
-    });
-    Ok(RpcClient::new(out_tx, in_rx))
+    }));
+    Ok(client)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_peer_that_never_answers_heartbeats_is_disconnected() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (ready, socket) = oneshot::channel();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let _ = ready.send((socket, listener));
+        });
+        let client = connect_ws(&format!("ws://{address}")).await.unwrap();
+        // Retain the socket but never poll it: this models a peer or path
+        // which completed TCP/WS setup and then silently stopped responding.
+        let _unresponsive_peer = socket.await.unwrap();
+        tokio::task::yield_now().await;
+        tokio::time::pause();
+        tokio::time::advance(std::time::Duration::from_secs(46)).await;
+        for _ in 0..20 {
+            if !client.is_connected() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            !client.is_connected(),
+            "silent sockets must not stay healthy forever"
+        );
+        assert!(matches!(
+            client.call("Write", serde_json::json!({})).await,
+            Err(RpcError::Closed)
+        ));
+    }
 }

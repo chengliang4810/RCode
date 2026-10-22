@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use futures::{SinkExt, StreamExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 use tokio_tungstenite::tungstenite::handshake::server::{
     ErrorResponse, Request as HandshakeRequest, Response as HandshakeResponse,
@@ -14,6 +14,17 @@ use tokio_tungstenite::tungstenite::http::StatusCode;
 
 use crate::{ClientFrame, RpcError, RpcReply, RpcService, ServerFrame};
 
+#[derive(Default)]
+struct RequestTasks(HashMap<u64, tokio::task::AbortHandle>);
+
+impl Drop for RequestTasks {
+    fn drop(&mut self) {
+        for task in self.0.values() {
+            task.abort();
+        }
+    }
+}
+
 /// Serve one connection: read client frames from `inbound`, write server frames to `out`.
 /// Returns when `inbound` closes; all in-flight request tasks are aborted on exit.
 pub async fn serve_connection(
@@ -21,7 +32,7 @@ pub async fn serve_connection(
     out: mpsc::Sender<String>,
     mut inbound: mpsc::Receiver<String>,
 ) {
-    let mut running: HashMap<u64, tokio::task::AbortHandle> = HashMap::new();
+    let mut running = RequestTasks::default();
     while let Some(payload) = inbound.recv().await {
         // ndjson: a transport may batch several frames per message.
         for line in payload.lines() {
@@ -36,9 +47,9 @@ pub async fn serve_connection(
                     continue;
                 }
             };
-            running.retain(|_, task| !task.is_finished());
+            running.0.retain(|_, task| !task.is_finished());
             if frame.cancel {
-                if let Some(task) = running.remove(&frame.id) {
+                if let Some(task) = running.0.remove(&frame.id) {
                     task.abort();
                 }
                 continue;
@@ -54,11 +65,8 @@ pub async fn serve_connection(
                 method,
                 frame.params,
             ));
-            running.insert(frame.id, task.abort_handle());
+            running.0.insert(frame.id, task.abort_handle());
         }
-    }
-    for (_, task) in running {
-        task.abort();
     }
 }
 
@@ -151,6 +159,86 @@ pub async fn serve_ws_listener(listener: TcpListener, service: Arc<dyn RpcServic
     }
 }
 
+/// Serve external connections authenticated by a Bearer header. Disabling or
+/// changing the key revokes all established sockets as well as future dials.
+/// The service and engine itself remain alive when a client is disconnected.
+pub async fn serve_authenticated_listener(
+    listener: TcpListener,
+    service: Arc<dyn RpcService>,
+    mut api_key: watch::Receiver<Option<String>>,
+) {
+    loop {
+        tokio::select! {
+            accepted = listener.accept() => match accepted {
+                Ok((stream, _)) => {
+                    tokio::spawn(serve_authenticated_socket(stream, service.clone(), api_key.clone()));
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "rpc: external accept failed");
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                }
+            },
+            changed = api_key.changed() => {
+                if changed.is_err() { return; }
+            }
+        }
+    }
+}
+
+async fn revoked(mut api_key: watch::Receiver<Option<String>>, accepted: Option<String>) {
+    loop {
+        if *api_key.borrow_and_update() != accepted {
+            return;
+        }
+        if api_key.changed().await.is_err() {
+            return;
+        }
+    }
+}
+
+async fn serve_authenticated_socket(
+    stream: TcpStream,
+    service: Arc<dyn RpcService>,
+    api_key: watch::Receiver<Option<String>>,
+) {
+    let accepted_key = api_key.borrow().clone();
+    let expected = accepted_key.clone();
+    #[allow(clippy::result_large_err)]
+    let authenticate = move |req: &HandshakeRequest, response: HandshakeResponse| {
+        let matches = expected.as_deref().is_some_and(|expected| {
+            let Some(credential) = req
+                .headers()
+                .get("authorization")
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.strip_prefix("Bearer "))
+            else {
+                return false;
+            };
+            crate::access::key_matches(credential.as_bytes(), expected.as_bytes())
+        });
+        if matches {
+            return Ok(response);
+        }
+        let mut response = ErrorResponse::new(Some("authentication required".into()));
+        *response.status_mut() = StatusCode::UNAUTHORIZED;
+        Err(response)
+    };
+    let socket = tokio::select! {
+        handshake = tokio::time::timeout(std::time::Duration::from_secs(5), tokio_tungstenite::accept_hdr_async(stream, authenticate)) => {
+            match handshake {
+                Ok(Ok(socket)) => socket,
+                // Handshake errors may carry request details: never log them.
+                _ => return,
+            }
+        },
+        _ = revoked(api_key.clone(), accepted_key.clone()) => return,
+    };
+    tokio::select! {
+        _ = serve_socket(socket, service) => {},
+        _ = revoked(api_key, accepted_key) => {},
+    }
+}
+
 async fn serve_ws_socket(stream: TcpStream, service: Arc<dyn RpcService>) {
     // Native viewports dial this socket with a bare `connect_async` and send
     // no `Origin` header. A browser always attaches `Origin` to a WebSocket
@@ -181,12 +269,19 @@ async fn serve_ws_socket(stream: TcpStream, service: Arc<dyn RpcService>) {
             return;
         }
     };
+    serve_socket(ws, service).await;
+}
+
+async fn serve_socket(
+    ws: tokio_tungstenite::WebSocketStream<TcpStream>,
+    service: Arc<dyn RpcService>,
+) {
     let (mut sink, mut ws_stream) = ws.split();
     let (out_tx, mut out_rx) = mpsc::channel::<String>(256);
     let (in_tx, in_rx) = mpsc::channel::<String>(256);
 
     // Pump: socket <-> string channels. Ends when either side closes.
-    let pump = tokio::spawn(async move {
+    let pump = async move {
         loop {
             tokio::select! {
                 frame = out_rx.recv() => match frame {
@@ -207,12 +302,19 @@ async fn serve_ws_socket(stream: TcpStream, service: Arc<dyn RpcService>) {
                         }
                     }
                     Some(Ok(WsMessage::Close(_))) | Some(Err(_)) | None => break,
-                    Some(Ok(_)) => {} // ping/pong/binary — ignored
+                    Some(Ok(WsMessage::Ping(payload))) => {
+                        if sink.send(WsMessage::Pong(payload)).await.is_err() { break; }
+                    }
+                    Some(Ok(_)) => {}
                 },
             }
         }
-    });
+    };
 
-    serve_connection(service, out_tx, in_rx).await;
-    pump.abort();
+    // Own both futures in this scope so key revocation also drops the socket
+    // pump; an unowned spawned pump would keep its authenticated socket alive.
+    tokio::select! {
+        _ = serve_connection(service, out_tx, in_rx) => {},
+        _ = pump => {},
+    }
 }
