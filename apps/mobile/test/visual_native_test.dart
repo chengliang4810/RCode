@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:rcode_mobile/visual/rcode_visual.dart';
@@ -230,6 +231,77 @@ void main() {
   );
 
   testWidgets(
+    'native status follows locale changes while preserving live script state',
+    (tester) async {
+      final host = (await tester.runAsync(_VisualHost.start))!;
+      final semantics = tester.ensureSemantics();
+      const scope = 'widget-host:locale-chat';
+      Widget tree(Locale locale) => MaterialApp(
+        locale: locale,
+        supportedLocales: const [Locale('en'), Locale('zh')],
+        localizationsDelegates: GlobalMaterialLocalizations.delegates,
+        home: Scaffold(
+          body: RCodeVisual(
+            scope: scope,
+            endpoint: host.endpoint,
+            apiKey: 'Fixture12345',
+            deviceId: 'host-device',
+            path: 'uploads/fixture-visual.luau',
+          ),
+        ),
+      );
+      bool containsText(String text) => tester
+          .widgetList<CustomPaint>(find.byType(CustomPaint))
+          .any(
+            (paint) =>
+                paint.painter is VisualPainter &&
+                ((paint.painter as VisualPainter).display['text'] as String? ??
+                        '')
+                    .contains(text),
+          );
+      Future<void> waitFor(String text) async {
+        for (var attempt = 0; attempt < 200; attempt++) {
+          await tester.runAsync(
+            () => Future<void>.delayed(const Duration(milliseconds: 10)),
+          );
+          await tester.pump(const Duration(milliseconds: 16));
+          if (containsText(text)) return;
+        }
+        fail('Widget did not paint $text');
+      }
+
+      try {
+        await tester.pumpWidget(tree(const Locale('en')));
+        await waitFor('Count 0');
+        await tester.tap(find.bySemanticsLabel('Add'));
+        await waitFor('Count 1');
+        await tester.tap(find.bySemanticsLabel('Fail'));
+        await waitFor('Visual error:');
+        expect(containsText('original error detail'), isTrue);
+        await tester.pumpWidget(tree(const Locale('zh')));
+        await waitFor('可视化错误：');
+        expect(containsText('original error detail'), isTrue);
+        expect(containsText('Count 1'), isTrue);
+        await tester.pumpWidget(tree(const Locale('en')));
+        await waitFor('Visual error:');
+        await tester.tap(find.bySemanticsLabel('Add'));
+        await waitFor('Count 2');
+        expect(
+          host.reads,
+          1,
+          reason: 'locale changes must not restart the script',
+        );
+      } finally {
+        disposeVisualScope(scope);
+        await tester.pumpWidget(const SizedBox());
+        semantics.dispose();
+        await tester.runAsync(host.close);
+      }
+    },
+    skip: Platform.environment['RCODE_NATIVE_VISUAL_TEST'] != '1',
+  );
+
+  testWidgets(
     'native math renders all six faces and rejects streaming fragments',
     (tester) async {
       await tester.runAsync(() async {
@@ -296,6 +368,7 @@ class _VisualHost {
           return function() return ui.column {
             ui.text("Count "..s.n),
             ui.button {key="native-control",label="Add",on_click=function() s.n=s.n+1 end},
+            ui.button {label="Fail",on_click=function() error("original error detail") end},
           } end
         ''';
         socket.add(

@@ -116,6 +116,7 @@ class _RCodeVisualState extends State<RCodeVisual> with WidgetsBindingObserver {
   bool _foreground = true;
   bool _dark = false;
   bool _reduceMotion = false;
+  String _locale = 'en';
 
   @override
   void initState() {
@@ -128,6 +129,8 @@ class _RCodeVisualState extends State<RCodeVisual> with WidgetsBindingObserver {
     super.didChangeDependencies();
     _dark = Theme.of(context).brightness == Brightness.dark;
     _reduceMotion = MediaQuery.disableAnimationsOf(context);
+    _locale = Localizations.localeOf(context).toLanguageTag();
+    _backend?.command({'op': 'locale', 'locale': _locale});
     _backend?.command({'op': 'appearance', 'dark': _dark});
     if (_attached) {
       _backend?.command({
@@ -220,6 +223,7 @@ class _RCodeVisualState extends State<RCodeVisual> with WidgetsBindingObserver {
       'pixelScale': MediaQuery.devicePixelRatioOf(context),
       'dark': _dark,
       'reduceMotion': _reduceMotion,
+      'locale': _locale,
     };
     try {
       var lease = scope == null ? null : _idleVisuals.remove((scope, key));
@@ -232,6 +236,7 @@ class _RCodeVisualState extends State<RCodeVisual> with WidgetsBindingObserver {
       final backend = lease.backend;
       _lease = lease;
       _backend = backend;
+      backend.command({'op': 'locale', 'locale': _locale});
       if (reused) {
         setState(() {
           _display = lease!.display;

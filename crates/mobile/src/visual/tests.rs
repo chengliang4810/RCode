@@ -505,3 +505,14 @@ fn frames_are_premultiplied_for_core_graphics() {
     let image = image_of(2, 1, vec![200, 100, 50, 128, 10, 20, 30, 255]);
     assert_eq!(image.bgra, vec![100, 50, 25, 128, 10, 20, 30, 255]);
 }
+
+#[test]
+fn visual_status_locale_preserves_original_error_details_and_script_text() {
+    let detail = "Visual error: original error: \u{4e2d}\u{6587}\nscript:42";
+    assert_eq!(status_message(false, detail), detail);
+    assert_eq!(status_message(true, detail), "可视化错误：original error: 中文\nscript:42");
+    assert_eq!(status_message(true, "Visual failed: syntax:42"), "可视化加载失败：syntax:42");
+    assert_eq!(status_message(true, "Loading visual…"), "正在加载可视化…");
+    assert_eq!(status_message(true, "Visual unavailable"), "无法显示可视化");
+    assert_eq!(status_message(true, "A user-authored visual title"), "A user-authored visual title");
+}

@@ -372,6 +372,9 @@ enum Cmd {
     Appearance {
         dark: bool,
     },
+    Locale {
+        chinese: bool,
+    },
     Pointer {
         surface: u64,
         phase: PointerPhase,
@@ -418,6 +421,10 @@ impl VisualSession {
 
     fn send(&self, cmd: Cmd) {
         let _ = self.tx.lock().unwrap().send(cmd);
+    }
+
+    pub(crate) fn set_locale(&self, chinese: bool) {
+        self.send(Cmd::Locale { chinese });
     }
 }
 
@@ -470,6 +477,28 @@ impl VisualSession {
 
 /// Frames for animated surfaces come this often at most.
 const FRAME: Duration = Duration::from_micros(16_667);
+
+fn status_message(chinese: bool, message: &str) -> std::borrow::Cow<'_, str> {
+    use std::borrow::Cow;
+    if !chinese {
+        return Cow::Borrowed(message);
+    }
+    match message {
+        "Loading visual…" => Cow::Borrowed("正在加载可视化…"),
+        "Visual unavailable" => Cow::Borrowed("无法显示可视化"),
+        _ => {
+            for (english, chinese) in [
+                ("Visual failed: ", "可视化加载失败："),
+                ("Visual error: ", "可视化错误："),
+            ] {
+                if let Some(detail) = message.strip_prefix(english) {
+                    return Cow::Owned(format!("{chinese}{detail}"));
+                }
+            }
+            Cow::Borrowed(message)
+        }
+    }
+}
 /// GPU surfaces render at most this dense (3× phones would quadruple the
 /// pixels for little visible gain, and every frame crosses to the platform).
 const MAX_GPU_SCALE: f32 = 2.0;
@@ -570,6 +599,7 @@ struct Worker {
     width: f32,
     scale: f32,
     palette: Palette,
+    chinese: bool,
     reduce_motion: bool,
     laid: Laid,
     revision: u64,
@@ -608,6 +638,7 @@ impl Worker {
             width: 0.0,
             scale: 1.0,
             palette: Palette::new(false),
+            chinese: false,
             reduce_motion: false,
             laid: Laid::default(),
             revision: 0,
@@ -695,6 +726,12 @@ impl Worker {
                 Cmd::Appearance { dark } => {
                     if self.palette.dark != dark {
                         self.palette = Palette::new(dark);
+                        relayout = true;
+                    }
+                }
+                Cmd::Locale { chinese } => {
+                    if self.chinese != chinese {
+                        self.chinese = chinese;
                         relayout = true;
                     }
                 }
@@ -807,12 +844,13 @@ impl Worker {
     }
 
     fn status(&mut self, message: &str, color: Rgba, laid: &mut Laid, y: f32) -> f32 {
+        let message = status_message(self.chinese, message);
         let mut ctx = TextCtx {
             typo: &mut self.typo,
             cache: &mut self.cache,
         };
         let para = ctx.line(
-            message,
+            &message,
             Face::new(rcode_visual::TextSize::Sm, rcode_visual::Weight::Regular),
             color,
         );

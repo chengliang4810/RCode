@@ -267,6 +267,15 @@ struct Config {
     dark: bool,
     #[serde(default)]
     reduce_motion: bool,
+    #[serde(default)]
+    locale: String,
+}
+
+fn chinese(locale: &str) -> bool {
+    locale
+        .split(['-', '_'])
+        .next()
+        .is_some_and(|language| language.eq_ignore_ascii_case("zh"))
 }
 fn identifier(value: &Value) -> Option<u64> {
     value.as_u64().or_else(|| value.as_str()?.parse().ok())
@@ -334,6 +343,7 @@ pub unsafe extern "C" fn rcode_visual_create(config: *const c_char) -> u64 {
         let slot = VisualSlot::new(&config.id, &config.path, &config.title);
         hub.ensure(&slot, 1, config.width, config.text_scale.clamp(0.5, 3.0));
         let session = hub.session(&config.id).expect("visual worker created");
+        session.set_locale(chinese(&config.locale));
         session.attach(shared.clone(), config.dark, config.reduce_motion);
         let id = NEXT.fetch_add(1, Ordering::Relaxed);
         lock(instances()).insert(
@@ -462,6 +472,9 @@ pub unsafe extern "C" fn rcode_visual_command(id: u64, command: *const c_char) {
             Some("appearance") => instance
                 .session
                 .set_appearance(value["dark"].as_bool().unwrap_or(false)),
+            Some("locale") => instance
+                .session
+                .set_locale(chinese(value["locale"].as_str().unwrap_or("en"))),
             Some("activate") => instance
                 .session
                 .activate(identifier(&value["control"]).unwrap_or(0)),
@@ -680,6 +693,10 @@ mod tests {
         let control = initial["controls"][0]["id"].clone();
         assert!(identifier(&control).unwrap() > i64::MAX as u64);
         command(id, json!({"op":"activate","control":control}));
+        display(id, "Count 1");
+        command(id, json!({"op":"locale","locale":"zh-Hans"}));
+        display(id, "Count 1");
+        command(id, json!({"op":"locale","locale":"en"}));
         display(id, "Count 1");
         let polling = std::thread::spawn(move || {
             for _ in 0..200 {
