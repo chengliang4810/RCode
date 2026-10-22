@@ -67,6 +67,7 @@ struct AgentTask {
 
 #[derive(Default)]
 pub struct AgentTaskStore {
+    processes: Option<(String, Arc<crate::processes::ProcessRegistry>)>,
     tasks: Mutex<HashMap<String, AgentTask>>,
     changed: Notify,
     runtime_cancel: Mutex<CancellationToken>,
@@ -74,8 +75,31 @@ pub struct AgentTaskStore {
 }
 
 impl AgentTaskStore {
+    pub fn with_processes(chat_id: String, registry: Arc<crate::processes::ProcessRegistry>) -> Self {
+        Self { processes: Some((chat_id, registry)), ..Default::default() }
+    }
+
+    /// Child agents keep their existing foreground-only Bash contract, but
+    /// detached services still belong to the parent conversation's manager.
+    pub fn track_shell(&self, tool: Arc<dyn Tool>) -> Arc<dyn Tool> {
+        match &self.processes {
+            Some((chat, registry)) => Arc::new(crate::processes::TrackedShell {
+                tool, chat: chat.clone(), registry: registry.clone(),
+            }),
+            None => tool,
+        }
+    }
+
+    fn stop_shell_from_ui(&self, id: &str) {
+        if let Some(task) = self.tasks.lock().unwrap().get_mut(id) {
+            task.notified = task.generation;
+            if task.status == "running" { task.status = "stopping"; }
+            task.cancel.cancel();
+        }
+        self.changed.notify_waiters();
+    }
     pub fn background(&self, tool_use_id: &str) -> bool {
-        let count = {
+        let (count, id) = {
             let mut tasks = self.tasks.lock().unwrap();
             let Some(task) = tasks
                 .values_mut()
@@ -87,11 +111,14 @@ impl AgentTaskStore {
                 return false;
             }
             task.background = true;
-            tasks
+            let id = task.id.clone();
+            let count = tasks
                 .values()
                 .filter(|task| task.background && matches!(task.status, "running" | "stopping"))
-                .count()
+                .count();
+            (count, id)
         };
+        if let Some((_, registry)) = &self.processes { registry.background(&id); }
         if let Some(report) = self.report_background.lock().unwrap().as_ref() {
             report(count);
         }
@@ -932,6 +959,21 @@ impl Tool for ManagedShell {
         self.tasks.changed();
         let tasks = self.tasks.clone();
         let task_id = id.clone();
+        let registration = self.tasks.store.processes.as_ref().map(|(chat_id, registry)| {
+            let store = Arc::downgrade(&self.tasks.store);
+            let stop_id = id.clone();
+            crate::processes::Registration {
+                registry: registry.clone(),
+                record: crate::processes::ProcessRecord {
+                    id: id.clone(), chat_id: chat_id.clone(), command: command.to_owned(),
+                    cwd: ctx.cwd.clone(), pid: 0,
+                    job_name: format!("Local\\RCode.Command.{}", uuid::Uuid::new_v4()),
+                    background,
+                    members: Vec::new(), recovered: false,
+                },
+                stop: Arc::new(move || { if let Some(store) = store.upgrade() { store.stop_shell_from_ui(&stop_id); } }),
+            }
+        });
         let ctx_owned = ToolContext {
             cwd: ctx.cwd.clone(),
             cancel,
@@ -946,13 +988,19 @@ impl Tool for ManagedShell {
             let _ = file.write_all(text.as_bytes());
         });
         tokio::spawn(async move {
-            let result = std::panic::AssertUnwindSafe(crate::tools::bash::execute_with_shell(
+            let execution = crate::tools::bash::execute_with_shell(
                 shell,
                 input,
                 &ctx_owned,
                 false,
                 Some(progress.clone()),
-            ))
+            );
+            let result = std::panic::AssertUnwindSafe(async {
+                match registration {
+                    Some(registration) => crate::processes::REGISTRATION.scope(registration, execution).await,
+                    None => execution.await,
+                }
+            })
             .catch_unwind()
             .await
             .unwrap_or_else(|_| Err(ToolError::Execution("The shell task panicked".into())));

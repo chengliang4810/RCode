@@ -78,6 +78,31 @@ async fn start(tools: &ToolRegistry, ctx: &ToolContext, background: bool) -> Val
 }
 
 #[tokio::test]
+async fn sidebar_stop_suppresses_background_model_notifications() {
+    let dir = tempfile::tempdir().unwrap();
+    let processes = Arc::new(rcode_agent::processes::ProcessRegistry::open(Some(dir.path())));
+    let manager = Arc::new(AgentTasks::new(
+        Arc::new(AgentTaskStore::with_processes("chat".into(), processes.clone())),
+        Arc::new(Runtime::default()),
+    ));
+    let mut tools = ToolRegistry::new();
+    tools.register(Arc::new(rcode_agent::tools::BashTool));
+    tools.set_managed_agents(manager.clone());
+    let ctx = ToolContext { cwd: dir.path().into(), cancel: CancellationToken::new(), nested: None };
+    let command = if cfg!(windows) { "Start-Sleep -Seconds 120" } else { "sleep 120" };
+    let task = call(&tools, "Bash", json!({"command":command,"run_in_background":true}), &ctx).await;
+    let id = task["backgroundTaskId"].as_str().unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        while processes.list("chat").is_empty() { tokio::time::sleep(std::time::Duration::from_millis(20)).await; }
+    }).await.unwrap();
+    assert!(processes.stop("chat", id).unwrap());
+    tokio::time::timeout(std::time::Duration::from_secs(10), manager.wait_for_idle()).await.unwrap();
+    assert!(!manager.has_notifications(), "manual stop must not wake the parent model");
+    assert!(manager.notifications().is_empty());
+    assert_eq!(call(&tools, "TaskOutput", json!({"task_id":id,"block":false}), &ctx).await["task"]["status"], "stopped");
+}
+
+#[tokio::test]
 async fn agent_is_the_only_spawn_entry_and_task_is_not_resolved_or_executed() {
     let runtime = Arc::new(Runtime::default());
     let (_, tools, ctx) = setup(runtime.clone());

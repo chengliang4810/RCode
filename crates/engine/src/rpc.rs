@@ -1447,6 +1447,8 @@ fn forwardable(method: &str) -> bool {
             | methods::SET_PLUGIN_ENABLED
             | methods::UNINSTALL_PLUGIN
             | methods::BACKGROUND_SUBAGENT
+            | methods::LIST_COMMAND_PROCESSES
+            | methods::STOP_COMMAND_PROCESS
             | methods::CANCEL_SUBAGENT
             | methods::UPDATE_GOAL
             | methods::LIST_MCP_SERVERS
@@ -2080,6 +2082,25 @@ impl RpcService for EngineRpc {
                 let backgrounded = self.registry.resolve(HarnessId::Native).map_err(|e| RpcError::Failed(e.to_string()))?
                     .background_subagent(&p.chat_id, &p.parent_tool_use_id);
                 RpcReply::value(&serde_json::json!({"backgrounded":backgrounded}))
+            }
+            methods::STOP_ALL_COMMAND_PROCESSES => {
+                self.registry.resolve(HarnessId::Native).map_err(|e| RpcError::Failed(e.to_string()))?
+                    .stop_all_command_processes().map_err(RpcError::Failed)?;
+                RpcReply::value(&serde_json::json!({"stopped":true}))
+            }
+            methods::LIST_COMMAND_PROCESSES | methods::STOP_COMMAND_PROCESS => {
+                #[derive(Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct Params { chat_id: String, #[serde(default)] id: Option<String> }
+                let p: Params = parse_params(params)?;
+                let harness = self.registry.resolve(HarnessId::Native).map_err(|e| RpcError::Failed(e.to_string()))?;
+                if method == methods::LIST_COMMAND_PROCESSES {
+                    RpcReply::value(&harness.list_command_processes(&p.chat_id))
+                } else {
+                    let id = p.id.ok_or_else(|| RpcError::Failed("missing process id".into()))?;
+                    let stopped = harness.stop_command_process(&p.chat_id, &id).map_err(RpcError::Failed)?;
+                    RpcReply::value(&serde_json::json!({"stopped": stopped}))
+                }
             }
             methods::CANCEL_SUBAGENT => {
                 #[derive(Deserialize)]

@@ -310,6 +310,11 @@ pub trait Harness: Send + Sync {
     /// touching the conversation that spawned it or its siblings.
     fn background_subagent(&self, _chat_id: &str, _tool_use_id: &str) -> bool { false }
 
+    fn list_command_processes(&self, _chat_id: &str) -> serde_json::Value { serde_json::json!([]) }
+    fn stop_command_process(&self, _chat_id: &str, _id: &str) -> Result<bool, String> { Ok(false) }
+    fn shutdown_command_processes(&self) {}
+    fn stop_all_command_processes(&self) -> Result<(), String> { Ok(()) }
+
     fn cancel_subagent(&self, _tool_use_id: &str) -> bool {
         false
     }

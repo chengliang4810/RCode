@@ -19,6 +19,7 @@ pub mod message;
 pub mod runner;
 pub mod goal;
 pub mod agent_tasks;
+pub mod processes;
 pub mod skills;
 pub mod subagents;
 pub mod tool;

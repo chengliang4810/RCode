@@ -94,6 +94,7 @@ pub struct NativeHarness {
     subagent_limits: Arc<tokio::sync::Semaphore>,
     /// Every live subagent of every run, so a stop can name one tool call.
     active_subagents: Arc<crate::native_subagents::ActiveSubagents>,
+    command_processes: Arc<std::sync::OnceLock<Arc<rcode_agent::processes::ProcessRegistry>>>,
     agent_task_stores: Arc<std::sync::Mutex<std::collections::HashMap<String, Arc<rcode_agent::agent_tasks::AgentTaskStore>>>>,
     /// Healthy connections keyed by project and effective configuration.
     /// Each run keeps its snapshot while later runs see settings changes.
@@ -102,6 +103,10 @@ pub struct NativeHarness {
 }
 
 impl NativeHarness {
+    fn command_process_registry(&self) -> Arc<rcode_agent::processes::ProcessRegistry> {
+        self.command_processes.get_or_init(|| Arc::new(rcode_agent::processes::ProcessRegistry::open(self.data_dir.as_deref()))).clone()
+    }
+
     // Old saved route IDs now resolve only to the current default real model.
     fn configured_model<'a>(&self, selection: &str, live: &'a crate::providers::ProvidersConfig)
         -> Option<(&'a crate::providers::ProviderConfig, &'a crate::providers::ModelConfig)> {
@@ -153,6 +158,7 @@ impl NativeHarness {
             )),
             active_subagents: Arc::new(crate::native_subagents::ActiveSubagents::default()),
             agent_task_stores: Arc::default(),
+            command_processes: Arc::default(),
             mcp: Arc::default(),
             prompt_sessions: Arc::default(),
         }
@@ -238,6 +244,7 @@ impl NativeHarness {
             )),
             active_subagents: Arc::new(crate::native_subagents::ActiveSubagents::default()),
             agent_task_stores: Arc::default(),
+            command_processes: Arc::default(),
             mcp: Arc::default(),
             prompt_sessions: Arc::default(),
         }
@@ -263,6 +270,7 @@ impl NativeHarness {
             )),
             active_subagents: Arc::new(crate::native_subagents::ActiveSubagents::default()),
             agent_task_stores: Arc::default(),
+            command_processes: Arc::default(),
             mcp: Arc::default(),
             prompt_sessions: Arc::default(),
         }
@@ -569,6 +577,17 @@ impl Harness for NativeHarness {
             disallowed_tools,
             crate::native_subagents::parse_model_alias(model)?,
         )
+    }
+
+    fn list_command_processes(&self, chat_id: &str) -> serde_json::Value {
+        serde_json::to_value(self.command_process_registry().list(chat_id)).unwrap_or_default()
+    }
+    fn stop_command_process(&self, chat_id: &str, id: &str) -> Result<bool, String> {
+        self.command_process_registry().stop(chat_id, id).map_err(|e| e.to_string())
+    }
+    fn shutdown_command_processes(&self) { self.command_process_registry().shutdown(); }
+    fn stop_all_command_processes(&self) -> Result<(), String> {
+        self.command_process_registry().stop_all().map_err(|e| e.to_string())
     }
 
     fn background_subagent(&self, chat_id: &str, tool_use_id: &str) -> bool {
@@ -945,7 +964,7 @@ impl NativeHarness {
         let subagent_instructions = Arc::new(std::sync::OnceLock::new());
         let managed = conversation_id.as_ref().map(|id| {
             self.agent_task_stores.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
-                .entry(id.clone()).or_default().clone()
+                .entry(id.clone()).or_insert_with(|| Arc::new(rcode_agent::agent_tasks::AgentTaskStore::with_processes(id.clone(), self.command_process_registry()))).clone()
         });
         let (mut tools, system_prompt, mcp_instructions) = match self.data_dir.as_deref() {
             Some(data_dir) => {

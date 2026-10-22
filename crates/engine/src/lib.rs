@@ -486,6 +486,11 @@ impl EngineCore {
         // recovered work while the engine is being torn down.
         self.doc_host.pause_all_queues();
         self.sessions.shutdown().await;
+        // Also covers recovered processes and servers whose launcher/turn has
+        // already finished. This never requests model input or confirmation.
+        if let Ok(harness) = self.registry.resolve(HarnessId::Native) {
+            harness.shutdown_command_processes();
+        }
         self.terminals.shutdown();
         self.change_requests.shutdown();
         // Cancel + await every worker that can reach Edge before flushing: a

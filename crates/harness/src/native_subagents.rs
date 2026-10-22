@@ -385,6 +385,9 @@ impl NativeSubagents {
                 continue;
             }
             if definition.allows(tool.name()) {
+                let tool = if tool.name() == "Bash" {
+                    self.deps.managed.as_ref().map_or_else(|| tool.clone(), |store| store.track_shell(tool.clone()))
+                } else { tool };
                 child.register(tool);
             }
         }

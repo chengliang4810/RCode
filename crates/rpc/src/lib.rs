@@ -104,6 +104,9 @@ pub mod methods {
     /// replies `{ stopped }`, which is false when nothing was running under
     /// that id (already finished, or a stale tab).
     pub const BACKGROUND_SUBAGENT: &str = "BackgroundSubagent";
+    pub const LIST_COMMAND_PROCESSES: &str = "ListCommandProcesses";
+    pub const STOP_COMMAND_PROCESS: &str = "StopCommandProcess";
+    pub const STOP_ALL_COMMAND_PROCESSES: &str = "StopAllCommandProcesses";
     pub const CANCEL_SUBAGENT: &str = "CancelSubagent";
     pub const UPDATE_GOAL: &str = "UpdateGoal";
     /// Installed plugins and what each contributes (Settings → Plugins).

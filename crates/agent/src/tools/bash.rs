@@ -227,6 +227,23 @@ pub(crate) async fn execute_with_shell(
                 )));
             }
             _ = tokio::time::sleep_until(drain_deadline.unwrap_or(deadline)), if drain_deadline.is_some() => {
+                if tree.managed.is_some() {
+                    // The launcher is gone but a registered service still owns
+                    // inherited pipe handles. Retain OS ownership in the
+                    // registry and drain without holding up the tool result.
+                    let out = stdout.take();
+                    let err = stderr.take();
+                    tokio::spawn(async move {
+                        let drain_out = async move {
+                            if let Some(mut pipe) = out { let _ = tokio::io::copy(&mut pipe, &mut tokio::io::sink()).await; }
+                        };
+                        let drain_err = async move {
+                            if let Some(mut pipe) = err { let _ = tokio::io::copy(&mut pipe, &mut tokio::io::sink()).await; }
+                        };
+                        tokio::join!(drain_out, drain_err);
+                    });
+                    break exit_status.expect("drain deadline follows launcher exit");
+                }
                 stop_process_tree(&mut child, &mut tree).await;
                 return Err(ToolError::Execution(
                     "command exited but its inherited output pipes did not close within 2s; \
@@ -421,13 +438,14 @@ impl BoundedOutput {
 /// Windows: the child joins a Job Object with kill-on-close; terminating the
 /// job takes the whole tree.
 struct ProcessTree {
+    managed: Option<(std::sync::Arc<crate::processes::ProcessRegistry>, String)>,
     /// Set once the command finished cleanly, so `Drop` does not kill a job
     /// that already exited.
     disarmed: bool,
     #[cfg(unix)]
     group: Option<i32>,
     #[cfg(windows)]
-    job: Option<JoinJob>,
+    job: Option<std::sync::Arc<JoinJob>>,
 }
 
 impl ProcessTree {
@@ -435,10 +453,19 @@ impl ProcessTree {
     fn new(child: &mut tokio::process::Child) -> std::io::Result<Self> {
         // The process group was created at spawn (`process_group(0)`), so the
         // child's pid is also the group id, and a negative pid addresses it.
-        Ok(Self {
+        let mut tree = Self {
+            managed: None,
             disarmed: false,
             group: child.id().map(|pid| -(pid as i32)),
-        })
+        };
+        if let Ok(result) = crate::processes::REGISTRATION.try_with(|registration| {
+            let mut record = registration.record.clone();
+            record.pid = child.id().ok_or_else(|| std::io::Error::other("missing child pid"))?;
+            let control = crate::processes::Control::Group { pid: record.pid, members: std::sync::Mutex::new(crate::processes::group_members(record.pid)?) };
+            registration.registry.register(record.clone(), control, registration.stop.clone())?;
+            Ok::<_, std::io::Error>((registration.registry.clone(), record.id))
+        }) { tree.managed = Some(result?); }
+        Ok(tree)
     }
 
     #[cfg(windows)]
@@ -449,10 +476,22 @@ impl ProcessTree {
         let pid = child
             .id()
             .ok_or_else(|| std::io::Error::other("the suspended child has no process ID"))?;
-        let job = JoinJob::create()?;
+        let name = crate::processes::REGISTRATION.try_with(|registration| registration.record.job_name.clone()).ok();
+        let job = std::sync::Arc::new(JoinJob::create_named(name.as_deref())?);
         job.assign(process)?;
+        // Persist ownership before user code can create descendants. Leave
+        // kill-on-close armed until the journal is safely on disk.
+        let managed = crate::processes::REGISTRATION.try_with(|registration| {
+            let mut record = registration.record.clone();
+            record.pid = pid;
+            registration.registry.register(record.clone(), crate::processes::Control::Job(job.clone()), registration.stop.clone())?;
+            job.retain_in_members()?;
+            job.release_descendants()?;
+            Ok::<_, std::io::Error>((registration.registry.clone(), record.id))
+        }).ok().transpose()?;
         resume_suspended_leader(pid)?;
         Ok(Self {
+            managed,
             disarmed: false,
             job: Some(job),
         })
@@ -474,6 +513,16 @@ impl ProcessTree {
     /// The command exited on its own; nothing to kill.
     fn disarm(&mut self) {
         self.disarmed = true;
+        if let Some((registry, id)) = &self.managed {
+            #[cfg(windows)]
+            if let Some(job) = &self.job {
+                if let Err(error) = job.retain_in_members() {
+                    tracing::warn!(%error, "could not retain recovery handle in command descendants");
+                }
+            }
+            registry.refresh(id);
+            return;
+        }
         #[cfg(unix)]
         {
             self.group = None;
@@ -580,7 +629,7 @@ impl Drop for ProcessTree {
 /// makes the tree — including grandchildren the shell never tracked —
 /// reachable from one handle.
 #[cfg(windows)]
-struct JoinJob {
+pub(crate) struct JoinJob {
     handle: std::os::windows::io::OwnedHandle,
 }
 
@@ -589,7 +638,7 @@ use std::os::windows::io::AsRawHandle as _;
 
 #[cfg(windows)]
 impl JoinJob {
-    fn create() -> std::io::Result<Self> {
+    fn create_named(name: Option<&str>) -> std::io::Result<Self> {
         use std::os::windows::io::FromRawHandle;
         use windows_sys::Win32::System::JobObjects::{
             CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
@@ -598,7 +647,8 @@ impl JoinJob {
         };
 
         // SAFETY: null attributes create an unnamed, non-inheritable job.
-        let handle = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+        let name = name.map(|name| name.encode_utf16().chain(Some(0)).collect::<Vec<_>>());
+        let handle = unsafe { CreateJobObjectW(std::ptr::null(), name.as_ref().map_or(std::ptr::null(), |name| name.as_ptr())) };
         if handle.is_null() {
             return Err(std::io::Error::last_os_error());
         }
@@ -621,6 +671,70 @@ impl JoinJob {
             return Err(std::io::Error::last_os_error());
         }
         Ok(Self { handle })
+    }
+
+    pub(crate) fn open(name: &str) -> std::io::Result<Self> {
+        use std::os::windows::io::FromRawHandle;
+        use windows_sys::Win32::System::JobObjects::OpenJobObjectW;
+        use windows_sys::Win32::System::SystemServices::{JOB_OBJECT_QUERY, JOB_OBJECT_TERMINATE};
+        if !name.strip_prefix("Local\\RCode.Command.").is_some_and(|id| uuid::Uuid::parse_str(id).is_ok()) {
+            return Err(std::io::Error::other("invalid command job name"));
+        }
+        let name: Vec<_> = name.encode_utf16().chain(Some(0)).collect();
+        let handle = unsafe { OpenJobObjectW(JOB_OBJECT_QUERY | JOB_OBJECT_TERMINATE, 0, name.as_ptr()) };
+        if handle.is_null() { return Err(std::io::Error::last_os_error()); }
+        Ok(Self { handle: unsafe { std::os::windows::io::OwnedHandle::from_raw_handle(handle) } })
+    }
+
+    pub(crate) fn active(&self) -> std::io::Result<bool> {
+        use windows_sys::Win32::System::JobObjects::{QueryInformationJobObject, JobObjectBasicAccountingInformation, JOBOBJECT_BASIC_ACCOUNTING_INFORMATION};
+        let mut info = JOBOBJECT_BASIC_ACCOUNTING_INFORMATION::default();
+        if unsafe { QueryInformationJobObject(self.handle.as_raw_handle(), JobObjectBasicAccountingInformation, (&mut info as *mut JOBOBJECT_BASIC_ACCOUNTING_INFORMATION).cast(), std::mem::size_of_val(&info) as u32, std::ptr::null_mut()) } == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(info.ActiveProcesses > 0)
+    }
+
+    pub(crate) fn stop(&self) -> std::io::Result<()> {
+        if unsafe { windows_sys::Win32::System::JobObjects::TerminateJobObject(self.handle.as_raw_handle(), 1) } == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    /// Keep the named job reachable after the host is forcibly terminated.
+    /// Windows removes a job's name when its last handle closes even when its
+    /// processes survive. Each live member receives an inheritable reference;
+    /// the OS closes that reference when the member exits. Manual/normal-exit
+    /// termination still targets the entire job, including these references.
+    fn retain_in_members(&self) -> std::io::Result<()> {
+        use std::os::windows::io::{FromRawHandle, OwnedHandle};
+        use windows_sys::Win32::Foundation::{DuplicateHandle, DUPLICATE_SAME_ACCESS, ERROR_MORE_DATA};
+        use windows_sys::Win32::System::JobObjects::{IsProcessInJob, QueryInformationJobObject, JobObjectBasicProcessIdList, JOBOBJECT_BASIC_PROCESS_ID_LIST};
+        use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcess, PROCESS_DUP_HANDLE, PROCESS_QUERY_LIMITED_INFORMATION};
+        let mut storage = vec![0usize; 64];
+        loop {
+            let ok = unsafe { QueryInformationJobObject(self.handle.as_raw_handle(), JobObjectBasicProcessIdList, storage.as_mut_ptr().cast(), (storage.len() * std::mem::size_of::<usize>()) as u32, std::ptr::null_mut()) };
+            if ok != 0 { break; }
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() != Some(ERROR_MORE_DATA as i32) || storage.len() >= 1_048_576 { return Err(error); }
+            storage.resize(storage.len() * 2, 0);
+        }
+        let info = unsafe { &*storage.as_ptr().cast::<JOBOBJECT_BASIC_PROCESS_ID_LIST>() };
+        let pids = unsafe { std::slice::from_raw_parts(info.ProcessIdList.as_ptr(), info.NumberOfProcessIdsInList as usize) };
+        for pid in pids {
+            let handle = unsafe { OpenProcess(PROCESS_DUP_HANDLE | PROCESS_QUERY_LIMITED_INFORMATION, 0, *pid as u32) };
+            if handle.is_null() { continue; } // The member may have just exited.
+            let process = unsafe { OwnedHandle::from_raw_handle(handle) };
+            let mut member = 0;
+            if unsafe { IsProcessInJob(process.as_raw_handle(), self.handle.as_raw_handle(), &mut member) } == 0 || member == 0 { continue; }
+            let mut remote = std::ptr::null_mut();
+            if unsafe { DuplicateHandle(GetCurrentProcess(), self.handle.as_raw_handle(), process.as_raw_handle(), &mut remote, 0, 1, DUPLICATE_SAME_ACCESS) } == 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            // `remote` belongs to the member process, not this process.
+        }
+        Ok(())
     }
 
     fn assign(&self, process: std::os::windows::io::RawHandle) -> std::io::Result<()> {
