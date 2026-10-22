@@ -37,7 +37,7 @@ void main() {
         return function() return ui.column {
           ui.text("Count "..s.n),
           ui.button {key="native-control",label="Add",on_click=function() s.n=s.n+1 end},
-          ui.canvas {height=80,draw=function(g) g:rect(0,0,20,20,"#ff0000") end},
+          ui.canvas {height=80,draw=function(g) g:rect(0,0,20,20,{fill="danger"}) end},
         } end
       ''';
         server.listen((request) async {
@@ -89,13 +89,19 @@ void main() {
             'dark': false,
             'reduceMotion': true,
           });
+          final surfaces = <String, Map<String, dynamic>>{};
           Future<Map<String, dynamic>> display(
             String text, {
             double? width,
           }) async {
             final deadline = DateTime.now().add(const Duration(seconds: 10));
+            Map<String, dynamic>? frame;
             while (DateTime.now().isBefore(deadline)) {
               final update = backend!.poll();
+              for (final surface in (update?['frames'] as List? ?? [])) {
+                final row = (surface as Map).cast<String, dynamic>();
+                surfaces[row['surface'] as String] = row;
+              }
               for (final request in (update?['measurements'] as List? ?? [])) {
                 final painter = TextPainter(
                   text: TextSpan(
@@ -117,19 +123,34 @@ void main() {
                 });
                 painter.dispose();
               }
-              final frame = update?['display'] as Map<String, dynamic>?;
+              frame = update?['display'] as Map<String, dynamic>? ?? frame;
               if (frame != null &&
                   (frame['paint']['text'] as String).contains(text) &&
-                  (width == null || frame['width'] == width)) {
+                  (width == null || frame['width'] == width) &&
+                  surfaces.isNotEmpty) {
                 return frame;
               }
               await Future<void>.delayed(const Duration(milliseconds: 10));
             }
-            fail('The native display did not reach $text');
+            fail(
+              'The native display did not reach $text: '
+              '${jsonEncode({'display': frame, 'surfaces': surfaces, 'reads': reads})}',
+            );
           }
 
           final first = await display('Count 0');
           expect(first['surfaces'], isNotEmpty);
+          final canvas = surfaces[first['surfaces'][0]['id']]!['paint'] as Map;
+          expect(canvas['text'], isEmpty, reason: 'canvas draw has no error');
+          final shape = (canvas['shapes'] as List).single as Map;
+          expect(shape['kind'], 'path');
+          expect(shape['closed'], isTrue);
+          expect(shape['points'], [0, 0, 20, 0, 20, 20, 0, 20]);
+          final fill = shape['fill'] as Map;
+          expect(fill['r'], closeTo(220 / 255, 0.00001));
+          expect(fill['g'], closeTo(38 / 255, 0.00001));
+          expect(fill['b'], closeTo(38 / 255, 0.00001));
+          expect(fill['a'], 1);
           final control = first['controls'][0]['id'];
           expect(control, isA<String>());
           expect(
