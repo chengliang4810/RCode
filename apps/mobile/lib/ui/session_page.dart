@@ -57,16 +57,19 @@ class _SessionPageState extends State<SessionPage> {
   GlobalKey _tailKey = GlobalKey();
   double _runway = 0, _transcriptHeight = 0;
   bool _followScheduled = false;
-  late final String _draftKey;
+  late final HostDraft _draft;
   @override
   void initState() {
     super.initState();
-    _draftKey = 'draft.${widget.workspace.cacheScope}.${widget.chatId}';
+    _draft = widget.preferences.captureHostDraft(
+      widget.workspace.cacheScope,
+      chatId: widget.chatId,
+    );
     _visualScope = '${widget.workspace.cacheScope}:${widget.chatId}';
     _session = widget.workspace.retainSession(widget.chatId);
     widget.preferences.addListener(_preferencesChanged);
     _session.addListener(_changed);
-    _text.text = '${widget.preferences.getJson(_draftKey)?['text'] ?? ''}';
+    _text.text = '${_draft.value?['text'] ?? ''}';
     _text.addListener(_edited);
     _focus.addListener(_focusChanged);
     _scroll.addListener(_scrolled);
@@ -121,8 +124,7 @@ class _SessionPageState extends State<SessionPage> {
     final draft = _text.text;
     _save = Timer(
       const Duration(milliseconds: 350),
-      () =>
-          widget.preferences.setJson(_draftKey, {'text': draft}, notify: false),
+      () => _draft.save({'text': draft}),
     );
     _search?.cancel();
     final cursor = _text.selection.baseOffset;
@@ -420,9 +422,7 @@ class _SessionPageState extends State<SessionPage> {
     for (final attachment in outgoing) {
       _attachments.remove(attachment);
     }
-    await widget.preferences.setJson(_draftKey, {
-      'text': _text.text,
-    }, notify: false);
+    await _draft.save({'text': _text.text});
     _scheduleFollow();
   }
 
@@ -533,11 +533,7 @@ class _SessionPageState extends State<SessionPage> {
     _save?.cancel();
     _search?.cancel();
     ++_searchGeneration;
-    unawaited(
-      widget.preferences.setJson(_draftKey, {
-        'text': _text.text,
-      }, notify: false),
-    );
+    unawaited(_draft.save({'text': _text.text}));
     _session.removeListener(_changed);
     unawaited(_prWatch?.cancel());
     widget.preferences.removeListener(_preferencesChanged);

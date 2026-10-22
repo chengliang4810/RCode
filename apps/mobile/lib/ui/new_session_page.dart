@@ -60,7 +60,7 @@ class _NewSessionPageState extends State<NewSessionPage> {
   final List<UploadAttachment> _attachments = [];
   static final Map<String, List<Map<String, dynamic>>> _modelCache = {};
 
-  String get _draftKey => 'newSession.${widget.workspace.cacheScope}';
+  late final HostDraft _draft;
   Map<String, dynamic>? get _project => widget.workspace.spaces
       .where((space) => space['id'] == _projectId)
       .firstOrNull;
@@ -76,7 +76,8 @@ class _NewSessionPageState extends State<NewSessionPage> {
   @override
   void initState() {
     super.initState();
-    final draft = widget.preferences.getJson(_draftKey) ?? {};
+    _draft = widget.preferences.captureHostDraft(widget.workspace.cacheScope);
+    final draft = _draft.value ?? {};
     _projectId = draft['projectId'] as String?;
     _deviceId =
         draft['deviceId'] as String? ??
@@ -132,7 +133,7 @@ class _NewSessionPageState extends State<NewSessionPage> {
   void _persistDraft() {
     if (_created) return;
     unawaited(
-      widget.preferences.setJson(_draftKey, {
+      _draft.save({
         'projectId': _projectId,
         'deviceId': _deviceId,
         'harness': _harness,
@@ -141,7 +142,7 @@ class _NewSessionPageState extends State<NewSessionPage> {
         'branch': _branch,
         'worktree': _worktree,
         'text': _text.text,
-      }, notify: false),
+      }),
     );
   }
 
@@ -588,7 +589,7 @@ class _NewSessionPageState extends State<NewSessionPage> {
         );
       }
       _created = true;
-      await widget.preferences.setJson(_draftKey, {
+      await _draft.save({
         'projectId': _projectId,
         'deviceId': _deviceId,
         'harness': _harness,
@@ -597,7 +598,7 @@ class _NewSessionPageState extends State<NewSessionPage> {
         'branch': _branch,
         'worktree': _worktree,
         'text': '',
-      }, notify: false);
+      });
       if (!mounted) return;
       await requestNotificationsAfterFirstSession(widget.preferences);
       if (!mounted) return;

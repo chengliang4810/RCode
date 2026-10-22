@@ -10,6 +10,52 @@ class AppPreferences extends ChangeNotifier {
   static Future<AppPreferences> load() async =>
       AppPreferences(await SharedPreferences.getInstance());
   static const _prefix = 'rcode.flutter.';
+  static final Map<String, int> _draftEpochs = {};
+  static Future<void>? _draftWrites;
+
+  HostDraft captureHostDraft(String scope, {String? chatId}) => HostDraft._(
+    this,
+    scope,
+    chatId == null ? 'newSession.$scope' : 'draft.$scope.$chatId',
+    _draftEpochs[scope] ?? 0,
+  );
+
+  static Future<void> _serializeDraft(Future<void> Function() operation) {
+    final previous = _draftWrites;
+    final task = previous == null
+        ? operation()
+        : previous.catchError((Object _) {}).then((_) => operation());
+    _draftWrites = task;
+    void completed() {
+      if (identical(_draftWrites, task)) _draftWrites = null;
+    }
+
+    task.then<void>(
+      (_) => completed(),
+      onError: (Object _, StackTrace _) => completed(),
+    );
+    return task;
+  }
+
+  /// Revoke existing page writers immediately, then remove only this host's
+  /// drafts after preceding writes finish. A repaired pairing opens new leases.
+  static Future<void> forgetHostDrafts(String scope) {
+    _draftEpochs.update(scope, (epoch) => epoch + 1, ifAbsent: () => 1);
+    return _serializeDraft(() async {
+      final storage = await SharedPreferences.getInstance();
+      for (final key
+          in storage
+              .getKeys()
+              .where(
+                (key) =>
+                    key == '${_prefix}newSession.$scope' ||
+                    key.startsWith('${_prefix}draft.$scope.'),
+              )
+              .toList()) {
+        await storage.remove(key);
+      }
+    });
+  }
 
   ThemeMode get themeMode =>
       switch (_storage.getString('${_prefix}themeMode')) {
@@ -76,4 +122,20 @@ class AppPreferences extends ChangeNotifier {
     }
     notifyListeners();
   }
+}
+
+/// A page's host and generation are fixed even if its shared workspace changes.
+class HostDraft {
+  HostDraft._(this._preferences, this.scope, this.key, this._epoch);
+  final AppPreferences _preferences;
+  final String scope, key;
+  final int _epoch;
+  bool get _valid => _epoch == (AppPreferences._draftEpochs[scope] ?? 0);
+  Map<String, dynamic>? get value => _valid ? _preferences.getJson(key) : null;
+
+  Future<void> save(Map<String, dynamic>? value) =>
+      AppPreferences._serializeDraft(() async {
+        if (!_valid) return;
+        await _preferences.setJson(key, value, notify: false);
+      });
 }

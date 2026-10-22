@@ -7,6 +7,7 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:uuid/uuid.dart';
 
+import '../preferences.dart' show AppPreferences;
 import 'rpc_client.dart';
 import 'session_controller.dart';
 import 'session_cache.dart';
@@ -235,10 +236,11 @@ class WorkspaceController extends ChangeNotifier {
     _cacheDebounce?.cancel();
     final previous = host;
     final previousScope = cacheScope;
-    final cleanup = forget && previous != null && cacheEnabled
+    final cleanup = forget && previous != null
         ? Future.wait([
-            sessionCache.clearHost(previousScope),
-            _clearPreferenceCache(previousScope),
+            if (cacheEnabled) sessionCache.clearHost(previousScope),
+            if (cacheEnabled) _clearPreferenceCache(previousScope),
+            AppPreferences.forgetHostDrafts(previousScope),
           ]).catchError((Object _) => <void>[])
         : Future<void>.value();
     host = null;
