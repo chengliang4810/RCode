@@ -118,6 +118,43 @@ void main() {
   );
 
   testWidgets(
+    'conversation actions can pin and unpin without leaving the conversation',
+    (tester) async {
+      workspace.session('chat').hydrated = true;
+      await tester.pumpWidget(
+        app(
+          SessionPage(
+            workspace: workspace,
+            chatId: 'chat',
+            preferences: preferences,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.byTooltip('Conversation actions'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Pin'));
+      await tester.pumpAndSettle();
+      expect(workspace.calls.last.params['change'], {
+        'action': 'pin',
+        'sessionId': 'chat',
+      });
+      workspace.sidebarPreferences = {
+        'pinnedSessionIds': ['chat'],
+      };
+      await tester.tap(find.byTooltip('Conversation actions'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Unpin'));
+      await tester.pumpAndSettle();
+      expect(workspace.calls.last.params['change'], {
+        'action': 'unpin',
+        'sessionId': 'chat',
+      });
+      await tester.pumpWidget(const SizedBox());
+    },
+  );
+
+  testWidgets(
     'disposing during a host switch saves the draft in its original host scope',
     (tester) async {
       final original = workspace.cacheScope;

@@ -598,6 +598,19 @@ class _SessionPageState extends State<SessionPage> {
               PopupMenuButton<String>(
                 tooltip: context.tr('会话操作', 'Conversation actions'),
                 onSelected: (value) {
+                  if (value == 'pin') {
+                    final pinned =
+                        (widget.workspace.sidebarPreferences['pinnedSessionIds']
+                                    as List? ??
+                                [])
+                            .contains(widget.chatId);
+                    _run(
+                      () => widget.workspace.changeSidebar({
+                        'action': pinned ? 'unpin' : 'pin',
+                        'sessionId': widget.chatId,
+                      }),
+                    );
+                  }
                   if (value == 'copy') {
                     Clipboard.setData(
                       ClipboardData(
@@ -623,6 +636,17 @@ class _SessionPageState extends State<SessionPage> {
                   if (value == 'rename') _rename();
                 },
                 itemBuilder: (_) => [
+                  PopupMenuItem(
+                    value: 'pin',
+                    child: Text(
+                      (widget.workspace.sidebarPreferences['pinnedSessionIds']
+                                      as List? ??
+                                  [])
+                              .contains(widget.chatId)
+                          ? context.tr('取消置顶', 'Unpin')
+                          : context.tr('置顶', 'Pin'),
+                    ),
+                  ),
                   PopupMenuItem(
                     value: 'copy',
                     child: Text(context.tr('复制对话', 'Copy conversation')),
