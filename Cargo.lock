@@ -7514,6 +7514,7 @@ dependencies = [
  "notify 7.0.0",
  "portable-pty",
  "rcode-agent",
+ "rcode-client",
  "rcode-doc",
  "rcode-harness",
  "rcode-mcp",

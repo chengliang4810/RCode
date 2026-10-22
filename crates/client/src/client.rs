@@ -379,6 +379,13 @@ impl ClientInner {
 
     pub(crate) fn room_state(&self, chat_id: &str) -> RoomState {
         let connectivity = self.connectivity();
+        if let Some(direct) = self.direct() {
+            return RoomState {
+                connected: direct.connected() && self.network_online(),
+                retry_at_ms: connectivity.retry_at_ms,
+                degraded: !matches!(connectivity.state, ConnectivityState::Connected),
+            };
+        }
         let degraded = connectivity.degraded_chats.iter().any(|c| c == chat_id);
         match self.session_core(chat_id).and_then(|core| core.room()) {
             Some(room) => RoomState {

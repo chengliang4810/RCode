@@ -4767,8 +4767,9 @@ impl DocHost {
     /// Host side of [`rcode_rpc::methods::RELAY_COMMAND`]: evaluate the
     /// forwarded entry against OUR doc (dedupe/TTL/supersede rules apply
     /// unchanged), claim its client-minted id in the processed ledger, then
-    /// execute. The claim is what makes the doc row arriving later — over
-    /// chat2 sync — a no-op in the drain: exactly-once across both roads.
+    /// execute. The host records the original entry and its outcome so a
+    /// read-only direct viewer can observe acceptance without a chat2 upload.
+    /// The claim makes a later chat2 row a no-op across both delivery paths.
     pub async fn ingest_relayed_command(
         &self,
         chat_id: &str,
@@ -4792,6 +4793,15 @@ impl DocHost {
             None
         };
         let commands = handle.doc.read_commands()?;
+        // A retry cannot replace an entry already accepted under this id.
+        let entry = commands
+            .iter()
+            .find(|current| current.id == entry.id)
+            .cloned()
+            .unwrap_or(entry);
+        if entry.status != SessionCommandStatus::Pending {
+            return Ok("duplicate");
+        }
         let messages = handle.doc.read_entries().unwrap_or_default();
         let current_turn_id = messages.last().map(|m| m.id.clone());
         let turn_is_past = |turn_id: &str| messages.iter().any(|m| m.id == turn_id);
@@ -4819,20 +4829,47 @@ impl DocHost {
         let result = match marked {
             Err(err) => Err(err.into()),
             Ok(false) => Ok("duplicate"),
-            Ok(true) => match disposition {
-                CommandDisposition::Skip => Ok("duplicate"),
-                CommandDisposition::Expired => Ok("expired"),
-                CommandDisposition::Superseded => Ok("superseded"),
-                CommandDisposition::Execute => match {
-                    if _prompt_guard.is_some() {
-                        self.await_earlier_controls(&handle, &entry.id).await;
+            Ok(true) => {
+                // Keep the in-flight claim until the authoritative outcome is
+                // written: the drain must never mistake this pending row for
+                // a process that crashed after its processed-ledger receipt.
+                let recorded = handle.doc.read_commands().and_then(|commands| {
+                    if commands.iter().any(|current| current.id == entry.id) {
+                        Ok(())
+                    } else {
+                        handle.doc.queue_command(&entry)
                     }
-                    self.execute(&sessions, &handle, &entry).await
-                } {
-                    Ok(_) => Ok("executed"),
-                    Err(err) => Err(err),
-                },
-            },
+                });
+                match recorded {
+                    Err(err) => Err(err.into()),
+                    Ok(()) => match disposition {
+                        CommandDisposition::Skip => Ok("duplicate"),
+                        CommandDisposition::Expired => {
+                            self.resolve_command(&handle, &entry.id, SessionCommandStatus::Expired, None);
+                            Ok("expired")
+                        }
+                        CommandDisposition::Superseded => {
+                            self.resolve_command(&handle, &entry.id, SessionCommandStatus::Superseded, None);
+                            Ok("superseded")
+                        }
+                        CommandDisposition::Execute => {
+                            if _prompt_guard.is_some() {
+                                self.await_earlier_controls(&handle, &entry.id).await;
+                            }
+                            match self.execute(&sessions, &handle, &entry).await {
+                                Ok((status, resolution)) => {
+                                    self.resolve_command(&handle, &entry.id, status, resolution.as_deref());
+                                    Ok("executed")
+                                }
+                                Err(err) => {
+                                    self.resolve_command(&handle, &entry.id, SessionCommandStatus::Rejected, Some(&err.to_string()));
+                                    Err(err)
+                                }
+                            }
+                        }
+                    },
+                }
+            }
         };
         lock(&self.inner.executing).remove(&entry.id);
         result
@@ -5516,10 +5553,20 @@ impl DocHost {
         }
         // The caller's snapshot may predate that outcome. Re-read while claims
         // are excluded so a completed answer/Stop cannot become a rejection.
-        let still_pending = handle.doc.read_commands().is_ok_and(|commands| {
-            commands.iter().any(|current| {
-                current.id == snapshot.id && current.status == SessionCommandStatus::Pending
-            })
+        let Ok(commands) = handle.doc.read_commands() else {
+            return false;
+        };
+        // A relayed command's original chat2 row can arrive after its host
+        // outcome. Copy that outcome to the duplicate instead of declaring
+        // the already completed execution a crash.
+        if let Some(settled) = commands.iter().find(|current| {
+            current.id == snapshot.id && current.status != SessionCommandStatus::Pending
+        }) {
+            self.resolve_command(handle, &snapshot.id, settled.status, settled.resolution.as_deref());
+            return true;
+        }
+        let still_pending = commands.iter().any(|current| {
+            current.id == snapshot.id && current.status == SessionCommandStatus::Pending
         });
         if !still_pending {
             return false;
@@ -5543,10 +5590,35 @@ impl DocHost {
         status: SessionCommandStatus,
         resolution: Option<&str>,
     ) {
-        if let Err(err) = handle
-            .doc
-            .set_command_status(command_id, status, resolution)
-        {
+        let write = || -> Result<(), DocError> {
+            let commands = handle.doc.doc().get_list("commands");
+            let encoded = serde_json::to_value(status)?;
+            let status = encoded
+                .as_str()
+                .ok_or_else(|| DocError::Schema("command status not a string".into()))?;
+            let mut found = false;
+            for at in 0..commands.len() {
+                let Some(loro::ValueOrContainer::Container(loro::Container::Map(map))) = commands.get(at) else {
+                    continue;
+                };
+                if !matches!(map.get("id"), Some(loro::ValueOrContainer::Value(loro::LoroValue::String(id))) if id.as_str() == command_id) {
+                    continue;
+                }
+                found = true;
+                map.insert("status", status)?;
+                if let Some(resolution) = resolution {
+                    map.insert("resolution", resolution)?;
+                } else {
+                    map.delete("resolution")?;
+                }
+            }
+            if !found {
+                return Err(DocError::Schema(format!("command {command_id} not found")));
+            }
+            handle.doc.doc().commit();
+            Ok(())
+        };
+        if let Err(err) = write() {
             tracing::warn!(
                 chat = %handle.chat_id,
                 command = %command_id,
