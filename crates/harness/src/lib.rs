@@ -311,6 +311,7 @@ pub trait Harness: Send + Sync {
     fn background_subagent(&self, _chat_id: &str, _tool_use_id: &str) -> bool { false }
 
     fn list_command_processes(&self, _chat_id: &str) -> serde_json::Value { serde_json::json!([]) }
+    fn read_command_output(&self, _chat_id: &str, _id: &str) -> Result<serde_json::Value, String> { Err("command output unavailable".into()) }
     fn stop_command_process(&self, _chat_id: &str, _id: &str) -> Result<bool, String> { Ok(false) }
     fn shutdown_command_processes(&self) {}
     fn stop_all_command_processes(&self) -> Result<(), String> { Ok(()) }

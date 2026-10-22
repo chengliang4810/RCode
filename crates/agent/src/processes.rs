@@ -17,11 +17,23 @@ pub struct ProcessRecord {
     pub pid: u32,
     pub job_name: String,
     #[serde(default)]
+    pub output_path: Option<PathBuf>,
+    #[serde(default = "running_status")]
+    pub status: String,
+    #[serde(default)]
+    pub exit_code: Option<i32>,
+    #[serde(default)]
+    pub rotated: bool,
+    #[serde(default)]
     pub background: bool,
     #[serde(default)]
     pub members: Vec<(u32, String)>,
     #[serde(skip_deserializing)]
     pub recovered: bool,
+}
+
+fn running_status() -> String {
+    "running".into()
 }
 
 pub(crate) struct Registration {
@@ -59,10 +71,19 @@ impl crate::Tool for TrackedShell {
             cancel,
             nested: ctx.nested.clone(),
         };
+        let id = format!("bash_{}", uuid::Uuid::new_v4());
+        let output_path = self
+            .registry
+            .output_path(&id)
+            .map_err(|e| crate::ToolError::Execution(e.to_string()))?;
         let registration = Registration {
             registry: self.registry.clone(),
             record: ProcessRecord {
-                id: format!("bash_{}", uuid::Uuid::new_v4()),
+                id,
+                output_path: Some(output_path),
+                status: running_status(),
+                exit_code: None,
+                rotated: false,
                 chat_id: self.chat.clone(),
                 command: input["command"].as_str().unwrap_or_default().to_owned(),
                 cwd: ctx.cwd.clone(),
@@ -81,6 +102,7 @@ impl crate::Tool for TrackedShell {
 }
 
 pub(crate) enum Control {
+    Finished,
     #[cfg(windows)]
     Job(Arc<crate::tools::bash::JoinJob>),
     #[cfg(unix)]
@@ -92,6 +114,7 @@ pub(crate) enum Control {
 impl Control {
     fn alive(&self) -> std::io::Result<bool> {
         match self {
+            Self::Finished => Ok(false),
             #[cfg(windows)]
             Self::Job(job) => job.active(),
             #[cfg(unix)]
@@ -108,6 +131,7 @@ impl Control {
     }
     fn kill(&self) -> std::io::Result<()> {
         match self {
+            Self::Finished => Ok(()),
             #[cfg(windows)]
             Self::Job(job) => job.stop(),
             #[cfg(unix)]
@@ -133,6 +157,7 @@ struct Entry {
     record: ProcessRecord,
     control: Control,
     stop: Option<Arc<dyn Fn() + Send + Sync>>,
+    launcher_pending: bool,
 }
 #[derive(Default)]
 struct State {
@@ -146,6 +171,23 @@ pub struct ProcessRegistry {
     state: Mutex<State>,
 }
 impl ProcessRegistry {
+    pub fn start_maintenance(self: &Arc<Self>) {
+        let weak = Arc::downgrade(self);
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(async move {
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    let Some(registry) = weak.upgrade() else {
+                        break;
+                    };
+                    if registry.state.lock().unwrap().closed {
+                        break;
+                    }
+                    let _ = tokio::task::spawn_blocking(move || registry.list("")).await;
+                }
+            });
+        }
+    }
     pub fn open(root: Option<&std::path::Path>) -> Self {
         let registry = Self {
             directory: root.map(|p| p.join("command-processes")),
@@ -165,32 +207,38 @@ impl ProcessRegistry {
                         {
                             return Err(std::io::Error::other("invalid process journal identity"));
                         }
-                        #[cfg(windows)]
-                        let control = Control::Job(Arc::new(crate::tools::bash::JoinJob::open(
-                            &record.job_name,
-                        )?));
-                        #[cfg(unix)]
-                        let control = {
-                            let current = group_members(record.pid)?;
-                            if !record.members.iter().any(|member| current.contains(member)) {
+                        let recovered = recover_control(&record);
+                        let control = match recovered {
+                            Ok(control) if control.alive()? => {
+                                record.recovered = true;
+                                record.background = true;
+                                control
+                            }
+                            Ok(_) => Control::Finished,
+                            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                                Control::Finished
+                            }
+                            Err(error) => return Err(error),
+                        };
+                        if matches!(control, Control::Finished) {
+                            if record
+                                .output_path
+                                .as_ref()
+                                .is_none_or(|path| !path.exists())
+                            {
                                 return Err(std::io::Error::from(std::io::ErrorKind::NotFound));
                             }
-                            Control::Group {
-                                pid: record.pid,
-                                members: Mutex::new(current),
-                            }
-                        };
-                        if !control.alive()? {
-                            return Err(std::io::Error::from(std::io::ErrorKind::NotFound));
+                            settle_record(&mut record);
+                            registry.persist(&record)?;
+                            return Ok(()); // Terminal output stays on disk, not in the live registry.
                         }
-                        record.recovered = true;
-                        record.background = true;
                         registry.state.lock().unwrap().entries.insert(
                             record.id.clone(),
                             Entry {
                                 record,
                                 control,
                                 stop: None,
+                                launcher_pending: false,
                             },
                         );
                         Ok(())
@@ -206,6 +254,81 @@ impl ProcessRegistry {
             }
         }
         registry
+    }
+
+    pub fn output_path(&self, id: &str) -> std::io::Result<PathBuf> {
+        if !valid_id(id) {
+            return Err(std::io::Error::other("invalid process id"));
+        }
+        let directory = self
+            .directory
+            .clone()
+            .unwrap_or_else(|| std::env::temp_dir().join("rcode-command-processes"))
+            .join("output");
+        std::fs::create_dir_all(&directory)?;
+        Ok(directory.join(format!("{id}.log")))
+    }
+    pub fn read_output(&self, chat: &str, id: &str) -> std::io::Result<serde_json::Value> {
+        let mut state = self.state.lock().unwrap();
+        if !state.entries.contains_key(id) {
+            if !valid_id(id) {
+                return Err(std::io::Error::from(std::io::ErrorKind::NotFound));
+            }
+            let directory = self
+                .directory
+                .as_ref()
+                .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::NotFound))?;
+            let mut record: ProcessRecord =
+                serde_json::from_slice(&std::fs::read(directory.join(format!("{id}.json")))?)?;
+            if record.id != id || record.chat_id != chat {
+                return Err(std::io::Error::from(std::io::ErrorKind::NotFound));
+            }
+            settle_record(&mut record);
+            state.entries.insert(
+                id.to_owned(),
+                Entry {
+                    record,
+                    control: Control::Finished,
+                    stop: None,
+                    launcher_pending: false,
+                },
+            );
+        }
+        let entry = state
+            .entries
+            .get_mut(id)
+            .filter(|entry| entry.record.chat_id == chat)
+            .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::NotFound))?;
+        let previous_status = entry.record.status.clone();
+        if !entry.control.alive()? && !entry.launcher_pending {
+            settle_record(&mut entry.record);
+        }
+        let path = entry
+            .record
+            .output_path
+            .clone()
+            .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::NotFound))?;
+        let rotated = crate::process_output::rotate(&path)?;
+        entry.record.rotated |= rotated;
+        if rotated || entry.record.status != previous_status {
+            self.persist(&entry.record)?;
+        }
+        let record = entry.record.clone();
+        drop(state);
+        let (output, truncated) = crate::process_output::preview(&path)?;
+        Ok(
+            serde_json::json!({"id":id,"status":record.status,"exitCode":record.exit_code,"output":output,"truncated":truncated,"rotated":record.rotated,"outputPath":path}),
+        )
+    }
+    pub(crate) fn finish(&self, id: &str, code: Option<i32>) {
+        if let Some(entry) = self.state.lock().unwrap().entries.get_mut(id) {
+            entry.launcher_pending = false;
+            entry.record.exit_code = code;
+            if matches!(entry.control.alive(), Ok(false)) {
+                settle_record(&mut entry.record);
+            }
+            let _ = self.persist(&entry.record);
+        }
     }
 
     pub(crate) fn register(
@@ -234,6 +357,7 @@ impl ProcessRegistry {
                 record,
                 control,
                 stop: Some(stop),
+                launcher_pending: true,
             },
         );
         Ok(())
@@ -256,8 +380,9 @@ impl ProcessRegistry {
             #[cfg(unix)]
             if let Ok(members) = group_members(entry.record.pid) {
                 entry.record.members = members.clone();
-                let Control::Group { members: owned, .. } = &entry.control;
-                *owned.lock().unwrap() = members;
+                if let Control::Group { members: owned, .. } = &entry.control {
+                    *owned.lock().unwrap() = members;
+                }
             }
             if let Err(error) = self.persist(&entry.record) {
                 tracing::warn!(%error, "could not refresh command journal");
@@ -283,9 +408,27 @@ impl ProcessRegistry {
     pub fn list(&self, chat_id: &str) -> Vec<ProcessRecord> {
         let mut state = self.state.lock().unwrap();
         state.entries.retain(|id, entry| {
-            if matches!(entry.control.alive(), Ok(false)) {
-                self.remove_journal(id);
-                false
+            let previous = entry.record.status.clone();
+            if let Some(path) = &entry.record.output_path
+                && !matches!(entry.control, Control::Finished)
+            {
+                if let Ok(true) = crate::process_output::rotate(path) {
+                    entry.record.rotated = true;
+                    let _ = self.persist(&entry.record);
+                }
+            }
+            if matches!(entry.control.alive(), Ok(false)) && !entry.launcher_pending {
+                settle_record(&mut entry.record);
+                entry.control = Control::Finished;
+                if entry.record.output_path.is_some() {
+                    if entry.record.status != previous {
+                        let _ = self.persist(&entry.record);
+                    }
+                    self.directory.is_none()
+                } else {
+                    self.remove_journal(id);
+                    false
+                }
             } else {
                 true
             }
@@ -293,21 +436,32 @@ impl ProcessRegistry {
         let mut records: Vec<_> = state
             .entries
             .values()
-            .filter(|e| e.record.chat_id == chat_id && e.record.background)
+            .filter(|e| {
+                e.record.chat_id == chat_id
+                    && e.record.background
+                    && matches!(e.record.status.as_str(), "running" | "stopping")
+            })
             .map(|e| e.record.clone())
             .collect();
         records.sort_by(|a, b| a.id.cmp(&b.id));
         records
     }
     pub fn stop(&self, chat_id: &str, id: &str) -> std::io::Result<bool> {
-        let state = self.state.lock().unwrap();
+        let mut state = self.state.lock().unwrap();
         let Some(entry) = state
             .entries
-            .get(id)
+            .get_mut(id)
             .filter(|e| e.record.chat_id == chat_id)
         else {
             return Ok(false);
         };
+        if !entry.control.alive()? {
+            return Ok(false);
+        }
+        entry.record.status = "stopping".into();
+        if let Err(error) = self.persist(&entry.record) {
+            tracing::warn!(%error, "could not persist process stop");
+        }
         // Suppress the task notification before cancellation can wake the model.
         if let Some(stop) = &entry.stop {
             stop();
@@ -317,14 +471,21 @@ impl ProcessRegistry {
     }
     pub fn shutdown(&self) {
         self.state.lock().unwrap().closed = true;
-        if let Err(error) = self.stop_all() { tracing::error!(%error, "could not stop command processes at shutdown"); }
+        if let Err(error) = self.stop_all() {
+            tracing::error!(%error, "could not stop command processes at shutdown");
+        }
     }
     /// Desktop exit can stop services on a local daemon without preventing
     /// that daemon from accepting commands when a new viewport connects.
     pub fn stop_all(&self) -> std::io::Result<()> {
-        let state = self.state.lock().unwrap();
+        let mut state = self.state.lock().unwrap();
         let mut failure = None;
-        for entry in state.entries.values() {
+        for entry in state.entries.values_mut() {
+            if matches!(entry.control.alive(), Ok(false)) {
+                continue;
+            }
+            entry.record.status = "stopping".into();
+            let _ = self.persist(&entry.record);
             if let Some(stop) = &entry.stop {
                 stop();
             }
@@ -338,6 +499,40 @@ impl ProcessRegistry {
 impl Drop for ProcessRegistry {
     fn drop(&mut self) {
         self.shutdown();
+    }
+}
+fn settle_record(record: &mut ProcessRecord) {
+    if !matches!(record.status.as_str(), "running" | "stopping") {
+        return;
+    }
+    record.status = if record.status == "stopping" {
+        "stopped"
+    } else {
+        match record.exit_code {
+            Some(0) => "completed",
+            Some(_) => "failed",
+            None => "exited",
+        }
+    }
+    .into();
+}
+fn recover_control(record: &ProcessRecord) -> std::io::Result<Control> {
+    #[cfg(windows)]
+    {
+        Ok(Control::Job(Arc::new(crate::tools::bash::JoinJob::open(
+            &record.job_name,
+        )?)))
+    }
+    #[cfg(unix)]
+    {
+        let current = group_members(record.pid)?;
+        if !record.members.iter().any(|member| current.contains(member)) {
+            return Err(std::io::Error::from(std::io::ErrorKind::NotFound));
+        }
+        Ok(Control::Group {
+            pid: record.pid,
+            members: Mutex::new(current),
+        })
     }
 }
 fn valid_id(id: &str) -> bool {
@@ -385,6 +580,10 @@ mod tests {
             record: ProcessRecord {
                 id: format!("bash_{}", uuid::Uuid::new_v4()),
                 chat_id: "chat".into(),
+                output_path: None,
+                status: running_status(),
+                exit_code: None,
+                rotated: false,
                 command: "fixture server".into(),
                 cwd,
                 pid: 0,
@@ -508,7 +707,12 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let mut command = tokio::process::Command::new(std::env::current_exe().unwrap());
         command
-            .args(["--exact", "processes::tests::crash_fixture", "--ignored", "--nocapture"])
+            .args([
+                "--exact",
+                "processes::tests::crash_fixture",
+                "--ignored",
+                "--nocapture",
+            ])
             .env("RCODE_COMMAND_CRASH_FIXTURE", root.path())
             .kill_on_drop(true);
         #[cfg(windows)]
@@ -545,6 +749,203 @@ mod tests {
                 .join("command-processes")
                 .join(format!("{}.json", record.id))
                 .exists()
+        );
+    }
+
+    #[tokio::test]
+    async fn file_output_is_bounded_in_preview_and_retained_after_completion() {
+        let root = tempfile::tempdir().unwrap();
+        let registry = Arc::new(ProcessRegistry::open(Some(root.path())));
+        let mut registration = registration(registry.clone(), root.path().into());
+        let id = registration.record.id.clone();
+        let path = registry.output_path(&id).unwrap();
+        registration.record.output_path = Some(path.clone());
+        let ctx = ToolContext {
+            cwd: root.path().into(),
+            cancel: CancellationToken::new(),
+            nested: None,
+        };
+        let command = if cfg!(windows) {
+            "[Console]::Write(('x' * 120000)); [Console]::Error.WriteLine('最新错误'); [Console]::WriteLine('FINAL_MARKER')"
+        } else {
+            "head -c 120000 /dev/zero | tr '\\0' x; echo 最新错误 >&2; echo FINAL_MARKER"
+        };
+        let result = REGISTRATION
+            .scope(
+                registration,
+                crate::tools::BashTool.call(serde_json::json!({"command":command}), &ctx),
+            )
+            .await
+            .unwrap();
+        assert!(!result.is_error, "{}", result.output);
+        let preview = registry.read_output("chat", &id).unwrap();
+        assert_eq!(preview["status"], "completed");
+        assert_eq!(preview["truncated"], true);
+        assert!(
+            preview["output"]
+                .as_str()
+                .unwrap()
+                .ends_with("FINAL_MARKER\n")
+                || preview["output"]
+                    .as_str()
+                    .unwrap()
+                    .ends_with("FINAL_MARKER\r\n")
+        );
+        assert!(preview["output"].as_str().unwrap().contains("最新错误"));
+        assert!(std::fs::metadata(&path).unwrap().len() > 100000);
+        assert!(registry.read_output("other-chat", &id).is_err());
+        assert!(registry.list("chat").is_empty());
+        drop(registry);
+        let recovered = ProcessRegistry::open(Some(root.path()));
+        assert_eq!(
+            recovered.read_output("chat", &id).unwrap()["output"],
+            preview["output"]
+        );
+    }
+
+    #[test]
+    #[ignore = "writer subprocess for the durable output fixture"]
+    fn log_writer_fixture() {
+        use std::io::Write;
+        for index in 0..600 {
+            println!("durable-line-{index}");
+            std::io::stdout().flush().unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+    }
+
+    #[test]
+    #[ignore = "launcher subprocess for the durable output fixture"]
+    fn log_launcher_fixture() {
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        command.args([
+            "--exact",
+            "processes::tests::log_writer_fixture",
+            "--ignored",
+            "--nocapture",
+        ]);
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            command.creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW);
+        }
+        command.spawn().unwrap();
+    }
+
+    #[tokio::test]
+    async fn detached_service_keeps_logging_after_its_launcher_exits() {
+        let root = tempfile::tempdir().unwrap();
+        let registry = Arc::new(ProcessRegistry::open(Some(root.path())));
+        let mut registration = registration(registry.clone(), root.path().into());
+        let id = registration.record.id.clone();
+        registration.record.output_path = Some(registry.output_path(&id).unwrap());
+        let exe = std::env::current_exe()
+            .unwrap()
+            .to_string_lossy()
+            .replace('\'', "''");
+        let command = format!(
+            "{}'{exe}' --exact processes::tests::log_launcher_fixture --ignored --nocapture",
+            if cfg!(windows) { "& " } else { "" }
+        );
+        let ctx = ToolContext {
+            cwd: root.path().into(),
+            cancel: CancellationToken::new(),
+            nested: None,
+        };
+        let result = REGISTRATION
+            .scope(
+                registration,
+                crate::tools::BashTool.call(serde_json::json!({"command":command}), &ctx),
+            )
+            .await
+            .unwrap();
+        assert!(!result.is_error, "{}", result.output);
+        assert_eq!(registry.list("chat").len(), 1);
+        let first = registry.read_output("chat", &id).unwrap();
+        assert_eq!(first["status"], "running");
+        wait_until(|| registry.read_output("chat", &id).unwrap()["output"] != first["output"])
+            .await;
+        registry.stop("chat", &id).unwrap();
+        wait_until(|| registry.list("chat").is_empty()).await;
+        assert_eq!(
+            registry.read_output("chat", &id).unwrap()["status"],
+            "stopped"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "host subprocess for the durable output fixture"]
+    async fn log_host_fixture() {
+        let root = PathBuf::from(std::env::var_os("RCODE_LOG_FIXTURE").unwrap());
+        let registry = Arc::new(ProcessRegistry::open(Some(&root)));
+        let mut registration = registration(registry.clone(), root.clone());
+        let id = registration.record.id.clone();
+        registration.record.output_path = Some(registry.output_path(&id).unwrap());
+        let exe = std::env::current_exe()
+            .unwrap()
+            .to_string_lossy()
+            .replace('\'', "''");
+        let command = if cfg!(windows) {
+            format!("& '{exe}' --exact processes::tests::log_writer_fixture --ignored --nocapture")
+        } else {
+            format!("'{exe}' --exact processes::tests::log_writer_fixture --ignored --nocapture")
+        };
+        let ctx = ToolContext {
+            cwd: root.clone(),
+            cancel: CancellationToken::new(),
+            nested: None,
+        };
+        tokio::spawn(async move {
+            REGISTRATION
+                .scope(
+                    registration,
+                    crate::tools::BashTool.call(serde_json::json!({"command":command}), &ctx),
+                )
+                .await
+        });
+        wait_until(|| {
+            registry
+                .read_output("chat", &id)
+                .ok()
+                .is_some_and(|v| v["output"].as_str().unwrap().contains("durable-line"))
+        })
+        .await;
+        std::fs::write(root.join("ready-log"), id).unwrap();
+        std::future::pending::<()>().await;
+    }
+
+    #[tokio::test]
+    async fn logs_keep_growing_after_forced_host_exit_and_can_be_recovered() {
+        let root = tempfile::tempdir().unwrap();
+        let mut command = tokio::process::Command::new(std::env::current_exe().unwrap());
+        command
+            .args([
+                "--exact",
+                "processes::tests::log_host_fixture",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env("RCODE_LOG_FIXTURE", root.path())
+            .kill_on_drop(true);
+        #[cfg(windows)]
+        command.creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW);
+        let mut host = command.spawn().unwrap();
+        wait_until(|| root.path().join("ready-log").exists()).await;
+        let id = std::fs::read_to_string(root.path().join("ready-log")).unwrap();
+        host.kill().await.unwrap();
+        let recovered = ProcessRegistry::open(Some(root.path()));
+        assert_eq!(recovered.list("chat").len(), 1);
+        let first = recovered.read_output("chat", &id).unwrap()["output"].clone();
+        wait_until(|| recovered.read_output("chat", &id).unwrap()["output"] != first).await;
+        recovered.stop("chat", &id).unwrap();
+        wait_until(|| recovered.list("chat").is_empty()).await;
+        let final_output = recovered.read_output("chat", &id).unwrap();
+        assert_eq!(final_output["status"], "stopped");
+        assert!(
+            final_output["output"]
+                .as_str()
+                .unwrap()
+                .contains("durable-line")
         );
     }
 }

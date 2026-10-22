@@ -104,7 +104,11 @@ pub struct NativeHarness {
 
 impl NativeHarness {
     fn command_process_registry(&self) -> Arc<rcode_agent::processes::ProcessRegistry> {
-        self.command_processes.get_or_init(|| Arc::new(rcode_agent::processes::ProcessRegistry::open(self.data_dir.as_deref()))).clone()
+        self.command_processes.get_or_init(|| {
+            let registry = Arc::new(rcode_agent::processes::ProcessRegistry::open(self.data_dir.as_deref()));
+            registry.start_maintenance();
+            registry
+        }).clone()
     }
 
     // Old saved route IDs now resolve only to the current default real model.
@@ -584,6 +588,9 @@ impl Harness for NativeHarness {
     }
     fn stop_command_process(&self, chat_id: &str, id: &str) -> Result<bool, String> {
         self.command_process_registry().stop(chat_id, id).map_err(|e| e.to_string())
+    }
+    fn read_command_output(&self, chat_id: &str, id: &str) -> Result<serde_json::Value, String> {
+        self.command_process_registry().read_output(chat_id, id).map_err(|e| e.to_string())
     }
     fn shutdown_command_processes(&self) { self.command_process_registry().shutdown(); }
     fn stop_all_command_processes(&self) -> Result<(), String> {

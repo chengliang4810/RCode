@@ -105,6 +105,7 @@ pub mod methods {
     /// that id (already finished, or a stale tab).
     pub const BACKGROUND_SUBAGENT: &str = "BackgroundSubagent";
     pub const LIST_COMMAND_PROCESSES: &str = "ListCommandProcesses";
+    pub const READ_COMMAND_OUTPUT: &str = "ReadCommandOutput";
     pub const STOP_COMMAND_PROCESS: &str = "StopCommandProcess";
     pub const STOP_ALL_COMMAND_PROCESSES: &str = "StopAllCommandProcesses";
     pub const CANCEL_SUBAGENT: &str = "CancelSubagent";

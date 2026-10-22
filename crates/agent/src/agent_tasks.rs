@@ -911,7 +911,11 @@ impl Tool for ManagedShell {
         let id = format!("bash_{}", uuid::Uuid::new_v4());
         let directory = std::env::temp_dir().join("rcode-task-output");
         std::fs::create_dir_all(&directory).map_err(|e| ToolError::Execution(e.to_string()))?;
-        let path = directory.join(format!("{id}.log"));
+        let persistent = self.tasks.store.processes.is_some();
+        let path = match &self.tasks.store.processes {
+            Some((_, registry)) => registry.output_path(&id).map_err(|e| ToolError::Execution(e.to_string()))?,
+            None => directory.join(format!("{id}.log")),
+        };
         let file = std::fs::OpenOptions::new()
             .create_new(true)
             .write(true)
@@ -942,7 +946,7 @@ impl Tool for ManagedShell {
                         .map(|events| events.parent_tool_use_id().to_owned())
                         .unwrap_or_default(),
                     live_output: live_output.clone(),
-                    output_file: Some(path),
+                    output_file: Some(path.clone()),
                     cwd: ctx.cwd.clone(),
                     status: "running",
                     output: String::new(),
@@ -967,6 +971,7 @@ impl Tool for ManagedShell {
                 record: crate::processes::ProcessRecord {
                     id: id.clone(), chat_id: chat_id.clone(), command: command.to_owned(),
                     cwd: ctx.cwd.clone(), pid: 0,
+                    output_path: Some(path.clone()), status: "running".into(), exit_code: None, rotated: false,
                     job_name: format!("Local\\RCode.Command.{}", uuid::Uuid::new_v4()),
                     background,
                     members: Vec::new(), recovered: false,
@@ -982,6 +987,7 @@ impl Tool for ManagedShell {
         let progress = Arc::new(move |text: String| {
             use std::io::{Seek, Write};
             *live_output.lock().unwrap() = text.clone();
+            if persistent { return; }
             let mut file = file.lock().unwrap();
             let _ = file.rewind();
             let _ = file.set_len(0);

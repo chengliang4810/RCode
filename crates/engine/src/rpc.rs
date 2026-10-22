@@ -1448,6 +1448,7 @@ fn forwardable(method: &str) -> bool {
             | methods::UNINSTALL_PLUGIN
             | methods::BACKGROUND_SUBAGENT
             | methods::LIST_COMMAND_PROCESSES
+            | methods::READ_COMMAND_OUTPUT
             | methods::STOP_COMMAND_PROCESS
             | methods::CANCEL_SUBAGENT
             | methods::UPDATE_GOAL
@@ -2088,14 +2089,21 @@ impl RpcService for EngineRpc {
                     .stop_all_command_processes().map_err(RpcError::Failed)?;
                 RpcReply::value(&serde_json::json!({"stopped":true}))
             }
-            methods::LIST_COMMAND_PROCESSES | methods::STOP_COMMAND_PROCESS => {
+            methods::LIST_COMMAND_PROCESSES | methods::STOP_COMMAND_PROCESS | methods::READ_COMMAND_OUTPUT => {
                 #[derive(Deserialize)]
                 #[serde(rename_all = "camelCase")]
                 struct Params { chat_id: String, #[serde(default)] id: Option<String> }
                 let p: Params = parse_params(params)?;
                 let harness = self.registry.resolve(HarnessId::Native).map_err(|e| RpcError::Failed(e.to_string()))?;
-                if method == methods::LIST_COMMAND_PROCESSES {
-                    RpcReply::value(&harness.list_command_processes(&p.chat_id))
+                if method == methods::READ_COMMAND_OUTPUT {
+                    let id = p.id.ok_or_else(|| RpcError::BadParams("missing process id".into()))?;
+                    let value = tokio::task::spawn_blocking(move || harness.read_command_output(&p.chat_id, &id))
+                        .await.map_err(|e| RpcError::Failed(e.to_string()))?.map_err(RpcError::Failed)?;
+                    RpcReply::value(&value)
+                } else if method == methods::LIST_COMMAND_PROCESSES {
+                    let value = tokio::task::spawn_blocking(move || harness.list_command_processes(&p.chat_id))
+                        .await.map_err(|e| RpcError::Failed(e.to_string()))?;
+                    RpcReply::value(&value)
                 } else {
                     let id = p.id.ok_or_else(|| RpcError::Failed("missing process id".into()))?;
                     let stopped = harness.stop_command_process(&p.chat_id, &id).map_err(RpcError::Failed)?;

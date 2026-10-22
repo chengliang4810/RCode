@@ -150,6 +150,13 @@ pub(crate) async fn execute_with_shell(
         .stderr(Stdio::piped())
         // A GUI app has no console; without this a child would flash a window.
         .kill_on_drop(true);
+    let output_path = crate::processes::REGISTRATION.try_with(|registration| registration.record.output_path.clone()).ok().flatten();
+    if let Some(path) = &output_path {
+        let file = std::fs::OpenOptions::new().create(true).append(true).open(path)
+            .map_err(|e| ToolError::Execution(format!("cannot open command log: {e}")))?;
+        let stderr = file.try_clone().map_err(|e| ToolError::Execution(e.to_string()))?;
+        process.stdout(Stdio::from(file)).stderr(Stdio::from(stderr));
+    }
     #[cfg(unix)]
     {
         // Its own process group, so a signal to the group reaches every
@@ -205,6 +212,8 @@ pub(crate) async fn execute_with_shell(
     let mut exit_status = None;
     let mut drain_deadline = None;
 
+    let mut log_tick = tokio::time::interval(Duration::from_millis(250));
+    log_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let status = loop {
         if let Some(status) = exit_status {
             if out_done && err_done {
@@ -225,6 +234,11 @@ pub(crate) async fn execute_with_shell(
                     "`{command}` did not finish within {seconds}s; it and everything it \
                      started were killed"
                 )));
+            }
+            _ = log_tick.tick(), if output_path.is_some() => {
+                if let (Some(path), Some(progress)) = (&output_path, &progress) {
+                    if let Ok((text, _)) = crate::process_output::read(path, MAX_OUTPUT_BYTES, true) { progress(text); }
+                }
             }
             _ = tokio::time::sleep_until(drain_deadline.unwrap_or(deadline)), if drain_deadline.is_some() => {
                 if tree.managed.is_some() {
@@ -295,8 +309,14 @@ pub(crate) async fn execute_with_shell(
     // Both streams reached EOF. A launcher which explicitly redirected its
     // descendants' output may leave them running on successful completion.
     tree.disarm();
+    if let Some((registry, id)) = &tree.managed { registry.finish(id, status.code()); }
 
-    let mut body = output_text(&stdout_buf, &stderr_buf);
+    let mut body = if let Some(path) = &output_path {
+        let (mut text, truncated) = crate::process_output::read(path, MAX_OUTPUT_BYTES, false)
+            .map_err(|e| ToolError::Execution(format!("cannot read command log: {e}")))?;
+        if truncated { text.push_str("\n[output truncated]"); }
+        text
+    } else { output_text(&stdout_buf, &stderr_buf) };
     if body.is_empty() {
         body.push_str("(no output)");
     }
@@ -319,6 +339,7 @@ async fn stop_process_tree(child: &mut tokio::process::Child, tree: &mut Process
     // Also cover failures before the leader could join its process group/job.
     let _ = child.start_kill();
     let _ = tokio::time::timeout(PROCESS_REAP_TIMEOUT, child.wait()).await;
+    if let Some((registry, id)) = &tree.managed { registry.finish(id, None); }
 }
 
 fn output_text(stdout: &BoundedOutput, stderr: &BoundedOutput) -> String {
@@ -617,6 +638,7 @@ impl Drop for ProcessTree {
         // call `kill`, so the tree must not outlive this value.
         if !self.disarmed {
             self.kill();
+            if let Some((registry, id)) = &self.managed { registry.finish(id, None); }
         }
     }
 }
