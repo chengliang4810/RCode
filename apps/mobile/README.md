@@ -69,6 +69,28 @@ Native visual tests use the existing Luau, chart, Canvas, scene/shader and zatex
 engines. Their setup is in [native/README.md](native/README.md). The six math
 fonts are passed to the native renderer; they are not just display preferences.
 
+The device integration gate uses the shipping app, native storage plugins and
+renderers with the real local engine's provider-free `mobile_smoke` fixture.
+It checks pairing, rendered pixels and controls, typed questions, and a task
+finishing with the app connection closed before secure credentials restore it
+exactly once. The SDK's test text input drives fields; native keyboard behavior
+and an OS process restart are outside this automated gate. The separate manual
+Android check below includes a real app force-stop.
+
+On macOS, resolve the locked dependencies, then run from the repository root:
+
+```sh
+bash scripts/mobile/test-ios.sh
+```
+
+This creates and removes its own iPhone simulator and fixture process. PNGs,
+structured results and logs go to `apps/mobile/build/qa/ios`, or the directory
+specified by `RCODE_MOBILE_QA_ARTIFACTS`. The `mobile-ios` CI job first builds the
+ordinary unsigned app, then runs this gate and uploads the runtime artifacts.
+The dependency lock uses pub.dev; when a shell sets a custom `PUB_HOSTED_URL`,
+use `PUB_HOSTED_URL=https://pub.dev flutter pub get --enforce-lockfile` to match
+the canonical lock.
+
 Both Android arm64 and x86_64 debug APKs have been built and checked for 16 KiB
 native-library/ZIP alignment. The x86_64 app was exercised on Android 16/API 36
 against a real local engine with a mock model: pairing, interrupted-client
@@ -79,8 +101,10 @@ in [the migration record](../../docs/flutter-mobile-migration.md).
 
 The real engine/Dart integration, Rust visual/math suite and native Flutter FFI
 checks also pass separately. Xcode simulator builds, physical iOS execution,
-signing and TestFlight upload remain unverified because no Mac or macOS CI
-execution environment is available in this session.
+signing and TestFlight upload remain unverified. There is no local Mac, but the
+repository has GitHub-hosted macOS CI. Its previous run skipped iOS after a
+strict lock-file failure; the package-host mismatch has been repaired and
+verified locally. A new macOS run must establish the actual iOS result.
 
 Notifications are local and depend on receiving workspace events while the app
 is running. The direct service does not implement background APNs/FCM delivery

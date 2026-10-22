@@ -110,12 +110,36 @@ repeatable local runtime checks; it does not validate a real provider account.
 
 ## Remaining platform verification
 
-No macOS machine or macOS CI execution environment is available in this session.
-The iOS project, plugin declarations and Rust build/link steps have been checked
-from source, but an Xcode simulator build, device run, signing and TestFlight
-upload have not been verified. CI configuration is present; its existence is
-not a successful CI run. The migration is not marked fully accepted while these
-platform checks remain outstanding.
+There is no local Mac in this session. The repository does have GitHub-hosted
+macOS CI: [run 39816464177](https://github.com/chengliang4810/RCode/actions/runs/39816464177)
+passed its desktop macOS jobs, but its Flutter core job failed strict dependency
+resolution, so the iOS job was skipped. The lock file used a local package mirror
+while CI used pub.dev. Normalizing hosted URLs to pub.dev passed
+`flutter pub get --enforce-lockfile` with every existing version and package
+SHA256 unchanged. This fixes the observed dependency blocker; a successful iOS
+build or runtime check must still be established by a new run.
+
+The device integration gate in `apps/mobile/integration_test` launches the
+shipping application with real storage plugins, authenticated engine RPC and
+the native C ABI. It checks rejected/accepted pairing, native math and visual
+output, a Luau control, structured questions and an accepted turn completing
+while the application models and connection are disposed. Recreating the app
+must restore secure credentials and recover that turn exactly once. Its
+deterministic engine fixture does not contact a model provider. Screenshots and
+structured results are collected by `test_driver/integration_test.dart`.
+The shared gate passed all six checks on the Android 16/API 36 emulator,
+including actual shader blue pixels, shaded scene pixels and Count 0 to Count 1.
+Five captured PNGs and `result.json` are in the ignored
+`apps/mobile/build/qa/device-integration` directory. The successful driver log is
+`apps/mobile/build/qa/device-integration-drive-4.log`. Text entry uses the SDK's
+test input to avoid emulator IME echoes. This automated gate rebuilds the app
+models and closes its connection; the separate manual Android check above
+covers actual operating-system process termination.
+
+An Xcode simulator build and runtime, physical iOS execution, signing and
+TestFlight upload remain unverified until their respective checks actually run.
+The migration is not marked fully accepted while platform verification remains
+outstanding.
 
 Android arm64 has been compiled and package-validated, but no physical Android
 device was available for this run. The manual Android pass covers the emulator
