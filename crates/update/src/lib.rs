@@ -2036,6 +2036,8 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn headless_staging_rejects_a_binary_that_is_not_the_promised_release() {
+        use sha2::{Digest as _, Sha256};
+
         let tmp = tempfile::tempdir().unwrap();
         let app_root = tmp.path().join("app");
         std::fs::create_dir_all(&app_root).unwrap();

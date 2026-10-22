@@ -15846,6 +15846,7 @@ mod exit_regressions {
                 });
                 shell.add_subagent_surface(
                     "first-session".into(),
+                    "spawn-child".into(),
                     "child-doc".into(),
                     "Child".into(),
                     true,

@@ -12538,11 +12538,11 @@ mod tests {
             "{summary}"
         );
         assert!(
-            summary.contains(&localizer.format_count(
+            summary.contains(&capitalized(localizer.format_count(
                 rcode_presentation::TextKey::ToolSummaryRan,
                 "count",
                 2
-            )),
+            ))),
             "{summary}"
         );
 

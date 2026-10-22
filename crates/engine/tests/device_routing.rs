@@ -1042,12 +1042,24 @@ async fn exercise_terminal_relay(projectless: bool) {
         )
         .await
         .expect("remote subscribe");
+    // The echoed input must not itself contain the expected result. Use the
+    // actual remote shell's arithmetic syntax rather than assuming Bash.
+    let shell = session["shell"].as_str().unwrap_or_default().to_ascii_lowercase();
+    let command = match shell.as_str() {
+        "cmd" | "cmd.exe" => {
+            "set /a RCODE_RELAY_PROBE=20+2\r\necho r3lay-%RCODE_RELAY_PROBE%\r\n"
+        }
+        "powershell" | "powershell.exe" | "pwsh" | "pwsh.exe" => {
+            "Write-Output ('r3lay-' + (20+2))\r"
+        }
+        _ => "echo r3lay-$((20+2))\n",
+    };
     client
         .call(
             methods::WRITE_TERMINAL,
             serde_json::json!({
                 "terminalId": terminal_id,
-                "data": BASE64.encode("echo r3lay-$((20+2))\n"),
+                "data": BASE64.encode(command),
                 "targetDeviceId": "device-b",
             }),
         )
