@@ -51,7 +51,7 @@ mkdir -p "$WORK/tmp"
 run_curl() {
   local home="$1"; shift
   env -i HOME="$home" USER=tester SYSTEMROOT="${SYSTEMROOT:-}" PATH="$WORK/shim:$CURL_DIR:/usr/bin:/bin" TMPDIR="$WORK/tmp" "$@" \
-    RCODE_BASE_URL="$SITE_URL" sh "$ROOT/dist/install.sh" >"$WORK/out.log" 2>&1 \
+    RCODE_BASE_URL="$SITE_URL" RCODE_API_KEY=Fixture12345 sh "$ROOT/dist/install.sh" >"$WORK/out.log" 2>&1 \
     || { cat "$WORK/out.log" >&2; fail "curl installer exited non-zero"; }
   [ -z "$(ls -A "$WORK/tmp")" ] || fail "curl installer left files in TMPDIR: $(ls -A "$WORK/tmp")"
 }

@@ -11,11 +11,7 @@ mod update_cli;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(
-    name = "rcode",
-    version,
-    about = "Native coding agent"
-)]
+#[command(name = "rcode", version, about = "Native coding agent")]
 struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
@@ -30,13 +26,20 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     /// Run the engine without a UI.
-    Headless,
+    Headless {
+        /// Connection key: at least 8 ASCII letters/digits, including both.
+        #[arg(long, env = "RCODE_API_KEY", hide_env_values = true)]
+        api_key: String,
+        /// Authenticated external WebSocket port.
+        #[arg(long, env = "RCODE_REMOTE_PORT", default_value_t = 27655)]
+        port: u16,
+    },
     /// Show the workspace mode and engine status.
     Status,
     /// Live sync introspection from the running engine: per-room connection
     /// state, last pushed-frame/ack ages, rejoin/probe/resync counters.
     Sync,
-    #[cfg(target_os = "linux")]
+    #[cfg(all(target_os = "linux", feature = "desktop"))]
     /// Trigger an Appshot in the running headed instance (desktop shortcut fallback).
     Appshot,
     /// Manage `rcode headless` as a background service (launchd / systemd --user).
@@ -66,6 +69,31 @@ enum DaemonCommand {
     Restart,
     /// Show the service manager's view of the daemon.
     Status,
+}
+
+#[cfg(test)]
+mod remote_cli_tests {
+    use super::*;
+
+    #[test]
+    fn server_requires_a_key_and_defaults_to_the_external_port() {
+        // Use an isolated parser command instead of inheriting service credentials.
+        let command = <Cli as clap::CommandFactory>::command()
+            .mut_subcommand("headless", |command| {
+                command.mut_arg("api_key", |arg| arg.env(None::<&str>))
+            });
+        assert!(
+            command
+                .clone()
+                .try_get_matches_from(["rcode", "headless"])
+                .is_err()
+        );
+        let matches = command
+            .try_get_matches_from(["rcode", "headless", "--api-key", "Fixture12345"])
+            .unwrap();
+        let headless = matches.subcommand_matches("headless").unwrap();
+        assert_eq!(*headless.get_one::<u16>("port").unwrap(), 27655);
+    }
 }
 
 /// The edge base URL, empty when none was given.
@@ -119,7 +147,7 @@ fn main() -> anyhow::Result<()> {
     #[cfg(windows)]
     if let Some(pid) = cli.wait_for_exit {
         rcode_update::windows::wait_for_exit(pid)?;
-    } else if matches!(&cli.command, None | Some(Command::Headless)) {
+    } else if matches!(&cli.command, None | Some(Command::Headless { .. })) {
         rcode_update::windows::cleanup_previous_image();
     }
     // Long-running modes log at info, one-shot CLI commands at warn (RUST_LOG
@@ -128,7 +156,7 @@ fn main() -> anyhow::Result<()> {
     // journald on every snapshot export — enough to fill a disk on a
     // long-running headless host. Quiet them by default (RUST_LOG still
     // overrides the whole filter).
-    let long_running = matches!(&cli.command, None | Some(Command::Headless));
+    let long_running = matches!(&cli.command, None | Some(Command::Headless { .. }));
     let default_filter = if long_running {
         "info,loro_internal=warn,loro=warn"
     } else {
@@ -184,10 +212,15 @@ fn main() -> anyhow::Result<()> {
     }
 
     match cli.command {
-        Some(Command::Headless) => {
+        Some(Command::Headless { api_key, port }) => {
+            rcode_rpc::validate_api_key(&api_key)?;
+            if port == 0 {
+                anyhow::bail!("port must be between 1 and 65535");
+            }
             let runtime = tokio::runtime::Runtime::new()?;
             runtime.block_on(async {
-                let engine = rcode_engine::Engine::new(engine_config_from_env());
+                let engine = rcode_engine::Engine::new(engine_config_from_env())
+                    .with_remote_access(api_key, port)?;
                 engine.run().await
             })
         }
@@ -199,7 +232,7 @@ fn main() -> anyhow::Result<()> {
             let runtime = tokio::runtime::Runtime::new()?;
             runtime.block_on(sync_cli(engine_config_from_env().ipc_port))
         }
-        #[cfg(target_os = "linux")]
+        #[cfg(all(target_os = "linux", feature = "desktop"))]
         Some(Command::Appshot) => {
             rcode_ui::appshots::request_running_appshot(engine_config_from_env().roots.data())
                 .map_err(anyhow::Error::msg)
@@ -225,22 +258,31 @@ fn main() -> anyhow::Result<()> {
             DaemonCommand::Status => daemon::status(),
         },
         None => {
-            let edge_token = std::env::var("RCODE_EDGE_TOKEN").ok();
-            // Headed: the UI probes RCODE_IPC_PORT and connects to a running
-            // daemon, or embeds the engine in-process (ARCHITECTURE §1).
-            rcode_ui::run_app(rcode_ui::UiConfig {
-                roots: data_roots(),
-                ipc_port: std::env::var("RCODE_IPC_PORT")
-                    .ok()
-                    .and_then(|p| p.parse().ok())
-                    .unwrap_or(27654),
-                edge_url: edge_url_from_env(),
-                edge_token,
-                org_id: std::env::var("RCODE_ORG_ID").ok(),
-                default_harness: rcode_engine::HarnessId::Native,
-                initial_url: cli.open_url,
-            });
-            Ok(())
+            #[cfg(not(feature = "desktop"))]
+            {
+                anyhow::bail!(
+                    "this build runs without a desktop; use `rcode headless --api-key <key>`"
+                );
+            }
+            #[cfg(feature = "desktop")]
+            {
+                let edge_token = std::env::var("RCODE_EDGE_TOKEN").ok();
+                // Headed: the UI probes RCODE_IPC_PORT and connects to a running
+                // daemon, or embeds the engine in-process (ARCHITECTURE §1).
+                rcode_ui::run_app(rcode_ui::UiConfig {
+                    roots: data_roots(),
+                    ipc_port: std::env::var("RCODE_IPC_PORT")
+                        .ok()
+                        .and_then(|p| p.parse().ok())
+                        .unwrap_or(27654),
+                    edge_url: edge_url_from_env(),
+                    edge_token,
+                    org_id: std::env::var("RCODE_ORG_ID").ok(),
+                    default_harness: rcode_engine::HarnessId::Native,
+                    initial_url: cli.open_url,
+                });
+                Ok(())
+            }
         }
     }
 }

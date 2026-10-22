@@ -46,8 +46,31 @@ const CAPTURED_ENV: &[&str] = &[
 ];
 
 pub fn install(data_dir: &Path) -> anyhow::Result<()> {
+    if !cfg!(any(target_os = "linux", target_os = "macos")) {
+        bail!("rcode daemon is only supported on macOS (launchd) and Linux (systemd)");
+    }
+    let access = rcode_engine::remote_access::RemoteAccess::open(data_dir)?;
+    let api_key = std::env::var("RCODE_API_KEY")
+        .ok()
+        .or_else(|| access.api_key())
+        .context("set RCODE_API_KEY before installing the headless service")?;
+    rcode_rpc::validate_api_key(&api_key)?;
+    let port = std::env::var("RCODE_REMOTE_PORT")
+        .ok()
+        .map(|value| value.parse::<u16>())
+        .transpose()
+        .context("invalid RCODE_REMOTE_PORT")?
+        .unwrap_or(access.view().port);
+    if port == 0 {
+        bail!("port must be between 1 and 65535");
+    }
+    write_service_credentials(data_dir, &api_key, port)?;
     let exe = std::env::current_exe().context("resolving the rcode executable path")?;
-    let env = captured_env();
+    let mut env = captured_env();
+    if cfg!(target_os = "macos") {
+        env.push(("RCODE_API_KEY".into(), api_key));
+        env.push(("RCODE_REMOTE_PORT".into(), port.to_string()));
+    }
     if cfg!(target_os = "macos") {
         let plist = launchd_plist_path()?;
         std::fs::create_dir_all(plist.parent().expect("LaunchAgents parent"))?;
@@ -58,6 +81,11 @@ pub fn install(data_dir: &Path) -> anyhow::Result<()> {
             &plist,
             render_launchd_plist(&exe, &env, &data_dir.join("daemon.log")),
         )?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&plist, std::fs::Permissions::from_mode(0o600))?;
+        }
         run(
             "launchctl",
             &["bootstrap", &launchd_domain()?, &plist.to_string_lossy()],
@@ -69,7 +97,19 @@ pub fn install(data_dir: &Path) -> anyhow::Result<()> {
     } else if cfg!(target_os = "linux") {
         let unit = systemd_unit_path()?;
         std::fs::create_dir_all(unit.parent().expect("systemd user dir"))?;
-        std::fs::write(&unit, render_systemd_unit(&exe, &env))?;
+        let contents = render_systemd_unit(&exe, &env).replace(
+            "EnvironmentFile=-%h/.rcode/env",
+            &format!(
+                "EnvironmentFile=\"{}\"",
+                data_dir
+                    .join("env")
+                    .to_string_lossy()
+                    .replace('\\', "\\\\")
+                    .replace('"', "\\\"")
+                    .replace('%', "%%")
+            ),
+        );
+        std::fs::write(&unit, contents)?;
         run("systemctl", &["--user", "daemon-reload"])?;
         run("systemctl", &["--user", "enable", "--now", SYSTEMD_UNIT])?;
         println!("Installed and started {SYSTEMD_UNIT} ({}).", unit.display());
@@ -79,9 +119,7 @@ pub fn install(data_dir: &Path) -> anyhow::Result<()> {
     } else {
         bail!("rcode daemon is only supported on macOS (launchd) and Linux (systemd)");
     }
-    println!(
-        "Without a saved account the engine stays local-only; sign-in and restart are optional for sync."
-    );
+    println!("External WebSocket port: {port}");
     println!(
         "Logs: {}",
         if cfg!(target_os = "macos") {
@@ -90,6 +128,34 @@ pub fn install(data_dir: &Path) -> anyhow::Result<()> {
             format!("journalctl --user -u {SYSTEMD_UNIT}")
         }
     );
+    Ok(())
+}
+
+fn write_service_credentials(root: &Path, key: &str, port: u16) -> anyhow::Result<()> {
+    use std::io::Write;
+    std::fs::create_dir_all(root)?;
+    let path = root.join("env");
+    let existing = match std::fs::symlink_metadata(&path) {
+        Ok(meta) if !meta.file_type().is_file() => bail!("service env must be a regular file"),
+        Ok(_) => std::fs::read_to_string(&path)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => return Err(error.into()),
+    };
+    let mut file = tempfile::NamedTempFile::new_in(root)?;
+    for line in existing.lines().filter(|line| {
+        !line.starts_with("RCODE_API_KEY=") && !line.starts_with("RCODE_REMOTE_PORT=")
+    }) {
+        writeln!(file, "{line}")?;
+    }
+    writeln!(file, "RCODE_API_KEY={key}\nRCODE_REMOTE_PORT={port}")?;
+    file.as_file().sync_all()?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.as_file()
+            .set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    }
+    file.persist(path).map_err(|error| error.error)?;
     Ok(())
 }
 

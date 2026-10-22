@@ -9,10 +9,14 @@ publish.workspace = true
 name = "rcode"
 path = "src/main.rs"
 
+[features]
+default = ["desktop"]
+desktop = ["dep:rcode-ui"]
+
 [dependencies]
 rcode-engine.workspace = true
 rcode-rpc.workspace = true
-rcode-ui.workspace = true
+rcode-ui = { workspace = true, optional = true }
 rcode-update.workspace = true
 tokio.workspace = true
 clap.workspace = true
@@ -21,6 +25,7 @@ libc.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+tempfile.workspace = true
 
 # The custom allocator is macOS-only (see main.rs): glibc measured flat on the
 # same streaming/scroll workloads, so Linux keeps the system allocator.

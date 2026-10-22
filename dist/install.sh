@@ -10,6 +10,19 @@
 # ~/.rcode state is preserved. Model providers are configured in RCode.
 set -eu
 
+# The service reads credentials from its private environment file at boot.
+if [ -z "${RCODE_API_KEY:-}" ] && [ -f "$HOME/.rcode/env" ]; then
+  RCODE_API_KEY="$(sed -n 's/^RCODE_API_KEY=//p' "$HOME/.rcode/env" | tail -n 1)"
+fi
+[ -n "${RCODE_API_KEY:-}" ] || { echo "Set RCODE_API_KEY before installing RCode." >&2; exit 1; }
+case "$RCODE_API_KEY" in *[!A-Za-z0-9]*) echo "API Key must contain only letters and digits." >&2; exit 1 ;; esac
+[ "${#RCODE_API_KEY}" -ge 8 ] || { echo "API Key must contain at least 8 characters." >&2; exit 1; }
+case "$RCODE_API_KEY" in *[A-Za-z]*) ;; *) echo "API Key must include a letter." >&2; exit 1 ;; esac
+case "$RCODE_API_KEY" in *[0-9]*) ;; *) echo "API Key must include a digit." >&2; exit 1 ;; esac
+remote_port="${RCODE_REMOTE_PORT:-27655}"
+case "$remote_port" in ''|*[!0-9]*) echo "Invalid RCODE_REMOTE_PORT." >&2; exit 1 ;; esac
+[ "$remote_port" -ge 1 ] && [ "$remote_port" -le 65535 ] || { echo "Invalid RCODE_REMOTE_PORT." >&2; exit 1; }
+
 BASE="${RCODE_BASE_URL:-https://github.com/chengliang4810/RCode/releases/latest/download}"
 
 # --- platform ---------------------------------------------------------------
@@ -134,6 +147,15 @@ install_desktop_entry "$dest" "$app_root" \
   || echo "warn: could not install the desktop entry — RCode won't appear in application launchers"
 
 # --- service -----------------------------------------------------------------
+umask 077
+mkdir -p "$data_root"
+env_tmp="$(mktemp "$data_root/.env.XXXXXX")"
+if [ -f "$data_root/env" ]; then
+  sed '/^RCODE_API_KEY=/d; /^RCODE_REMOTE_PORT=/d' "$data_root/env" >"$env_tmp"
+fi
+printf 'RCODE_API_KEY=%s\nRCODE_REMOTE_PORT=%s\n' "$RCODE_API_KEY" "$remote_port" >>"$env_tmp"
+chmod 600 "$env_tmp"
+mv -f "$env_tmp" "$data_root/env"
 # The daemon serves the local profile. Provider credentials are configured
 # inside RCode.
 

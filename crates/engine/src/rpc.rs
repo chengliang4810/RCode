@@ -722,6 +722,7 @@ enum MutateParams {
 
 #[derive(Clone)]
 pub struct EngineRpc {
+    remote_access: Option<std::sync::Arc<crate::remote_access::RemoteAccess>>,
     sessions: SessionsEngine,
     doc_host: DocHost,
     workspace: WorkspaceHost,
@@ -766,6 +767,7 @@ impl EngineRpc {
         };
         let github = GitHubCli::new().with_store(repos.data_dir());
         Self {
+            remote_access: None,
             sessions,
             doc_host,
             workspace,
@@ -788,6 +790,16 @@ impl EngineRpc {
 
     pub fn with_previews(mut self, previews: rcode_preview::PreviewService) -> Self {
         self.previews = Some(previews);
+        self
+    }
+
+    pub fn with_remote_access(mut self, access: std::sync::Arc<crate::remote_access::RemoteAccess>) -> Self {
+        self.remote_access = Some(access);
+        self
+    }
+
+    pub fn without_remote_access(mut self) -> Self {
+        self.remote_access = None;
         self
     }
 
@@ -1666,6 +1678,13 @@ impl RpcService for EngineRpc {
                 .await;
         }
         match method {
+            "GetRemoteAccess" => RpcReply::value(&self.remote_access.as_ref().ok_or_else(|| RpcError::Failed("external access management is local only".into()))?.view()),
+            "GetRemoteAccessApiKey" => RpcReply::value(&serde_json::json!({"apiKey":self.remote_access.as_ref().ok_or_else(|| RpcError::Failed("external access management is local only".into()))?.api_key()})),
+            "SetRemoteAccess" => {
+                let access = self.remote_access.as_ref().ok_or_else(|| RpcError::Failed("external access management is local only".into()))?;
+                let edit = parse_params(params)?;
+                RpcReply::value(&access.set(edit).await?)
+            }
             methods::ENGINE_INFO => RpcReply::value(&self.engine_info),
             methods::ENGINE_READY => RpcReply::value(&serde_json::json!({ "ready": true })),
             methods::GET_TITLE_SETTINGS => RpcReply::value(&self.registry.title_settings()),

@@ -15,6 +15,7 @@ use rcode_rpc::{RpcError, RpcReply, RpcService, methods};
 use rcode_sync::DocsStore;
 
 pub mod auth;
+pub mod remote_access;
 mod change_request_store;
 pub mod change_requests;
 pub mod chat2_host;
@@ -132,6 +133,7 @@ pub struct EngineConfig {
 /// The assembled engine core — also constructible without the IPC server for tests
 /// and the in-process (headed) mode.
 pub struct EngineCore {
+    pub remote_access: Arc<remote_access::RemoteAccess>,
     pub sessions: SessionsEngine,
     pub doc_host: DocHost,
     pub workspace: WorkspaceHost,
@@ -289,7 +291,10 @@ impl EngineCore {
             turn_diff.note_turn_start(chat_id, cwd);
         }));
         let spaces_sync = SpacesSync::start(repos.clone(), workspace.clone(), &device_id);
+        let remote_access = remote_access::RemoteAccess::open(config_root)
+            .map_err(|error| EngineError::Other(error.to_string()))?;
         Ok(Self {
+            remote_access,
             sessions,
             doc_host,
             workspace,
@@ -437,6 +442,7 @@ impl EngineCore {
             self.config_root.clone(),
         )
         .with_auth(self.auth())
+        .with_remote_access(self.remote_access.clone())
         .with_previews(self.previews.clone());
         if let Some(links) = self.links() {
             rpc = rpc.with_links(links);
@@ -463,6 +469,7 @@ impl EngineCore {
     /// kill live PTYs, stamp our workspace `lastSeenAt`, and flush every open doc
     /// snapshot.
     pub async fn shutdown(&self) {
+        self.remote_access.shutdown().await;
         self.previews.shutdown().await;
         // A run interruption transitions its chat to Idle, and Idle normally
         // releases the next queued row. Freeze first so quitting never starts
@@ -506,6 +513,7 @@ impl EngineCore {
 
 pub struct Engine {
     pub config: EngineConfig,
+    remote_override: Option<(String, u16)>,
 }
 
 /// A fully assembled identity-scoped engine plus the relay handle whose lifetime
@@ -575,7 +583,14 @@ impl Drop for EngineRuntime {
 
 impl Engine {
     pub fn new(config: EngineConfig) -> Self {
-        Self { config }
+        Self { config, remote_override: None }
+    }
+
+    pub fn with_remote_access(mut self, api_key: String, port: u16) -> Result<Self, RpcError> {
+        rcode_rpc::validate_api_key(&api_key)?;
+        if port == 0 { return Err(RpcError::BadParams("port must be between 1 and 65535".into())); }
+        self.remote_override = Some((api_key, port));
+        Ok(self)
     }
 
     /// Resolve the local auth configuration for headed and headless modes.
@@ -627,7 +642,7 @@ impl Engine {
         auth: Auth,
         profile: EngineProfile,
     ) -> anyhow::Result<EngineRuntime> {
-        Self::assemble_runtime_inner(config, auth, profile, None).await
+        Self::assemble_runtime_inner(config, auth, profile, None, None).await
     }
 
     /// Like [`Self::assemble_runtime`], but against an [`InstanceLock`] the
@@ -639,7 +654,7 @@ impl Engine {
         profile: EngineProfile,
         lock: InstanceLock,
     ) -> anyhow::Result<EngineRuntime> {
-        Self::assemble_runtime_inner(config, auth, profile, Some(lock)).await
+        Self::assemble_runtime_inner(config, auth, profile, Some(lock), None).await
     }
 
     async fn assemble_runtime_inner(
@@ -647,6 +662,7 @@ impl Engine {
         auth: Auth,
         profile: EngineProfile,
         lock: Option<InstanceLock>,
+        remote_override: Option<(String, u16)>,
     ) -> anyhow::Result<EngineRuntime> {
         // The edge is an explicit, offline-capable opt-in: it needs both a
         // bearer (which identifies this runtime to the rooms) and a base URL to
@@ -760,6 +776,12 @@ impl Engine {
             core.start_host_relay(&edge.url)
         });
 
+        let external_service = Arc::new(core.rpc_service().as_ref().clone().without_remote_access());
+        if let Some((api_key, port)) = remote_override {
+            core.remote_access.start_configured(external_service, api_key, port).await?;
+        } else {
+            core.remote_access.start(external_service).await;
+        }
         Ok(EngineRuntime {
             core,
             host_relay: std::sync::Mutex::new(host_relay),
@@ -782,7 +804,7 @@ impl Engine {
         let auth = Self::build_auth(&config).await;
         let profile = Self::resolve_profile(&config, &auth);
 
-        let runtime = Self::assemble_runtime(&config, auth, profile).await?;
+        let runtime = Self::assemble_runtime_inner(&config, auth, profile, None, self.remote_override).await?;
         // The desktop app or `rcode update` may install a newer binary under
         // a running service; restart into it once no run or terminal is live.
         if let Some(updater) = runtime.core().updater() {
