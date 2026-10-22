@@ -61,28 +61,17 @@ conversation-elapsed-minutes = { $minutes }分{ $seconds }秒
 conversation-elapsed-hours = { $hours }小时{ $minutes }分
 conversation-elapsed-days = { $days }天{ $hours }小时
 
-# 工作指示器旁轮换的趣味词。按索引取词，因此各语言的词条数必须一致。
-conversation-flavour-rcoding = RCode 中
+# 工作指示器旁轮换的状态词。各语言保持相同词条，仅描述整体工作状态。
+conversation-flavour-processing = 处理中
 conversation-flavour-thinking = 思考中
+conversation-flavour-analyzing = 分析中
 conversation-flavour-pondering = 琢磨中
-conversation-flavour-scheming = 谋划中
-conversation-flavour-brewing = 酝酿中
-conversation-flavour-weaving = 编织中
-conversation-flavour-tinkering = 摆弄中
-conversation-flavour-musing = 沉思中
-conversation-flavour-composing = 谱写中
-conversation-flavour-sifting = 筛选中
-conversation-flavour-untangling = 解结中
+conversation-flavour-deliberating = 推敲中
+conversation-flavour-organizing = 梳理中
+conversation-flavour-formulating = 构思中
+conversation-flavour-reasoning = 推演中
 conversation-flavour-distilling = 提炼中
-conversation-flavour-sketching = 勾画中
-conversation-flavour-plotting = 筹划中
-conversation-flavour-riffing = 即兴中
-conversation-flavour-combobulating = 理顺中
-conversation-flavour-percolating = 浸润中
-conversation-flavour-marinating = 入味中
-conversation-flavour-noodling = 随想中
-conversation-flavour-puzzling = 解谜中
-conversation-flavour-conjuring = 召唤中
+conversation-flavour-untangling = 理顺中
 
 # 对话界面自身的装饰文字：媒体占位、元信息条，以及交互结束后留下的胶囊。
 # 其中的名称、标题、设备 id 都是数据，保持原样。

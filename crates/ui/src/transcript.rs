@@ -2330,33 +2330,22 @@ fn format_kb(bytes: u64) -> String {
 // Working indicator flavour (pure; rendered by the shell strip)
 // ---------------------------------------------------------------------------
 
-/// Rotating flavour vocabulary (21 words / 7s, seeded per chat).
+/// Rotating status vocabulary (10 words / 7s, seeded per chat).
 ///
 /// The list is a set of keys, not of strings: the word is chosen by index, so
 /// every language must define the same number of steps in the same order, and
 /// the resources are the only place the words themselves live.
-pub const FLAVOUR_WORDS: [rcode_presentation::TextKey; 21] = [
-    rcode_presentation::TextKey::ConversationFlavourRcoding,
+pub const FLAVOUR_WORDS: [rcode_presentation::TextKey; 10] = [
+    rcode_presentation::TextKey::ConversationFlavourProcessing,
     rcode_presentation::TextKey::ConversationFlavourThinking,
+    rcode_presentation::TextKey::ConversationFlavourAnalyzing,
     rcode_presentation::TextKey::ConversationFlavourPondering,
-    rcode_presentation::TextKey::ConversationFlavourScheming,
-    rcode_presentation::TextKey::ConversationFlavourBrewing,
-    rcode_presentation::TextKey::ConversationFlavourWeaving,
-    rcode_presentation::TextKey::ConversationFlavourTinkering,
-    rcode_presentation::TextKey::ConversationFlavourMusing,
-    rcode_presentation::TextKey::ConversationFlavourComposing,
-    rcode_presentation::TextKey::ConversationFlavourSifting,
-    rcode_presentation::TextKey::ConversationFlavourUntangling,
+    rcode_presentation::TextKey::ConversationFlavourDeliberating,
+    rcode_presentation::TextKey::ConversationFlavourOrganizing,
+    rcode_presentation::TextKey::ConversationFlavourFormulating,
+    rcode_presentation::TextKey::ConversationFlavourReasoning,
     rcode_presentation::TextKey::ConversationFlavourDistilling,
-    rcode_presentation::TextKey::ConversationFlavourSketching,
-    rcode_presentation::TextKey::ConversationFlavourPlotting,
-    rcode_presentation::TextKey::ConversationFlavourRiffing,
-    rcode_presentation::TextKey::ConversationFlavourCombobulating,
-    rcode_presentation::TextKey::ConversationFlavourPercolating,
-    rcode_presentation::TextKey::ConversationFlavourMarinating,
-    rcode_presentation::TextKey::ConversationFlavourNoodling,
-    rcode_presentation::TextKey::ConversationFlavourPuzzling,
-    rcode_presentation::TextKey::ConversationFlavourConjuring,
+    rcode_presentation::TextKey::ConversationFlavourUntangling,
 ];
 pub const FLAVOUR_ROTATE_SECS: i64 = 7;
 

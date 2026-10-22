@@ -108,30 +108,18 @@ conversation-elapsed-minutes = { $minutes }m { $seconds }s
 conversation-elapsed-hours = { $hours }h { $minutes }m
 conversation-elapsed-days = { $days }d { $hours }h
 
-# The rotating flavour word beside the working spinner. Playful gerunds, one
-# per step of the rotation; the list must keep its length across languages
-# because the word is picked by index.
-conversation-flavour-rcoding = Rcoding
+# Rotating status words beside the working spinner. Keep the same entries in
+# every language; these describe general activity, not specific tool actions.
+conversation-flavour-processing = Processing
 conversation-flavour-thinking = Thinking
+conversation-flavour-analyzing = Analyzing
 conversation-flavour-pondering = Pondering
-conversation-flavour-scheming = Scheming
-conversation-flavour-brewing = Brewing
-conversation-flavour-weaving = Weaving
-conversation-flavour-tinkering = Tinkering
-conversation-flavour-musing = Musing
-conversation-flavour-composing = Composing
-conversation-flavour-sifting = Sifting
-conversation-flavour-untangling = Untangling
+conversation-flavour-deliberating = Deliberating
+conversation-flavour-organizing = Organizing
+conversation-flavour-formulating = Formulating
+conversation-flavour-reasoning = Reasoning
 conversation-flavour-distilling = Distilling
-conversation-flavour-sketching = Sketching
-conversation-flavour-plotting = Plotting
-conversation-flavour-riffing = Riffing
-conversation-flavour-combobulating = Combobulating
-conversation-flavour-percolating = Percolating
-conversation-flavour-marinating = Marinating
-conversation-flavour-noodling = Noodling
-conversation-flavour-puzzling = Puzzling
-conversation-flavour-conjuring = Conjuring
+conversation-flavour-untangling = Untangling
 
 # Pieces of the transcript's own chrome: the media placeholders, the metadata
 # strip, and the chips a resolved or pending interaction leaves behind. A name,
