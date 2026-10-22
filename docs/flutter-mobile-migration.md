@@ -1,8 +1,8 @@
 # Flutter mobile migration
 
-The requested end state replaces `apps/ios` with `apps/mobile`, targeting Android and iOS from the same Flutter UI. The original native app must be removed after its behavior, assets and build responsibilities have been transferred. Historical source remains available in Git.
+The mobile application is `apps/mobile`, targeting Android and iOS from the same Flutter UI.
 
-## Acceptance scope
+## Implemented scope
 
 - Authenticated host/API-key pairing, masked secure storage, host-scoped caches, foreground recovery and sign-out cleanup.
 - Sessions/Settings/Search phone tabs, new-session capsule and working/input summary; tablet sidebar and conversation split.
@@ -16,7 +16,7 @@ The requested end state replaces `apps/ios` with `apps/mobile`, targeting Androi
 - Complete Luau visuals: controls, vectors/charts, canvas gestures and GPU scenes/shaders with lifecycle suspension.
 - Appearance, wallpaper effects, math settings, project grouping, archive browser and notification preferences/navigation.
 - Accessibility labels, system text scaling, reduced motion, keyboard avoidance and tablet keyboard navigation.
-- Android build and integration tests; iOS runner/build wiring and simulator verification when macOS/Xcode is available.
+- Android and iOS builds and integration checks on their respective emulators/simulators.
 - Remove legacy native iOS sources, generated Swift bindings, obsolete platform build scripts and CI references. Retain only Flutter's required iOS runner/bootstrap and portable Rust components that the new app uses.
 
 ## Existing product boundaries
@@ -55,13 +55,23 @@ Phone/tablet width changes transfer the active conversation and draft between
 the route and split view. Conversation rows grow with system text size, and
 highlighted code supports partial text selection and system text scaling.
 
+Hardware keyboards support Cmd+N for new conversations, Cmd+Shift+F to open
+and focus search, Cmd+B for the wide sidebar and Cmd+Enter to submit the
+new-conversation page. Android also accepts the Ctrl equivalents. Platform
+variant widget tests exercise iOS Cmd and Android Ctrl behavior, including
+modal guards and disabled/duplicate submissions; these are not physical
+keyboard tests.
+
 ## Validation evidence
 
-On 2026-10-23, the pinned Windows Flutter/Dart toolchain passed all 80 ordinary
-unit/widget tests. Five environment-gated tests were skipped in that invocation:
-one real-engine integration and four native FFI tests. The unchanged 45-message
-session scroll fixture also passed three consecutive isolated runs, six tests
-per run. `flutter analyze --no-pub` reported no issues.
+On 2026-10-23, [Linux CI at `afee6e6`](https://github.com/chengliang4810/RCode/actions/runs/39848701487/job/120068850622)
+passed all 87 ordinary unit/widget tests, including the new hardware-keyboard
+cases. Five environment-gated tests were skipped in that invocation: one
+real-engine integration and four native FFI tests. The real-engine gate passed
+separately in the same job. `flutter analyze --no-pub` reported no issues.
+The earlier Windows suite passed its 80-test baseline, and the unchanged
+45-message session scroll fixture passed three consecutive isolated runs,
+six tests per run.
 
 The Windows tester has an intermittent native access violation. The exact
 version-gated temporary runner and the observed limits are documented in
@@ -69,10 +79,12 @@ version-gated temporary runner and the observed limits are documented in
 that runner; they do not establish that the unmodified Windows tester is stable.
 The installed SDK, product logic and test assertions are unchanged.
 
-The native Rust mobile suite passed 75 tests, with one pre-existing ignored
-test. A separate five-test run enabled every native FFI gate and passed against
-the rebuilt Windows library, checking actual canvas geometry/colors, controls,
-widget recycling, locale changes and all six zatex math fonts.
+The same Linux job passed 303 Rust regressions across the mobile, client,
+Markdown and text crates. The mobile crate accounts for 75 passed tests and
+one pre-existing ignored test. A separate five-test Windows run enabled every
+native FFI gate and passed against the rebuilt library, checking actual canvas
+geometry/colors, controls, widget recycling, locale changes and all six zatex
+math fonts. Four tests exercise FFI; the fifth checks Flutter font styles.
 
 The real Rust engine/Dart gate separately exercises authenticated RPC, typed
 questions, attachment round trips, shared queue editing, command deduplication
@@ -86,6 +98,13 @@ Both Android debug APKs built successfully through Gradle's automatic Rust
 integration. All packaged shared libraries have LOAD alignment of at least
 16 KiB, APK ZIP alignment passes `zipalign -P 16`, the ten C ABI entry points
 are present, and obsolete UniFFI exports are absent.
+
+[Linux CI at `afee6e6`](https://github.com/chengliang4810/RCode/actions/runs/39848701487/job/120074373609)
+also built a single debug APK containing both arm64 and x86_64. Its downloaded
+artifact digest and source revision were verified, followed by the same ABI,
+ELF and ZIP checks. All eleven packaged shared libraries meet the 16 KiB LOAD
+alignment requirement. The APK SHA256 is
+`28244f0f3b25ee748150f11bb34ea00568c925c54e4f84e09383ea023edb6162`.
 
 The x86_64 APK also passed manual operation against the real local engine on an
 Android 16/API 36 emulator:
@@ -108,16 +127,16 @@ Android screenshots/hierarchies and machine-readable summaries. The
 `mobile_smoke` engine example supplies the deterministic model events for
 repeatable local runtime checks; it does not validate a real provider account.
 
-## Remaining platform verification
+## Device validation and limits
 
-There is no local Mac in this session. The repository does have GitHub-hosted
-macOS CI: [run 39816464177](https://github.com/chengliang4810/RCode/actions/runs/39816464177)
-passed its desktop macOS jobs, but its Flutter core job failed strict dependency
-resolution, so the iOS job was skipped. The lock file used a local package mirror
-while CI used pub.dev. Normalizing hosted URLs to pub.dev passed
-`flutter pub get --enforce-lockfile` with every existing version and package
-SHA256 unchanged. This fixes the observed dependency blocker; a successful iOS
-build or runtime check must still be established by a new run.
+[GitHub-hosted macOS CI at `afee6e6`](https://github.com/chengliang4810/RCode/actions/runs/39848701487/job/120074373888)
+built the unsigned simulator application and passed its six-check device gate
+on Xcode 26.6, iOS 26.5 and an iPhone 11 simulator. The test body completed in
+39 seconds. All five PNGs were reviewed: math, controls, Canvas, scene/shader,
+the running turn and its restored text/native content display correctly.
+The result report records `passed`, and cleanup confirms that the fixture
+stopped and the dedicated simulator was deleted. [Screenshots and logs](https://github.com/chengliang4810/RCode/actions/runs/39848701487/artifacts/12458169584)
+include the source revision and toolchain versions.
 
 The device integration gate in `apps/mobile/integration_test` launches the
 shipping application with real storage plugins, authenticated engine RPC and
@@ -127,19 +146,23 @@ while the application models and connection are disposed. Recreating the app
 must restore secure credentials and recover that turn exactly once. Its
 deterministic engine fixture does not contact a model provider. Screenshots and
 structured results are collected by `test_driver/integration_test.dart`.
-The shared gate passed all six checks on the Android 16/API 36 emulator,
+The shared gate passed all six checks in 32 seconds on the Android 16/API 36 emulator,
 including actual shader blue pixels, shaded scene pixels and Count 0 to Count 1.
 Five captured PNGs and `result.json` are in the ignored
-`apps/mobile/build/qa/device-integration` directory. The successful driver log is
-`apps/mobile/build/qa/device-integration-drive-4.log`. Text entry uses the SDK's
+`apps/mobile/build/qa/device-integration-settled-final/run-20261023-0413`
+directory, alongside the successful `drive.log`. Text entry uses the SDK's
 test input to avoid emulator IME echoes. This automated gate rebuilds the app
 models and closes its connection; the separate manual Android check above
 covers actual operating-system process termination.
 
-An Xcode simulator build and runtime, physical iOS execution, signing and
-TestFlight upload remain unverified until their respective checks actually run.
-The migration is not marked fully accepted while platform verification remains
-outstanding.
+The gate waits for the latest restored message's native display and decoded
+surfaces, visible completion text and stable text scrolling before capture.
+It also confirms that the accepted turn is still running before disconnecting,
+then checks that reconnecting restores one completed result without resending.
+
+Physical iPhone/iPad execution, native keyboard behavior, signing and TestFlight
+upload remain unverified. The device gate closes and rebuilds the app models;
+it does not terminate the iOS operating-system process.
 
 Android arm64 has been compiled and package-validated, but no physical Android
 device was available for this run. The manual Android pass covers the emulator

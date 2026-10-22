@@ -5,6 +5,10 @@ Phone tabs, the tablet sidebar, Geist typefaces, colors and application flows
 follow the original interface. Flutter's Android and iOS runners contain only
 platform bootstrap, permissions and bridges.
 
+Hardware keyboards support Cmd+N for a new conversation, Cmd+Shift+F for search,
+Cmd+B to toggle the wide sidebar and Cmd+Enter to submit the new-conversation
+page. Android also accepts Ctrl in place of Cmd.
+
 The application connects to a desktop or headless RCode engine over
 authenticated WebSocket RPC. Enter its `ws://host:27655` or `wss://host` address
 and API key. Keys contain at least eight letters and digits, with both types
@@ -32,8 +36,10 @@ On Windows with this pinned SDK, run `scripts/mobile/test-windows.ps1` from the
 repository root for the [isolated tester workaround](../../docs/windows-flutter-tests.md).
 It disables host CPU profiling without editing the installed SDK, application
 or test assertions. Linux CI uses the normal Flutter command above.
-The controlled Windows run passed the six session-page tests three times and
-the final complete suite (80 passed, five documented gate skips); analysis was clean.
+The controlled Windows run passed the six session-page tests three times.
+[Linux CI](https://github.com/chengliang4810/RCode/actions/runs/39848701487/job/120068850622)
+passed the current full suite: 87 tests, with five environment-gated skips;
+analysis was clean. The real-engine gate runs separately in the same job.
 
 The Android build compiles the portable Rust visual/math library for arm64 and
 x86_64 through Gradle. See [native build details](native/README.md).
@@ -100,11 +106,11 @@ arm64 execution remains unverified. Detailed evidence and remaining limits are
 in [the migration record](../../docs/flutter-mobile-migration.md).
 
 The real engine/Dart integration, Rust visual/math suite and native Flutter FFI
-checks also pass separately. Xcode simulator builds, physical iOS execution,
-signing and TestFlight upload remain unverified. There is no local Mac, but the
-repository has GitHub-hosted macOS CI. Its previous run skipped iOS after a
-strict lock-file failure; the package-host mismatch has been repaired and
-verified locally. A new macOS run must establish the actual iOS result.
+checks also pass separately. [GitHub-hosted macOS CI](https://github.com/chengliang4810/RCode/actions/runs/39848701487/job/120074373888)
+built the unsigned iOS simulator app and passed its six-check device gate at
+`afee6e6`, using Xcode 26.6 and an iOS 26.5 iPhone 11 simulator. Its five PNGs
+were reviewed, including the running turn and restored text/native content.
+Physical iPhone/iPad execution, signing and TestFlight upload remain unverified.
 
 Notifications are local and depend on receiving workspace events while the app
 is running. The direct service does not implement background APNs/FCM delivery

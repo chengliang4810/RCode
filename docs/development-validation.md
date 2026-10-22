@@ -35,8 +35,8 @@ GitHub Release 使用普通发布；版本名中的 `beta` 不决定 prerelease 
 
 ## 移动端
 
-移动端统一为 `apps/mobile` 下的 Flutter 应用，以 Android 和 iOS 为目标，通过 API 密钥连接桌面或 headless 引擎。最终 Flutter 套件 80 项通过，5 项环境门控跳过；真实引擎与 Dart 门控另行通过，Rust 移动核心 75 项通过、1 项既有忽略，原生 FFI 专项 5 项通过。Windows Flutter 测试使用版本受限的临时工具副本关闭采样分析器，安装的 SDK 和测试断言未改动。
+移动端统一为 `apps/mobile` 下的 Flutter 应用，以 Android 和 iOS 为目标，通过 API 密钥连接桌面或 headless 引擎。[Linux CI 的移动核心任务](https://github.com/chengliang4810/RCode/actions/runs/39848701487/job/120068850622)在 `afee6e6` 上完成 Flutter 静态检查，87 项单元／界面测试通过、5 项环境门控跳过；真实引擎与 Dart 门控在同一任务另行通过。Rust 移动、客户端、Markdown 和文本回归共 303 项通过，移动核心占其中 75 项，另有 1 项既有忽略。Windows 原生专项 5 项通过，包含 4 项 FFI 检查和 1 项字体样式检查。Windows Flutter 测试使用版本受限的临时工具副本关闭采样分析器，安装的 SDK 和测试断言未改动。
 
-Android arm64/x86_64 APK 均构建并通过原生库和 ZIP 的 16 KiB 对齐检查。x86_64 包已在 Android 16/API 36 模拟器中验证鉴权连接、强制关闭后服务端继续执行与重连恢复、问答、图片上传和系统分享、真实原生绘图/数学、首次通知权限及手机/平板草稿往返。Android arm64 实机、Xcode 编译和 iOS 运行尚未验证。本地没有 Mac，仓库已有 GitHub 托管的 macOS CI；已定位并修复最近一次流水线因包镜像地址导致的严格锁文件检查失败，新的 iOS 编译及运行结果仍待实际执行。构建命令见 [移动端 README](../apps/mobile/README.md)，证据与边界见 [迁移记录](flutter-mobile-migration.md)。
+Android arm64/x86_64 APK 均构建并通过原生库和 ZIP 的 16 KiB 对齐检查，最终 CI 包内 11 个共享库的全部 ELF LOAD 对齐均至少为 16 KiB。x86_64 包已在 Android 16/API 36 模拟器中验证鉴权连接、强制关闭后服务端继续执行与重连恢复、问答、图片上传和系统分享、真实原生绘图／数学、首次通知权限及手机／平板草稿往返。[最终 iOS CI](https://github.com/chengliang4810/RCode/actions/runs/39848701487/job/120074373888)在 `afee6e6` 上通过无签名编译及实际设备集成检查，环境为 Xcode 26.6、iOS 26.5、iPhone 11 模拟器。Android arm64 与 iPhone／iPad 实机、签名和 TestFlight 上传仍未执行。构建命令见 [移动端 README](../apps/mobile/README.md)，证据与边界见 [迁移记录](flutter-mobile-migration.md)。
 
-新增的设备集成门控已在 Android 模拟器实际通过 6 项检查并导出 5 张截图，覆盖真实鉴权连接和安全存储、原生数学与图形像素、交互控件、结构化问答，以及断开应用连接后自动恢复已完成任务。该门控重建应用模型，操作系统强制结束进程的场景由前述人工验收覆盖。`scripts/mobile/test-ios.sh` 将同一门控接入独立 iPhone 模拟器；脚本的本机静态检查不等同于 iOS 运行通过。
+同一设备集成门控已在 Android 和 iOS 模拟器各通过 6 项检查、各导出 5 张截图，测试体分别耗时约 32 秒和 39 秒。它覆盖真实鉴权连接和安全存储、原生数学与图形像素、交互控件、结构化问答，以及任务仍运行时断开应用连接、重建后恢复一次完成结果。发送中和恢复后的实际文字、原生画面均已逐张核对。`scripts/mobile/test-ios.sh` 的结果确认测试 fixture 已退出、专用模拟器已删除。该门控重建应用模型，Android 操作系统强制结束进程的场景由前述人工验收覆盖；模型供应商使用明确的测试实现。
