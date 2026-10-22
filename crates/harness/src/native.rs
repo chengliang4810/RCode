@@ -1029,12 +1029,16 @@ impl NativeHarness {
         // left guessing what was meant.
         let images = load_attachments(&request.attachments);
 
-        let history = session.as_ref().map(|state| {
+        let remembered = session.as_ref().map(|state| {
             state.history.lock().unwrap().iter()
                 .filter(|message| message.role != rcode_agent::message::MessageRole::System)
                 .cloned().collect::<Vec<_>>()
-        }).filter(|history| !history.is_empty())
-            .unwrap_or_else(|| history.map(conversation_history).unwrap_or_default());
+        }).filter(|history| !history.is_empty());
+        let history = match remembered {
+            Some(history) => history,
+            None => conversation_history(history.unwrap_or_default(), self.data_dir.as_deref(), &model)
+                .await.map_err(HarnessError::Protocol)?,
+        };
         self.spawn_session_turn(
             &model,
             request.prompt.clone(),
@@ -1213,6 +1217,11 @@ impl NativeHarness {
             }
         }
         let mut runner = AgentRunner::new(host.clone(), tools, config).with_goal(goal);
+        if let Some(root) = self.data_dir.as_deref() {
+            runner = runner.with_history_recorder(Arc::new(
+                crate::native_history::Recorder::new(root, &host.assistant_message_id, &host.model),
+            ));
+        }
         if let Some(session) = &session {
             runner = runner.with_history_sink(session.history.clone())
                 .with_goal_continuation(session.goal_continuation.clone());
@@ -1356,39 +1365,45 @@ fn skills_root_for(
 
 /// Turn the engine's conversation into the loop's messages.
 ///
-/// The engine speaks `ConversationTurn` (role + flattened text); the loop
-/// speaks `Message`. The flattening happened upstream, deliberately: a replayed
-/// turn must not reference a tool call whose result was since dropped, because
-/// providers reject a `tool_result` with no matching `tool_use`. The engine is
-/// the one place that knows what survived compaction, so it does the flattening
-/// there (see `rcode_proto::ConversationTurn`).
+/// Complete local entry groups use model history, including exact tool inputs,
+/// outputs and reasoning signatures. Legacy or partially compacted groups use
+/// the engine-provided text, hydrated from the full local tool journal.
 ///
 /// An unrecognised role is dropped rather than guessed at. A turn the model
 /// cannot attribute is worse than one it never sees.
-fn conversation_history(turns: Vec<rcode_proto::ConversationTurn>) -> Vec<rcode_agent::Message> {
+pub(super) async fn conversation_history(
+    turns: Vec<rcode_proto::ConversationTurn>,
+    data_dir: Option<&std::path::Path>,
+    model: &str,
+) -> Result<Vec<rcode_agent::Message>, String> {
     use rcode_agent::message::MessageRole;
-    turns
-        .into_iter()
-        .filter(|turn| !turn.text.trim().is_empty())
-        .filter_map(|turn| {
-            let role = match turn.role.as_str() {
-                "user" => MessageRole::User,
-                "assistant" => MessageRole::Assistant,
-                other => {
-                    tracing::warn!(
-                        role = other,
-                        "skipping a conversation turn with an unknown role"
-                    );
-                    return None;
-                }
-            };
-            Some(rcode_agent::Message {
-                id: rcode_agent::MessageId::new(),
-                role,
+    let mut messages = Vec::new();
+    let mut restored = std::collections::HashSet::new();
+    for turn in turns {
+        if let (Some(root), Some(id)) = (data_dir, turn.native_history_id.as_deref()) {
+            if restored.contains(id) { continue; }
+            if let Some(history) = crate::native_history::load(root, id, model).await? {
+                restored.insert(id.to_owned());
+                messages.extend(history);
+                continue;
+            }
+        }
+        let role = match turn.role.as_str() {
+            "user" => MessageRole::User,
+            "assistant" => MessageRole::Assistant,
+            other => {
+                tracing::warn!(role = other, "skipping a conversation turn with an unknown role");
+                continue;
+            }
+        };
+        if !turn.text.trim().is_empty() {
+            messages.push(rcode_agent::Message {
+                id: rcode_agent::MessageId::new(), role,
                 content: rcode_agent::MessageContent::text(turn.text),
-            })
-        })
-        .collect()
+            });
+        }
+    }
+    Ok(messages)
 }
 
 /// Turn staged attachment paths into image blocks for the model.

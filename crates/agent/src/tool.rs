@@ -53,6 +53,12 @@ pub trait Tool: Send + Sync {
     /// empty object (`{}`) means "no declared arguments".
     fn input_schema(&self) -> serde_json::Value;
 
+    /// Whether this invocation can overlap other safe calls. Unknown tools and
+    /// tools with side effects remain serial unless they explicitly opt in.
+    fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
+        false
+    }
+
     /// Run the tool. `input` is the JSON the model produced.
     ///
     /// Returning `Ok` with [`ToolResult::is_error`] set is not the same as

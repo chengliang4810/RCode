@@ -28,6 +28,8 @@ impl Tool for GlobTool {
          directory instead."
     }
 
+    fn is_concurrency_safe(&self, _input: &Value) -> bool { true }
+
     fn input_schema(&self) -> Value {
         json!({
             "type": "object",

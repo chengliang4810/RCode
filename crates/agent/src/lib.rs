@@ -148,6 +148,14 @@ pub enum DoneReason {
     Failed(String),
 }
 
+/// Local execution history, separate from the transcript rendered to users.
+/// Record completed model messages and tool results; restoring them never
+/// executes a historical tool call.
+#[async_trait::async_trait]
+pub trait HistoryRecorder: Send + Sync {
+    async fn record(&self, message: &Message) -> Result<(), AgentError>;
+}
+
 /// What the loop needs from its host.
 ///
 /// A trait rather than a struct so the harness can drive it without this crate

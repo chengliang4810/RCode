@@ -124,6 +124,11 @@ impl HookExecutor {
 
 #[async_trait::async_trait]
 impl HookRunner for HookExecutor {
+    fn allows_concurrent_tools(&self) -> bool {
+        !self.hooks.iter().any(|hook| matches!(hook.event,
+            HookEvent::PreToolUse | HookEvent::PostToolUse | HookEvent::PostToolUseFailure))
+    }
+
     async fn fire(&self, event: HookEvent, context: HookContext) -> HookResult {
         let mut result = HookResult::allow();
         for hook in self.matching(event, &context) {

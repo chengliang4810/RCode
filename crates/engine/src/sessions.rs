@@ -377,13 +377,22 @@ impl SessionsEngine {
     ///
     /// Returns `None` when the chat has no prior turns, which lets the harness
     /// skip the replay path entirely rather than build an empty list.
-    fn conversation_history(
+    async fn conversation_history(
         &self,
         chat_id: &str,
         exclude: Option<&str>,
     ) -> Option<Vec<rcode_proto::ConversationTurn>> {
         let handle = self.doc_handle(chat_id).ok()?;
-        let entries = handle.doc().read_entries().ok()?;
+        let mut entries = handle.doc().read_entries().ok()?;
+        // Never restore a complete local record when part of its display group
+        // has been excluded by compaction or removed from the visible history.
+        let roots: std::collections::HashSet<_> = entries.iter()
+            .filter(|entry| !entry.excluded && entry.continuation_of.is_none())
+            .map(|entry| entry.id.clone()).collect();
+        let excluded_groups: std::collections::HashSet<_> = entries.iter()
+            .filter(|entry| entry.excluded)
+            .map(|entry| entry.continuation_of.clone().unwrap_or_else(|| entry.id.clone())).collect();
+        hydrate_history_outputs(self.inner.journal.clone(), chat_id.to_owned(), &mut entries).await;
 
         let turns: Vec<rcode_proto::ConversationTurn> = entries
             .into_iter()
@@ -406,6 +415,11 @@ impl SessionsEngine {
                 (!text.trim().is_empty()).then(|| rcode_proto::ConversationTurn {
                     role: role.to_owned(),
                     text,
+                    native_history_id: {
+                        let root = entry.continuation_of.as_ref().unwrap_or(&entry.id);
+                        (role == "assistant" && roots.contains(root) && !excluded_groups.contains(root))
+                            .then(|| root.clone())
+                    },
                 })
             })
             .collect();
@@ -794,7 +808,8 @@ impl SessionsEngine {
         harness: Arc<dyn Harness>,
     ) -> Result<String, EngineError> {
         let handle = self.doc_handle(chat_id)?;
-        let entries = handle.doc().read_entries()?;
+        let mut entries = handle.doc().read_entries()?;
+        hydrate_history_outputs(self.inner.journal.clone(), chat_id.to_owned(), &mut entries).await;
 
         // Only entries the model currently sees are candidates: compacting
         // twice must not re-mark what is already out of view, and the summary
@@ -1126,7 +1141,7 @@ impl SessionsEngine {
         // replays it. Read here rather than in the harness because the doc is
         // the engine's, and because the message being dispatched must be
         // excluded — it was written above and rides `request.prompt`.
-        let history = self.conversation_history(chat_id, Some(&user_id));
+        let history = self.conversation_history(chat_id, Some(&user_id)).await;
         let controls = RunControls {
             conversation_id: Some(chat_id.to_owned()),
             goal: if self.inner.doc_host().is_some() { Some(self.goal_store(chat_id)?) } else { None },
@@ -2268,6 +2283,32 @@ fn native_command(prompt: &str, harness: HarnessId) -> bool {
         rcode_proto::invocation::harness_prompt(prompt, harness)
     };
     rcode_proto::invocation::leading_command(&delivered).is_some()
+}
+
+/// Hydrate legacy display entries from local results without executing tools or
+/// mutating the shared document. Missing remote-only data retains its summary.
+async fn hydrate_history_outputs(
+    journal: Arc<RunJournal>,
+    chat_id: String,
+    entries: &mut [rcode_doc::SessionMessageEntry],
+) {
+    let wanted: std::collections::HashSet<String> = entries.iter().filter(|e| !e.excluded)
+        .flat_map(|e| &e.parts).filter_map(|part| match part {
+            MessagePart::Tool { id, .. } => Some(id.clone()), _ => None,
+        }).collect();
+    if wanted.is_empty() { return; }
+    let outputs = tokio::task::spawn_blocking(move || journal.tool_outputs(&chat_id, wanted)).await;
+    let outputs = match outputs {
+        Ok(Ok(outputs)) => outputs,
+        other => { tracing::warn!(error = ?other, "cannot hydrate local tool history"); return; }
+    };
+    for entry in entries.iter_mut().filter(|e| !e.excluded) {
+        for part in &mut entry.parts {
+            if let MessagePart::Tool { id, output, .. } = part {
+                if let Some(full) = outputs.get(id) { *output = Some(full.clone()); }
+            }
+        }
+    }
 }
 
 /// Render one entry's parts as the text a replayed turn carries.
@@ -3728,8 +3769,12 @@ async fn drive_run(
 
         match &event {
             AgentEvent::SessionStarted {
-                session_id, cwd, ..
+                session_id, cwd, assistant_message_id, ..
             } => {
+                if harness_id == HarnessId::Native && folded.is_empty() && writer.is_none()
+                    && !crate::message_ids::exists(&doc, assistant_message_id) {
+                    entry_id = assistant_message_id.clone();
+                }
                 saw_session_started = true;
                 // The event's own cwd (where the harness actually created the
                 // session) scopes the stored id, not the request's.

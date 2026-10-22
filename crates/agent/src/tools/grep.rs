@@ -37,6 +37,8 @@ impl Tool for GrepTool {
          capped at 200 matches."
     }
 
+    fn is_concurrency_safe(&self, _input: &Value) -> bool { true }
+
     fn input_schema(&self) -> Value {
         json!({
             "type": "object",

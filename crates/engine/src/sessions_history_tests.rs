@@ -205,6 +205,31 @@ async fn the_first_turn_carries_no_history() {
 }
 
 #[tokio::test]
+async fn restored_history_hydrates_full_local_tool_output_without_expanding_the_display_doc() {
+    let (_dir, core, _) = fixture().await;
+    let handle = core.doc_host.open("history-test").unwrap();
+    handle.write_user_message("u", "inspect the file", 1).unwrap();
+    let full = format!("file.rs (lines 1-2000)\n{}\nIMPORTANT-LAST-LINE", "contents\n".repeat(4000));
+    let call = AgentEvent::ToolCall { id: "read-one".into(), call: rcode_proto::ToolCall::ReadFile { path: "file.rs".into() } };
+    let result = AgentEvent::ToolResult { id: "read-one".into(), output: Some(full.clone()), is_error: false, diff: None };
+    let mut parts = Vec::new();
+    for event in [&call, &result] {
+        rcode_doc::fold_event_into_parts(&mut parts, event);
+        core.sessions.inner.journal.append("history-test", event).unwrap();
+    }
+    finish_segment(handle.doc(), None, "assistant-root", &core.device_id, 1, &parts, MessageStatus::Complete).unwrap();
+    let history = core.sessions.conversation_history("history-test", None).await.unwrap();
+    assert!(history[1].text.contains(&full));
+    assert_eq!(history[1].native_history_id.as_deref(), Some("assistant-root"));
+    let display = handle.doc().read_entries().unwrap();
+    assert!(!flatten_parts(&display[1].parts).contains("IMPORTANT-LAST-LINE"));
+    handle.doc().set_excluded(&["assistant-root".into()], true).unwrap();
+    let history = core.sessions.conversation_history("history-test", None).await.unwrap();
+    assert_eq!(history.len(), 1, "excluded records must not reappear");
+    core.shutdown().await;
+}
+
+#[tokio::test]
 async fn custom_command_snapshot_preserves_display_replay_retry_and_fork() {
     let (dir, core, harness) = fixture().await;
     let commands = dir.path().join(".agents/commands");

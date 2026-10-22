@@ -157,7 +157,9 @@ Details: [harness](crates/harness/README.md),
 [main prompt](docs/main-system-prompt.md), [commands](docs/custom-commands.md),
 [completion](docs/harness-skill-completion.md),
 [subagents](docs/subagent-prompts.md), [goals](docs/goal-mode-and-agent-tools.md)
-and [plugins](docs/plugin-marketplaces.md).
+and [plugins](docs/plugin-marketplaces.md). Native history restoration,
+compaction and tool concurrency are described in
+[agent history](docs/agent-history-and-compaction.md).
 
 ## 6. Development validation
 

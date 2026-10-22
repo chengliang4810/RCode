@@ -216,6 +216,8 @@ pub struct HookFailure {
 /// never sees the loop's state, only the context it was handed.
 #[async_trait::async_trait]
 pub trait HookRunner: Send + Sync {
+    /// Tool hooks may have side effects even when the tool itself is read-only.
+    fn allows_concurrent_tools(&self) -> bool { false }
     /// Run every hook for `event` and merge what they decide.
     ///
     /// Must not fail: a hook that breaks is reported through the returned
@@ -262,6 +264,7 @@ pub struct NoHooks;
 
 #[async_trait::async_trait]
 impl HookRunner for NoHooks {
+    fn allows_concurrent_tools(&self) -> bool { true }
     async fn fire(&self, _event: HookEvent, _context: HookContext) -> HookResult {
         HookResult::allow()
     }

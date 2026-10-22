@@ -34,6 +34,8 @@ impl Tool for WebFetchTool {
          reduced to text; very long pages are truncated."
     }
 
+    fn is_concurrency_safe(&self, _input: &Value) -> bool { true }
+
     fn input_schema(&self) -> Value {
         json!({
             "type": "object",

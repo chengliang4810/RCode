@@ -24,6 +24,8 @@ impl Tool for ReadTool {
          large file. Reading a directory fails — use FolderOperations."
     }
 
+    fn is_concurrency_safe(&self, _input: &Value) -> bool { true }
+
     fn input_schema(&self) -> Value {
         json!({
             "type": "object",

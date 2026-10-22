@@ -396,11 +396,9 @@ pub struct SlashCommand {
 /// runs can also retain structured history in their persistent session state;
 /// model requests carry the history assembled for that run.
 ///
-/// Tool calls are flattened into the text of the turn that made them. The
-/// alternative — carrying `tool_use`/`tool_result` blocks through — would let
-/// a replayed turn reference a tool call whose result was since compacted
-/// away, which providers reject outright. Flattening keeps every turn
-/// self-contained, which is what a replay needs.
+/// Native turns can resolve complete local model records by entry group.
+/// Text remains the fallback for legacy/remote history and partially compacted
+/// groups, which must not resurrect excluded tool exchanges.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConversationTurn {
@@ -408,6 +406,10 @@ pub struct ConversationTurn {
     pub role: String,
     /// The turn's text, with any tool activity already rendered into it.
     pub text: String,
+    /// Local structured history for an entirely visible assistant entry group.
+    /// Omitted for legacy drivers and partially excluded/compacted groups.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_history_id: Option<String>,
 }
 
 /// A file modification carried inline on a tool result (ACP

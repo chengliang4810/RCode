@@ -10,7 +10,7 @@
 
 use std::sync::Arc;
 
-use futures::stream::{BoxStream, Stream, StreamExt};
+use futures::{FutureExt, stream::{BoxStream, Stream, StreamExt}};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -109,6 +109,7 @@ pub struct AgentRunner {
     tasks: Option<Arc<crate::agent_tasks::AgentTasks>>,
     inbox: Option<Arc<crate::agent_tasks::MessageInbox>>,
     history_sink: Option<Arc<std::sync::Mutex<Vec<Message>>>>,
+    history_recorder: Option<Arc<dyn crate::HistoryRecorder>>,
 }
 
 impl AgentRunner {
@@ -125,6 +126,7 @@ impl AgentRunner {
             tasks,
             inbox: None,
             history_sink: None,
+            history_recorder: None,
         }
     }
 
@@ -159,6 +161,16 @@ impl AgentRunner {
     pub fn with_tasks(mut self, tasks: Arc<crate::agent_tasks::AgentTasks>) -> Self { self.tasks = Some(tasks); self }
     pub fn with_inbox(mut self, inbox: Option<Arc<crate::agent_tasks::MessageInbox>>) -> Self { self.inbox = inbox; self }
     pub fn with_history_sink(mut self, sink: Arc<std::sync::Mutex<Vec<Message>>>) -> Self { self.history_sink = Some(sink); self }
+
+    pub fn with_history_recorder(mut self, recorder: Arc<dyn crate::HistoryRecorder>) -> Self {
+        self.history_recorder = Some(recorder);
+        self
+    }
+
+    async fn record_message(&self, message: &Message) -> Result<(), AgentError> {
+        if let Some(recorder) = &self.history_recorder { recorder.record(message).await?; }
+        Ok(())
+    }
 
     fn remember_history(&self, messages: &[Message]) {
         if let Some(sink) = &self.history_sink {
@@ -333,6 +345,7 @@ impl AgentRunner {
                 }
             };
 
+            self.record_message(&assistant).await?;
             let _ = tx
                 .send(Ok(AgentEvent::MessageComplete {
                     message_id: assistant.id.clone(),
@@ -341,6 +354,7 @@ impl AgentRunner {
 
             let calls = assistant.content.tool_calls();
             messages.push(assistant);
+            self.remember_history(&messages);
 
             if calls.is_empty() {
                 if let Some(inbox) = &self.inbox && !inbox.is_empty() { continue; }
@@ -414,7 +428,7 @@ impl AgentRunner {
                 return Ok(());
             }
 
-            let mut results = self.run_tools(&calls, cancel, tx).await;
+            let mut results = self.run_tools(&calls, cancel, tx).await?;
             if cancel.is_cancelled() {
                 // 恢复子 Agent 前保留已完成的副作用，并补齐被取消的工具配对。
                 // 否则中断后的历史会丢掉执行结果，模型可能重复执行已完成操作。
@@ -553,137 +567,103 @@ impl AgentRunner {
         Ok(built)
     }
 
-    /// Execute every tool call in one assistant turn, in order, and collect the
-    /// results the model will see next round.
+    /// Safe consecutive calls overlap; every unsafe call is an ordering barrier.
     async fn run_tools(
         &self,
         calls: &[(String, String, serde_json::Value)],
         cancel: &CancellationToken,
         tx: &mpsc::Sender<Result<AgentEvent, AgentError>>,
-    ) -> Vec<ContentBlock> {
+    ) -> Result<Vec<ContentBlock>, AgentError> {
+        const CONCURRENCY: usize = 8;
+        let safe = |call: &(String, String, serde_json::Value)| {
+            self.hooks.allows_concurrent_tools()
+                && call.1 != crate::tools::ASK_USER_QUESTION
+                && self.tools.get(&call.1).is_some_and(|tool| tool.is_concurrency_safe(&call.2))
+        };
         let mut results = Vec::with_capacity(calls.len());
-
-        for (id, name, input) in calls {
-            if cancel.is_cancelled() {
-                break;
+        let mut start = 0;
+        while start < calls.len() && !cancel.is_cancelled() {
+            let mut end = start + 1;
+            if safe(&calls[start]) {
+                while end < calls.len() && safe(&calls[end]) { end += 1; }
             }
-            let _ = tx
-                .send(Ok(AgentEvent::ToolCall {
-                    id: id.clone(),
-                    name: name.clone(),
-                    input: input.clone(),
-                }))
-                .await;
-
-            if cancel.is_cancelled() {
-                break;
+            // Drain started work even after one recording error. Dropping sibling
+            // futures could lose side effects or leave a child process running.
+            let jobs: Vec<futures::future::BoxFuture<'_, _>> = calls[start..end].iter().enumerate()
+                .map(|(index, (id, name, input))| async move {
+                    (index, self.run_tool(id, name, input, cancel, tx).await)
+                }.boxed()).collect();
+            let mut batch = futures::stream::iter(jobs).buffer_unordered(CONCURRENCY);
+            let mut completed = Vec::new();
+            let mut failure = None;
+            while let Some((index, result)) = batch.next().await {
+                match result {
+                    Ok(Some(result)) => completed.push((index, result)),
+                    Ok(None) => {},
+                    Err(error) => { if failure.is_none() { failure = Some(error); } }
+                }
             }
+            if let Some(error) = failure { return Err(error); }
+            completed.sort_by_key(|(index, _)| *index);
+            results.extend(completed.into_iter().map(|(_, result)| result));
+            start = end;
+        }
+        Ok(results)
+    }
 
-            // One context per call: a tool that runs a nested agent (Task)
-            // streams that child's events tagged with *this* call's id, which
-            // is what lets a host route them to the child's own transcript.
-            let context = ToolContext {
-                cwd: self.config.cwd.clone(),
-                cancel: cancel.clone(),
-                nested: Some(crate::tools::NestedEventSender::new(id.clone(), tx.clone())),
+    async fn run_tool(
+        &self,
+        id: &str,
+        name: &str,
+        input: &serde_json::Value,
+        cancel: &CancellationToken,
+        tx: &mpsc::Sender<Result<AgentEvent, AgentError>>,
+    ) -> Result<Option<ContentBlock>, AgentError> {
+        if cancel.is_cancelled() { return Ok(None); }
+        let _ = tx.send(Ok(AgentEvent::ToolCall {
+            id: id.to_owned(), name: name.to_owned(), input: input.clone(),
+        })).await;
+        if cancel.is_cancelled() { return Ok(None); }
+        let context = ToolContext {
+            cwd: self.config.cwd.clone(), cancel: cancel.clone(),
+            nested: Some(crate::tools::NestedEventSender::new(id.to_owned(), tx.clone())),
+        };
+        let pre = self.hooks.fire(crate::hook::HookEvent::PreToolUse,
+            crate::hook::HookContext::for_tool(name, input, &self.config.cwd)).await;
+        self.report_hook_failures(&pre);
+        if cancel.is_cancelled() { return Ok(None); }
+        let (output, is_error, diff) = if let Some(blocked) = pre.outcome.block() {
+            (format!("A hook refused this call: {blocked}"), true, None)
+        } else if name == crate::tools::ASK_USER_QUESTION {
+            let (output, is_error) = self.ask_user(id, input, cancel, tx).await;
+            (output, is_error, None)
+        } else {
+            let (output, is_error, diff) = match self.tools.call(name, input.clone(), &context).await {
+                Ok(result) => (result.output, result.is_error, result.diff),
+                Err(error) => (error.to_string(), true, None),
             };
-
-            // PreToolUse runs before execution: a hook that
-            // refuses a call has made the decision the user would otherwise be
-            // asked to make, so asking first would be a prompt for a call that
-            // is already settled.
-            let pre = self
-                .hooks
-                .fire(
-                    crate::hook::HookEvent::PreToolUse,
-                    crate::hook::HookContext::for_tool(name, input, &self.config.cwd),
-                )
-                .await;
-            self.report_hook_failures(&pre);
-            if let Some(blocked) = pre.outcome.block() {
-                let message = format!("A hook refused this call: {blocked}");
-                let _ = tx
-                    .send(Ok(AgentEvent::ToolResult {
-                        id: id.clone(),
-                        is_error: true,
-                        output: Some(message.clone()),
-                        diff: None,
-                    }))
-                    .await;
-                results.push(ContentBlock::ToolResult {
-                    tool_use_id: id.clone(),
-                    content: message,
-                    is_error: true,
-                });
-                continue;
-            }
-
-            if cancel.is_cancelled() {
-                break;
-            }
-
-            if cancel.is_cancelled() {
-                break;
-            }
-
-            // `AskUserQuestion` is not executed — it *is* a request for input.
-            // The host owns the bridge that reaches the user (the same one
-            // user input uses), so the question is
-            // raised here and its answer becomes this call's result.
-            if name == crate::tools::ASK_USER_QUESTION {
-                let (output, is_error) = self.ask_user(id, input, cancel, tx).await;
-                let _ = tx
-                    .send(Ok(AgentEvent::ToolResult {
-                        id: id.clone(),
-                        is_error,
-                        output: Some(output.clone()),
-                        diff: None,
-                    }))
-                    .await;
-                results.push(ContentBlock::ToolResult {
-                    tool_use_id: id.clone(),
-                    content: output,
-                    is_error,
-                });
-                continue;
-            }
-
-            let (output, is_error, diff) =
-                match self.tools.call(name, input.clone(), &context).await {
-                    Ok(result) => (result.output, result.is_error, result.diff),
-                    Err(error) => (error.to_string(), true, None),
-                };
-
-            // PostToolUse always fires, and PostToolUseFailure after it when
-            // the call failed. A hook attached to PostToolUse wants to see
-            // every call; one attached to the failure event wants only the
-            // broken ones. Making the failure event *replace* the success one
-            // would hide failures from the hooks that asked for everything.
             let post = self.fire_post_hooks(name, input, &output, is_error).await;
             let output = match post.outcome.context() {
-                // The hook's note rides the tool's own result rather than a
-                // turn of its own: the model is about to read this output, and
-                // a note about it belongs beside it.
                 Some(note) => format!("{output}\n\n[hook] {note}"),
                 None => output,
             };
-
-            let _ = tx
-                .send(Ok(AgentEvent::ToolResult {
-                    id: id.clone(),
-                    is_error,
-                    output: Some(output.clone()),
-                    diff,
-                }))
-                .await;
-            results.push(ContentBlock::ToolResult {
-                tool_use_id: id.clone(),
-                content: output,
-                is_error,
-            });
+            (output, is_error, diff)
+        };
+        let result = ContentBlock::ToolResult {
+            tool_use_id: id.to_owned(), content: output.clone(), is_error,
+        };
+        // Keep completed side effects available to an in-process resume even
+        // when the durable recorder fails. The settled batch replaces these
+        // individual results in the normal path below.
+        if let Some(sink) = &self.history_sink {
+            sink.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(Message::tool_results(vec![result.clone()]));
         }
-
-        results
+        self.record_message(&Message::tool_results(vec![result.clone()])).await?;
+        let _ = tx.send(Ok(AgentEvent::ToolResult {
+            id: id.to_owned(), is_error, output: Some(output), diff,
+        })).await;
+        Ok(Some(result))
     }
 
     /// Shrink the conversation when it is running out of room.
@@ -712,7 +692,7 @@ impl AgentRunner {
 
         // Micro first, always: it is free, and on the conversations that are
         // long because of tool output it is the whole fix.
-        let shortened = crate::compact::micro_compact(messages, config.max_tool_output_chars);
+        let shortened = crate::compact::micro_compact(messages, config);
         if shortened > 0 {
             let _ = tx
                 .send(Ok(AgentEvent::Compacted {
@@ -738,56 +718,31 @@ impl AgentRunner {
             .filter(|message| message.role != crate::message::MessageRole::System)
             .cloned()
             .collect();
-        let boundaries = crate::compact::turn_boundaries(&without_system);
-        if boundaries.len() <= config.keep_recent_turns {
-            // Nothing to summarize that we are not already keeping. Reporting
-            // the pressure without acting is correct: there is no smaller form
-            // of this conversation left.
-            let _ = tx
-                .send(Ok(AgentEvent::Compacted {
-                    stage: crate::CompactionStage::Exhausted,
-                    shortened: 0,
-                }))
-                .await;
-            return;
-        }
-        let keep_from = boundaries[boundaries.len() - config.keep_recent_turns];
-        let transcript = crate::compact::render_transcript(&without_system[..keep_from]);
-
-        let summary = match self.host.summarize(transcript).await {
-            Ok(summary) if !summary.trim().is_empty() => summary,
+        let outcome = crate::compact::full_compact(without_system, config, |transcript| async {
+            self.host.summarize(transcript).await
+                .map_err(|error| crate::compact::CompactError::Summarize(error.to_string()))
+        }).await;
+        let outcome = match outcome {
+            Ok(outcome) if outcome.compacted => outcome,
             Ok(_) => {
-                let _ = tx
-                    .send(Ok(AgentEvent::Compacted {
-                        stage: crate::CompactionStage::Failed,
-                        shortened: 0,
-                    }))
-                    .await;
+                let _ = tx.send(Ok(AgentEvent::Compacted {
+                    stage: crate::CompactionStage::Exhausted, shortened: 0,
+                })).await;
                 return;
             }
             Err(error) => {
-                tracing::warn!(%error, "compaction summary failed; continuing uncompacted");
-                let _ = tx
-                    .send(Ok(AgentEvent::Compacted {
-                        stage: crate::CompactionStage::Failed,
-                        shortened: 0,
-                    }))
-                    .await;
+                tracing::warn!(%error, "compaction failed; continuing with current history");
+                let _ = tx.send(Ok(AgentEvent::Compacted {
+                    stage: crate::CompactionStage::Failed, shortened: 0,
+                })).await;
                 return;
             }
         };
-
-        // Rebuild in place: the system prompt, the summary standing in for the
-        // older turns, then the recent turns verbatim. The summary is framed as
-        // a user turn so it reads as context rather than as something the
-        // assistant said.
-        let mut rebuilt: Vec<Message> = messages
-            .iter()
+        let keep_from = outcome.replaced;
+        let mut rebuilt: Vec<Message> = messages.iter()
             .filter(|message| message.role == crate::message::MessageRole::System)
-            .cloned()
-            .collect();
-        rebuilt.push(Message::user(crate::compact::summary_message(&summary)));
-        rebuilt.extend(without_system[keep_from..].iter().cloned());
+            .cloned().collect();
+        rebuilt.extend(outcome.messages);
         *messages = rebuilt;
         let result = self.hooks.fire(crate::hook::HookEvent::SessionStart, crate::hook::HookContext {
             cwd: self.config.cwd.clone(), source: Some("compact".into()), ..Default::default()
@@ -1901,3 +1856,7 @@ mod tests {
 #[cfg(test)]
 #[path = "runner_compaction_tests.rs"]
 mod compaction_tests;
+
+#[cfg(test)]
+#[path = "runner_tool_tests.rs"]
+mod tool_tests;

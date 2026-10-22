@@ -176,6 +176,26 @@ impl RunJournal {
         RevEvents::open(&self.path_for(chat_id))
     }
 
+    /// Fetch selected full results for history restoration. Stream backwards,
+    /// avoiding a second in-memory copy of every reasoning/text delta.
+    pub fn tool_outputs(
+        &self,
+        chat_id: &str,
+        mut wanted: std::collections::HashSet<String>,
+    ) -> Result<HashMap<String, String>, JournalError> {
+        let mut outputs = HashMap::new();
+        if wanted.is_empty() { return Ok(outputs); }
+        for event in self.events_rev(chat_id)? {
+            if let (_, AgentEvent::ToolResult { id, output, .. }) = event? {
+                if wanted.remove(&id) {
+                    outputs.insert(id, output.unwrap_or_default());
+                    if wanted.is_empty() { break; }
+                }
+            }
+        }
+        Ok(outputs)
+    }
+
     /// Crash-recovery scan: chat ids whose journal's last event is NOT a `Done` — their
     /// runs died mid-stream and need recovery (stamp `aborted`, close the journal).
     pub fn stale_sessions(&self) -> Result<Vec<String>, JournalError> {

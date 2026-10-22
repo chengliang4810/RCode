@@ -38,8 +38,8 @@ pub struct CompactConfig {
     /// room for the reply, which is what would otherwise be the thing that
     /// fails.
     pub full_ratio: f32,
-    /// Conversation turns (a user message and everything up to the next user
-    /// message) kept verbatim after a full compaction.
+    /// Recent exchanges kept verbatim. A user prompt plus its first response,
+    /// or a subsequent assistant/tool-result cycle, is one exchange.
     pub keep_recent_turns: usize,
     /// Characters of a single tool result kept by micro compaction.
     pub max_tool_output_chars: usize,
@@ -211,22 +211,27 @@ pub fn should_compact_for_text(transcript: &str, config: &CompactConfig) -> bool
 ///
 /// Safe at any time: message roles and tool-call pairing are untouched, so the
 /// conversation stays valid.
-pub fn micro_compact(messages: &mut [Message], max_chars: usize) -> usize {
+pub fn micro_compact(messages: &mut [Message], config: &CompactConfig) -> usize {
+    let boundaries = exchange_boundaries(messages);
+    let keep = config.keep_recent_turns.max(1);
+    if boundaries.len() <= keep || config.max_tool_output_chars < 80 { return 0; }
+    let stale_end = boundaries[boundaries.len() - keep];
     let mut shortened = 0;
-    for message in messages.iter_mut() {
-        let MessageContent::Blocks(blocks) = &mut message.content else {
-            continue;
-        };
-        for block in blocks.iter_mut() {
-            let ContentBlock::ToolResult { content, .. } = block else {
-                continue;
-            };
-            if content.chars().count() <= max_chars {
-                continue;
-            }
-            let kept: String = content.chars().take(max_chars).collect();
-            let dropped = content.chars().count() - max_chars;
-            *content = format!("{kept}\n\n… ({dropped} more characters truncated)");
+    for message in &mut messages[..stale_end] {
+        let MessageContent::Blocks(blocks) = &mut message.content else { continue; };
+        for block in blocks {
+            let ContentBlock::ToolResult { content, is_error: false, .. } = block else { continue; };
+            let chars: Vec<char> = content.chars().collect();
+            if chars.len() <= config.max_tool_output_chars { continue; }
+            // Reserve the marker inside the budget so a second pass is a no-op.
+            // Keep the tail too: errors/conclusions commonly appear at the end.
+            let budget = config.max_tool_output_chars - 64;
+            let head = budget * 3 / 4;
+            let tail = budget - head;
+            let dropped = chars.len() - budget;
+            *content = format!("{}\n\n… ({dropped} more characters truncated)\n\n{}",
+                chars[..head].iter().collect::<String>(),
+                chars[chars.len() - tail..].iter().collect::<String>());
             shortened += 1;
         }
     }
@@ -239,7 +244,6 @@ pub fn micro_compact(messages: &mut [Message], max_chars: usize) -> usize {
 /// summary. It is a callback because summarising means an LLM call, and this
 /// crate does not own a model client — keeping it injectable is also what makes
 /// the function testable without a network.
-#[allow(dead_code)] // superseded by the loop's in-place compaction; kept as the tested reference
 pub async fn full_compact<F, Fut>(
     messages: Vec<Message>,
     config: &CompactConfig,
@@ -249,8 +253,9 @@ where
     F: FnOnce(String) -> Fut,
     Fut: std::future::Future<Output = Result<String, CompactError>>,
 {
-    let boundaries = turn_boundaries(&messages);
-    if boundaries.len() <= config.keep_recent_turns {
+    let boundaries = exchange_boundaries(&messages);
+    let keep = config.keep_recent_turns.max(1);
+    if boundaries.len() <= keep {
         // Not enough turns to be worth summarising.
         return Ok(CompactOutcome {
             messages,
@@ -259,7 +264,7 @@ where
         });
     }
 
-    let keep_from = boundaries[boundaries.len() - config.keep_recent_turns];
+    let keep_from = boundaries[boundaries.len() - keep];
 
     // Never split a tool call from its result: if the first kept message is a
     // tool result, walk back to its call. Walking *back* keeps the summary
@@ -278,6 +283,11 @@ where
         _ => keep_from,
     };
     let (older, recent) = messages.split_at(keep_from);
+    // When splitting inside one user task, keep its latest instruction verbatim
+    // alongside the summary and the recent tool exchanges.
+    let task = (!recent.iter().any(|message| message.role == MessageRole::User))
+        .then(|| older.iter().rev().find(|message| message.role == MessageRole::User))
+        .flatten();
 
     if older.is_empty() {
         return Ok(CompactOutcome {
@@ -288,7 +298,7 @@ where
     }
 
     // If the kept tail alone already overflows, summarizing cannot fix it.
-    let recent_tokens = estimate_tokens(recent);
+    let recent_tokens = estimate_tokens(recent) + task.map(|message| estimate_tokens(std::slice::from_ref(message))).unwrap_or(0);
     if recent_tokens >= config.context_window as u64 {
         return Err(CompactError::RecentTurnsTooLarge {
             turns: config.keep_recent_turns,
@@ -309,6 +319,7 @@ where
              context window]\n\n{summary}"
         )),
     });
+    if let Some(task) = task { compacted.push(task.clone()); }
     compacted.extend_from_slice(recent);
 
     Ok(CompactOutcome {
@@ -316,6 +327,28 @@ where
         compacted: true,
         replaced: older.len(),
     })
+}
+
+/// Safe cuts between exchanges. Never split an assistant's tool calls from
+/// their results, even if an internal user message is interleaved.
+pub fn exchange_boundaries(messages: &[Message]) -> Vec<usize> {
+    let mut boundaries = Vec::new();
+    let mut pending = std::collections::HashSet::new();
+    let mut previous = None;
+    for (index, message) in messages.iter().enumerate() {
+        if pending.is_empty() && (message.role == MessageRole::User
+            || (message.role == MessageRole::Assistant && previous != Some(MessageRole::User))) {
+            boundaries.push(index);
+        }
+        for (id, _, _) in message.content.tool_calls() { pending.insert(id); }
+        if let MessageContent::Blocks(blocks) = &message.content {
+            for block in blocks {
+                if let ContentBlock::ToolResult { tool_use_id, .. } = block { pending.remove(tool_use_id); }
+            }
+        }
+        if message.role != MessageRole::System { previous = Some(message.role); }
+    }
+    boundaries
 }
 
 /// The index of each user message: the start of a turn.
@@ -394,6 +427,10 @@ pub const SUMMARY_INSTRUCTION: &str = "Summarise the conversation above so work 
      been done so far and what it changed; the files that matter and why; anything that failed \
      and how; and what remains. Be specific — name files, functions and commands. Omit \
      pleasantries and restatements of the code you saw.";
+
+#[cfg(test)]
+#[path = "compact_regression_tests.rs"]
+mod regression_tests;
 
 #[cfg(test)]
 mod tests {
@@ -488,26 +525,30 @@ mod tests {
     #[test]
     fn micro_compact_shrinks_only_oversized_results() {
         let mut messages = vec![
+            user("read"),
+            tool_call("a"),
             tool_result("a", &"x".repeat(500)),
+            user("next"),
             tool_result("b", "short"),
         ];
-        let shortened = micro_compact(&mut messages, 100);
+        let shortened = micro_compact(&mut messages, &config(1));
 
         assert_eq!(shortened, 1);
-        let MessageContent::Blocks(blocks) = &messages[0].content else {
+        let MessageContent::Blocks(blocks) = &messages[2].content else {
             panic!("expected blocks");
         };
         let ContentBlock::ToolResult { content, .. } = &blocks[0] else {
             panic!("expected a tool result");
         };
         assert!(content.contains("more characters truncated"));
-        assert_eq!(content.chars().filter(|c| *c == 'x').count(), 100);
+        assert!(content.chars().count() <= 100);
+        assert!(content.ends_with('x'));
     }
 
     #[test]
     fn micro_compact_leaves_small_results_alone() {
         let mut messages = vec![tool_result("a", "short")];
-        assert_eq!(micro_compact(&mut messages, 100), 0);
+        assert_eq!(micro_compact(&mut messages, &config(1)), 0);
     }
 
     #[tokio::test]

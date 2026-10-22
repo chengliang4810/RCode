@@ -109,6 +109,8 @@ impl Tool for WebSearchTool {
          version's behaviour. Prefer WebFetch when you already have the URL."
     }
 
+    fn is_concurrency_safe(&self, _input: &Value) -> bool { true }
+
     fn input_schema(&self) -> Value {
         json!({
             "type": "object",

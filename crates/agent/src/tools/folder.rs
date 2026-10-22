@@ -23,6 +23,8 @@ impl Tool for FolderTool {
          Directories are marked with a trailing `/`."
     }
 
+    fn is_concurrency_safe(&self, _input: &Value) -> bool { true }
+
     fn input_schema(&self) -> Value {
         json!({
             "type": "object",

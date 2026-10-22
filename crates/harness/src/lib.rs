@@ -480,6 +480,7 @@ pub mod native;
 mod native_session;
 mod native_bridge;
 mod native_recovery;
+mod native_history;
 pub mod native_subagents;
 mod builtin_subagents;
 pub mod prompts;
