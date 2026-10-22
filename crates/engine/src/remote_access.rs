@@ -1,6 +1,7 @@
 //! The optional authenticated listener. The desktop's own RPC stays in memory.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use rcode_rpc::{RpcError, RpcService, generate_api_key, validate_api_key};
@@ -82,6 +83,7 @@ pub struct RemoteAccess {
     error: Mutex<Option<String>>,
     listener: AsyncMutex<Option<Listener>>,
     service: OnceLock<Arc<dyn RpcService>>,
+    stopped: AtomicBool,
 }
 
 impl RemoteAccess {
@@ -102,6 +104,7 @@ impl RemoteAccess {
             error: Mutex::new(None),
             listener: AsyncMutex::new(None),
             service: OnceLock::new(),
+            stopped: AtomicBool::new(false),
         }))
     }
 
@@ -179,6 +182,9 @@ impl RemoteAccess {
         edit: RemoteAccessEdit,
         persist: bool,
     ) -> Result<RemoteAccessView, RpcError> {
+        if self.stopped.load(Ordering::Acquire) {
+            return Err(RpcError::Closed);
+        }
         if edit.port == 0 {
             return Err(RpcError::BadParams(
                 "port must be between 1 and 65535".into(),
@@ -188,6 +194,11 @@ impl RemoteAccess {
             validate_api_key(key)?;
         }
         let mut running = self.listener.lock().await;
+        // Shutdown marks this before taking the lock, so a queued settings RPC
+        // cannot recreate the listener after the engine has begun stopping.
+        if self.stopped.load(Ordering::Acquire) {
+            return Err(RpcError::Closed);
+        }
         let mut config = self
             .config
             .lock()
@@ -247,6 +258,7 @@ impl RemoteAccess {
     }
 
     pub async fn shutdown(&self) {
+        self.stopped.store(true, Ordering::Release);
         if let Some(listener) = self.listener.lock().await.take() {
             listener.stop().await;
         }
@@ -285,6 +297,48 @@ mod tests {
         async fn handle(&self, _: &str, params: serde_json::Value) -> Result<RpcReply, RpcError> {
             Ok(RpcReply::Value(params))
         }
+    }
+
+    #[tokio::test]
+    async fn shutdown_rejects_queued_and_later_listener_updates() {
+        let dir = tempfile::tempdir().unwrap();
+        let access = RemoteAccess::open(dir.path()).unwrap();
+        access.start(Arc::new(Echo)).await;
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let guard = access.listener.lock().await;
+        let pending_access = Arc::clone(&access);
+        let pending = tokio::spawn(async move {
+            pending_access
+                .set(RemoteAccessEdit {
+                    enabled: true,
+                    port,
+                    api_key: None,
+                })
+                .await
+        });
+        tokio::task::yield_now().await;
+        let stopping_access = Arc::clone(&access);
+        let stopping = tokio::spawn(async move { stopping_access.shutdown().await });
+        while !access.stopped.load(Ordering::Acquire) {
+            tokio::task::yield_now().await;
+        }
+        drop(guard);
+        assert!(matches!(pending.await.unwrap(), Err(RpcError::Closed)));
+        stopping.await.unwrap();
+        assert!(matches!(
+            access.configure_runtime("Abcd1234".into(), port).await,
+            Err(RpcError::Closed)
+        ));
+        assert!(!dir.path().join("remote-access.json").exists());
+        assert!(
+            tokio::net::TcpStream::connect(("127.0.0.1", port))
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
