@@ -71,8 +71,15 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: ./.github/actions/windows-ci-setup
+      - name: Check MCP fixture interpreter
+        run: python --version
       - name: Native harness security and integration tests
-        run: cargo test --release --locked -p rcode-harness --lib
+        run: cargo test --release --locked -p rcode-harness -p rcode-agent -p rcode-model -p rcode-mcp --lib
+      - name: Protocol boundaries and MCP snapshot/replay regressions
+        run: |
+          cargo test --release --locked -p rcode-model --test protocol_regressions
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --release --locked -p rcode-mcp --test regressions --test http_no_replay
       - name: Shader layout tests
         run: cargo test --release --locked -p gpui_windows --lib layout
       - name: Application and updater tests
