@@ -32,6 +32,92 @@ void main() {
   tearDown(() => workspace.dispose());
 
   testWidgets(
+    'immediate turns hold the prompt at the top until the reply fills the reserved space',
+    (tester) async {
+      final chats = workspace.chats;
+      workspace.dispose();
+      workspace = _ImmediateWorkspace()..chats = chats;
+      final session = workspace.session('chat');
+      session.messages = [
+        {
+          'id': 'previous',
+          'role': 'assistant',
+          'parts': [
+            {
+              'id': 'text',
+              'kind': 'text',
+              'text':
+                  'Previous reply.\n\nSecond paragraph.\n\nThird paragraph.',
+            },
+          ],
+        },
+      ];
+      await tester.pumpWidget(
+        app(
+          SessionPage(
+            workspace: workspace,
+            chatId: 'chat',
+            preferences: preferences,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.enterText(
+        find.byKey(const Key('composer-text')),
+        'New prompt',
+      );
+      await tester.pump();
+      await tester.tap(find.byKey(const Key('composer-send')));
+      await tester.pumpAndSettle();
+      final list = find.byType(ListView).first;
+      final top = tester.getTopLeft(list).dy;
+      final prompt = find.byWidgetPredicate(
+        (widget) => widget is MessageView && widget.entry['id'] == 'own-1',
+      );
+      expect(tester.getTopLeft(prompt).dy, closeTo(top, 2));
+      final held = tester.widget<ListView>(list).controller!.offset;
+      session.messages = [
+        ...session.messages,
+        {
+          'id': 'reply',
+          'role': 'assistant',
+          'parts': [
+            {'id': 'text', 'kind': 'text', 'text': 'Short reply.'},
+          ],
+        },
+      ];
+      session.notifyListeners();
+      await tester.pumpAndSettle();
+      expect(
+        tester.widget<ListView>(list).controller!.offset,
+        closeTo(held, 2),
+      );
+      expect(tester.getTopLeft(prompt).dy, closeTo(top, 2));
+      session.messages = [
+        ...session.messages.take(session.messages.length - 1),
+        {
+          'id': 'reply',
+          'role': 'assistant',
+          'parts': [
+            {
+              'id': 'text',
+              'kind': 'text',
+              'text': List.filled(30, 'A longer reply paragraph.').join('\n\n'),
+            },
+          ],
+        },
+      ];
+      session.notifyListeners();
+      await tester.pumpAndSettle();
+      final scroll = tester.widget<ListView>(list).controller!;
+      expect(scroll.offset, greaterThan(held));
+      expect(scroll.position.maxScrollExtent - scroll.offset, lessThan(2));
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox());
+    },
+  );
+
+  testWidgets(
     'disposing during a host switch saves the draft in its original host scope',
     (tester) async {
       final original = workspace.cacheScope;
@@ -67,8 +153,9 @@ void main() {
     (tester) async {
       workspace.session('chat').hydrated = true;
       workspace.handler = (method, params) async {
-        if (method == 'RelayCommand')
+        if (method == 'RelayCommand') {
           throw const RpcException('disconnected', 'server_disconnected');
+        }
         return <String, dynamic>{};
       };
       await tester.pumpWidget(
@@ -233,4 +320,47 @@ void main() {
       await tester.pumpWidget(const SizedBox());
     },
   );
+}
+
+class _ImmediateWorkspace extends PageWorkspace {
+  SessionController? _direct;
+  @override
+  SessionController session(String chatId) =>
+      _direct ??= _ImmediateSession(this, chatId)..hydrated = true;
+  @override
+  SessionController retainSession(String chatId) => session(chatId);
+  @override
+  void releaseSession(SessionController controller) {}
+  @override
+  void dispose() {
+    _direct?.dispose();
+    super.dispose();
+  }
+}
+
+class _ImmediateSession extends SessionController {
+  _ImmediateSession(super.workspace, super.chatId);
+  var sequence = 0;
+  @override
+  Future<String> send(
+    String text, {
+    List<UploadAttachment> attachments = const [],
+    bool steer = false,
+    bool queue = false,
+    JsonMap? worktree,
+  }) async {
+    final id = 'own-${++sequence}';
+    messages = [
+      ...messages,
+      {
+        'id': id,
+        'role': 'user',
+        'parts': [
+          {'id': 'text', 'kind': 'text', 'text': text},
+        ],
+      },
+    ];
+    notifyListeners();
+    return id;
+  }
 }
