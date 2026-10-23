@@ -271,6 +271,7 @@ fn run_player(path: &Path) -> Result<(), String> {
     Err(format!("no audio player available: {}", errors.join("; ")))
 }
 
+#[cfg(not(windows))]
 fn run_checked(program: &str, args: &[&str], path: &Path) -> Result<(), String> {
     // Bounded wait: a wedged audio daemon must not accumulate zombie threads.
     let child = std::process::Command::new(program)
