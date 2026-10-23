@@ -28,6 +28,7 @@ const PROMPT_EDITOR_HEIGHT: f32 = 140.0;
 /// The model aliases a definition may name, in the order the picker shows
 /// them. `inherit` first because it is the default and the way to remove an
 /// override.
+#[cfg(test)]
 pub(crate) const MODEL_ALIASES: [&str; 1] = ["inherit"];
 
 /// Which managed root a listing row came from, as the page groups them.
