@@ -1396,13 +1396,29 @@ impl<'a> SegmentWriter<'a> {
                     // LoroText container instead of rewriting the map value.
                     let grown = match (prev, part) {
                         (
-                            MessagePart::Text { text: old, .. },
-                            MessagePart::Text { text: new, .. },
-                        ) if new.starts_with(old.as_str()) => Some(("text", old, new)),
+                            MessagePart::Text {
+                                id: old_id,
+                                text: old,
+                            },
+                            MessagePart::Text {
+                                id: new_id,
+                                text: new,
+                            },
+                        ) if old_id == new_id && new.starts_with(old.as_str()) => {
+                            Some(("text", old, new))
+                        }
                         (
-                            MessagePart::Reasoning { text: old, .. },
-                            MessagePart::Reasoning { text: new, .. },
-                        ) if new.starts_with(old.as_str()) => Some(("reasoning", old, new)),
+                            MessagePart::Reasoning {
+                                id: old_id,
+                                text: old,
+                            },
+                            MessagePart::Reasoning {
+                                id: new_id,
+                                text: new,
+                            },
+                        ) if old_id == new_id && new.starts_with(old.as_str()) => {
+                            Some(("reasoning", old, new))
+                        }
                         _ => None,
                     };
                     match grown {
@@ -1425,6 +1441,13 @@ impl<'a> SegmentWriter<'a> {
                                 }
                                 dirty = true;
                             }
+                            // Retain the mirror's allocation and copy only the
+                            // suffix, just as the LoroText update above does.
+                            match &mut self.written[i] {
+                                MessagePart::Text { text, .. }
+                                | MessagePart::Reasoning { text, .. } => text.push_str(delta),
+                                _ => unreachable!("grown text part changed kind"),
+                            }
                         }
                         None => {
                             // Field-level update (tool refresh/resolve, input resolve, or a
@@ -1432,10 +1455,10 @@ impl<'a> SegmentWriter<'a> {
                             // rewrite the part map fields defensively).
                             let part_map = part_map_at(&parts, i)?;
                             update_part_fields(&part_map, part)?;
+                            self.written[i] = part.clone();
                             dirty = true;
                         }
                     }
-                    self.written[i] = part.clone();
                 }
             }
         }
@@ -2112,6 +2135,48 @@ mod tests {
         let eb = b.read_entries().unwrap();
         assert_eq!(ea, eb);
         assert_eq!(ea.len(), 2); // one insert from each peer, converged in the same order
+    }
+
+    #[test]
+    fn segment_writer_retains_text_capacity_and_supports_rewrites() {
+        let doc = SessionDoc::init("append-capacity").unwrap();
+        let mut writer = SegmentWriter::begin(&doc, "a", "host", 1).unwrap();
+        writer
+            .sync(&[MessagePart::Text {
+                id: "p".into(),
+                text: "a".repeat(4096),
+            }])
+            .unwrap();
+        let MessagePart::Text { text, .. } = &mut writer.written[0] else {
+            unreachable!()
+        };
+        text.reserve(4096);
+        let before = text.as_ptr();
+        let appended = format!("{}你好", "a".repeat(4096));
+        writer
+            .sync(&[MessagePart::Text {
+                id: "p".into(),
+                text: appended.clone(),
+            }])
+            .unwrap();
+        let MessagePart::Text { text, .. } = &writer.written[0] else {
+            unreachable!()
+        };
+        assert_eq!(
+            text.as_ptr(),
+            before,
+            "append should reuse the existing allocation"
+        );
+        assert_eq!(text, &appended);
+        writer
+            .sync(&[MessagePart::Text {
+                id: "p".into(),
+                text: "rewritten".into(),
+            }])
+            .unwrap();
+        assert!(
+            matches!(&doc.read_entries().unwrap()[0].parts[0], MessagePart::Text { text, .. } if text == "rewritten")
+        );
     }
 
     #[test]

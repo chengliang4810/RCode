@@ -25,6 +25,35 @@ impl SessionDoc {
         page_size: usize,
     ) -> Result<(Vec<SessionMessageEntry>, TranscriptWindow), DocError> {
         let messages = self.doc().get_list("messages");
+        // Resolve the boundary using scalar ids before allocating slots. A
+        // stale cursor used to retain a slot for every part just to truncate
+        // them at the end. Do not cap the search itself: a valid cursor may be
+        // arbitrarily deep in the history.
+        let start = start.filter(|cursor| {
+            (0..messages.len()).rev().any(|index| {
+                let Some(ValueOrContainer::Container(Container::Map(map))) = messages.get(index)
+                else {
+                    return false;
+                };
+                if !scalar_id_matches(&map, &cursor.entry) {
+                    return false;
+                }
+                match (map.get("parts"), cursor.part.as_deref()) {
+                    (Some(ValueOrContainer::Container(Container::List(parts))), Some(id)) => {
+                        (0..parts.len()).any(|offset| {
+                            matches!(parts.get(offset),
+                                Some(ValueOrContainer::Container(Container::Map(part)))
+                                    if scalar_id_matches(&part, id))
+                        })
+                    }
+                    (Some(ValueOrContainer::Container(Container::List(parts))), None) => {
+                        parts.is_empty()
+                    }
+                    (_, None) => true,
+                    _ => false,
+                }
+            })
+        });
         // Only scalar ids are inspected until the desired boundary is located.
         // Deleted/stale cursors fall back to a bounded tail, never a full-history decode.
         let mut slots = Vec::new();
@@ -132,6 +161,11 @@ impl SessionDoc {
     }
 }
 
+fn scalar_id_matches(map: &loro::LoroMap, expected: &str) -> bool {
+    matches!(map.get("id"), Some(ValueOrContainer::Value(loro::LoroValue::String(id)))
+        if id.as_ref() == expected)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -154,6 +188,28 @@ mod tests {
             excluded: false,
         }
     }
+    #[test]
+    fn stale_cursor_is_bounded_without_discarding_a_deep_valid_cursor() {
+        let doc = SessionDoc::init("deep-window").unwrap();
+        doc.push_message(&entry("old", 1)).unwrap();
+        doc.push_message(&entry("new", 2048)).unwrap();
+        let deep = TranscriptCursor {
+            entry: "old".into(),
+            part: Some("p0".into()),
+        };
+        let (entries, window) = doc.read_transcript_window(Some(&deep), false, 8).unwrap();
+        assert_eq!(window.parts, 2049);
+        assert_eq!(entries.first().unwrap().id, "old");
+        let stale = TranscriptCursor {
+            entry: "new".into(),
+            part: Some("deleted".into()),
+        };
+        let (entries, window) = doc.read_transcript_window(Some(&stale), false, 8).unwrap();
+        assert_eq!(window.parts, 8);
+        assert!(window.has_older);
+        assert_eq!(entries[0].parts[0].id(), "p2040");
+    }
+
     #[test]
     fn window_expands_by_parts_and_retains_its_boundary_as_new_messages_arrive() {
         let doc = SessionDoc::init("window").unwrap();

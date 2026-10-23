@@ -93,10 +93,56 @@ impl SseParser {
     pub(crate) fn is_done(&self) -> bool {
         self.done
     }
+
+    /// Some providers omit the final line/event separator. Decode any trailing
+    /// data at EOF, but leave completion to the provider's explicit terminal
+    /// event or [DONE]; an ordinary delta does not make a truncated stream valid.
+    pub(crate) fn finish(&mut self) -> Vec<ModelResult<SseEvent>> {
+        self.push(b"\n\n")
+    }
 }
 
 impl Default for SseParser {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn eof_recognizes_done_without_a_final_newline() {
+        let mut parser = SseParser::new();
+        assert!(parser.push(b"data: [DONE]").is_empty());
+        assert!(parser.finish().is_empty());
+        assert!(parser.is_done());
+    }
+
+    #[test]
+    fn eof_flushes_data_without_inventing_completion() {
+        let mut parser = SseParser::new();
+        let bytes = "event: delta\ndata: {\"text\":\"你好\"}".as_bytes();
+        for chunk in bytes.chunks(1) {
+            assert!(parser.push(chunk).is_empty());
+        }
+        assert_eq!(
+            parser.finish().pop().unwrap().unwrap(),
+            SseEvent {
+                event: Some("delta".into()),
+                data: "{\"text\":\"你好\"}".into(),
+            }
+        );
+        assert!(!parser.is_done());
+        assert!(parser.finish().is_empty());
+    }
+
+    #[test]
+    fn eof_rejects_incomplete_utf8() {
+        let mut parser = SseParser::new();
+        parser.push(b"data: \xe4\xbd");
+        assert!(parser.finish().pop().unwrap().is_err());
+        assert!(!parser.is_done());
     }
 }

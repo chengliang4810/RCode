@@ -51,9 +51,10 @@ impl HttpTransport for ScriptedTransport {
 
 fn config(endpoint: &str) -> OpenAiResponsesConfig {
     OpenAiResponsesConfig::new(Url::parse(endpoint).expect("valid url"), "sk-test", "gpt-5")
-        .with_runtime(crate::ModelRuntimeConfig::default().with_retry(
-            crate::RetryConfig::default().with_max_attempts(1),
-        ))
+        .with_runtime(
+            crate::ModelRuntimeConfig::default()
+                .with_retry(crate::RetryConfig::default().with_max_attempts(1)),
+        )
 }
 
 /// Run one request through the model and collect every event.
@@ -78,6 +79,32 @@ fn completed(events: &[ModelResult<ModelStreamEvent>]) -> bool {
     events
         .iter()
         .any(|event| matches!(event, Ok(ModelStreamEvent::Completed(_))))
+}
+
+#[tokio::test]
+async fn eof_flushes_completed_without_a_final_separator() {
+    let body = "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}";
+    let events = collect(body).await;
+    assert!(completed(&events), "{events:?}");
+    assert!(events.iter().all(Result::is_ok), "{events:?}");
+}
+
+#[tokio::test]
+async fn eof_flushes_delta_but_still_reports_truncation_once() {
+    let events = collect("event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"retained\"}").await;
+    assert!(events.iter().any(
+        |event| matches!(event, Ok(ModelStreamEvent::TextDelta { text }) if text == "retained")
+    ));
+    assert!(!completed(&events));
+    assert_eq!(
+        events
+            .iter()
+            .filter(
+                |event| event.is_err() || matches!(event, Ok(ModelStreamEvent::Interrupted { .. }))
+            )
+            .count(),
+        1
+    );
 }
 
 #[tokio::test]

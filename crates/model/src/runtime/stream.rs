@@ -128,51 +128,25 @@ async fn response_to_sse_stream(
                     };
                     match chunk {
                         Some(Ok(bytes)) => {
-                            for event in state.parser.push(&bytes) {
-                                match event.and_then(|event| {
-                                    (state.decoder)(event, state.request_id.clone())
-                                }) {
-                                    Ok(events) => {
-                                        for event in events {
-                                            state.done =
-                                                matches!(event, ModelStreamEvent::Completed(_));
-                                            state.pending.push_back(Ok(event));
-                                            if state.done {
-                                                break;
-                                            }
-                                        }
-                                    }
-                                    Err(error) => {
-                                        // 已解码的 delta 先交付，retry 才能识别为中断并保留断点。
-                                        state.pending.push_back(Err(error));
-                                        state.done = true;
-                                    }
-                                }
-                                if state.done {
-                                    break;
-                                }
-                            }
-                            if !state.done && state.parser.is_done() {
-                                match (state.completion_decoder)() {
-                                    Ok(events) => state.pending.extend(events.into_iter().map(Ok)),
-                                    Err(error) => state.pending.push_back(Err(error)),
-                                }
-                                state.done = true;
-                            }
+                            let events = state.parser.push(&bytes);
+                            state.decode(events);
                         }
                         Some(Err(error)) => return Some((Err(error), state)),
                         None => {
+                            let events = state.parser.finish();
+                            state.decode(events);
+                            if state.done {
+                                continue;
+                            }
                             tracing::warn!(provider = %provider,
                                 request_id = state.request_id.as_deref(),
                                 "HTTP response ended before SSE completion");
-                            return Some((
-                                Err(ModelError::transport(
-                                    crate::TransportErrorKind::Other,
-                                    Some(provider.as_ref()),
-                                )
-                                .with_message("HTTP response ended before SSE completion")),
-                                state,
-                            ));
+                            state.done = true;
+                            state.pending.push_back(Err(ModelError::transport(
+                                crate::TransportErrorKind::Other,
+                                Some(provider.as_ref()),
+                            )
+                            .with_message("HTTP response ended before SSE completion")));
                         }
                     }
                 }
@@ -245,4 +219,37 @@ struct SseReadState {
     completion_decoder: SseCompletionDecoder,
     request_id: Option<String>,
     done: bool,
+}
+
+impl SseReadState {
+    fn decode(&mut self, events: Vec<ModelResult<SseEvent>>) {
+        for event in events {
+            match event.and_then(|event| (self.decoder)(event, self.request_id.clone())) {
+                Ok(events) => {
+                    for event in events {
+                        self.done = matches!(event, ModelStreamEvent::Completed(_));
+                        self.pending.push_back(Ok(event));
+                        if self.done {
+                            break;
+                        }
+                    }
+                }
+                Err(error) => {
+                    // Deliver preceding deltas before the error, including at EOF.
+                    self.pending.push_back(Err(error));
+                    self.done = true;
+                }
+            }
+            if self.done {
+                break;
+            }
+        }
+        if !self.done && self.parser.is_done() {
+            match (self.completion_decoder)() {
+                Ok(events) => self.pending.extend(events.into_iter().map(Ok)),
+                Err(error) => self.pending.push_back(Err(error)),
+            }
+            self.done = true;
+        }
+    }
 }
