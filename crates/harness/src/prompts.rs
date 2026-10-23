@@ -43,6 +43,7 @@ pub struct PreparedPrompt {
     pub system: SystemPrompt,
     pub session_id: String,
     pub user_instructions: String,
+    pub context: Option<Arc<dyn rcode_agent::context::ContextSource>>,
 }
 
 pub struct PromptRequest<'a> {
@@ -157,6 +158,8 @@ impl PromptSessions {
             frozen_sections.push(frozen.instructions.clone());
         }
         let mut dynamic_sections = Vec::new();
+        let context = (data_dir.is_some() || tools.all().iter().any(|tool| tool.name().starts_with("mcp__")))
+            .then(|| crate::context::RuntimeContext::new(cwd, data_dir, memory.is_some(), tools, mcp_instructions.as_deref()));
         let mut add = |value: Option<String>| {
             if let Some(value) = value.filter(|text| !text.trim().is_empty()) {
                 dynamic_sections.push(value);
@@ -165,8 +168,9 @@ impl PromptSessions {
         // Platform/tool availability may change after a saved session resumes.
         // Keep this outside the immutable conversation snapshot.
         add(platform_shell_instructions(tools));
-        // The settings gate is applied by the host. Refresh the index on
-        // each run so corrected facts and newly saved pointers are visible.
+        if context.is_some() { add(Some(rcode_agent::context::POLICY.to_owned())); }
+        // Keep behavioral/unclassified entries in system; factual pointers are
+        // refreshed by the context source at each model boundary.
         add(memory.map(str::to_owned));
         // MCP connects/disconnects independently of cached session sections.
         add(mcp_instructions
@@ -195,6 +199,7 @@ impl PromptSessions {
             system,
             session_id,
             user_instructions,
+            context,
         })
     }
 }

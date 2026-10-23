@@ -14,6 +14,9 @@ use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
+#[path = "support/context_reminders.rs"]
+mod context_reminders;
+
 fn config(protocol: Protocol, endpoint: &str) -> ProvidersConfig {
     serde_json::from_value(json!({
         "providers": [{
@@ -45,6 +48,32 @@ fn response(protocol: Protocol) -> &'static str {
             "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\n",
             "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
         ),
+    }
+}
+
+/// Exports credential-free production wire requests for an explicitly invoked live study.
+#[tokio::test]
+#[ignore = "set RCODE_CACHE_STUDY_DIR to export local mock-server captures; no live API calls"]
+async fn export_prompt_cache_probe_requests() {
+    let destination = std::path::PathBuf::from(
+        std::env::var_os("RCODE_CACHE_STUDY_DIR").expect("RCODE_CACHE_STUDY_DIR is required"),
+    );
+    assert!(destination.is_absolute());
+    std::fs::create_dir_all(&destination).unwrap();
+    for (name, protocol) in [
+        ("chat", Protocol::OpenAiChat),
+        ("messages", Protocol::AnthropicMessages),
+        ("responses", Protocol::OpenAiResponses),
+    ] {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}/v1", listener.local_addr().unwrap());
+        let harness = NativeHarness::new(config(protocol, &endpoint));
+        let project = tempfile::tempdir().unwrap();
+        let (body, _) = capture_turn_with_prompt(
+            &harness, &listener, project.path(), protocol, None, Default::default(),
+            "This is an API compatibility probe. Reply only with OK and do not call tools.",
+        ).await;
+        std::fs::write(destination.join(format!("rcode-{name}.json")), serde_json::to_vec_pretty(&body).unwrap()).unwrap();
     }
 }
 

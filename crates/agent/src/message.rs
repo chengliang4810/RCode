@@ -1,10 +1,9 @@
 //! In-memory message model for the ReAct loop.
 //!
 //! Deliberately small. A [`Message`] is what the loop appends to its transcript
-//! and hands to the model; nothing here is a storage format. RCode persists
-//! conversations in the Loro session doc (`crates/doc`), so this model carries
-//! no compatibility obligations — `Serialize`/`Deserialize` exist only to make
-//! debug output and provider conversion straightforward.
+//! and hands to the model. The visible conversation lives in the Loro session
+//! doc (`crates/doc`); full execution messages also round-trip through local
+//! model-history records. New optional metadata must deserialize older records.
 
 use std::fmt;
 
@@ -326,12 +325,15 @@ impl From<Vec<ContentBlock>> for MessageContent {
 /// One turn in the transcript.
 ///
 /// Fields are public: the loop builds and rewrites these in place, and a
-/// builder for three fields would just be indirection.
+/// separate builders for each field would just be indirection.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Message {
     pub id: MessageId,
     pub role: MessageRole,
     pub content: MessageContent,
+    /// Host context, separate from user text and from the visible transcript.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<crate::context::ContextRecord>,
 }
 
 impl Message {
@@ -341,12 +343,17 @@ impl Message {
             id: MessageId::new(),
             role,
             content: content.into(),
+            context: None,
         }
     }
 
     /// A user turn.
     pub fn user(content: impl Into<MessageContent>) -> Self {
         Self::new(MessageRole::User, content)
+    }
+
+    pub fn is_user_input(&self) -> bool {
+        self.role == MessageRole::User && self.context.is_none()
     }
 
     /// An assistant turn.

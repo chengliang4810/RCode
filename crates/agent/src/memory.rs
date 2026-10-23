@@ -5,6 +5,8 @@ use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
+pub mod index;
+
 pub const INDEX_FILE: &str = "MEMORY.md";
 const MAX_INDEX_LINES: usize = 200;
 const MAX_INDEX_BYTES: usize = 25_000;
@@ -95,20 +97,17 @@ pub fn system_prompt_section(cwd: &Path, config_dir: Option<&Path>) -> Option<St
     let root = directory(cwd, config_dir?);
     if let Err(error) = std::fs::create_dir_all(&root) {
         tracing::warn!(path = %root.display(), %error, "cannot create automatic memory directory");
-        return None;
+        return Some(format!(
+            "# Auto memory\n\nAutomatic memory is unavailable because its directory could not be opened: `{}`. Do not save memories until the directory is available.",
+            root.display()
+        ));
     }
-    let index = match read_index(&root) {
-        Ok(index) => index
-            .filter(|text| !text.trim().is_empty())
-            .unwrap_or_else(|| "(The index is currently empty.)".into()),
-        Err(error) => {
-            tracing::warn!(path = %root.display(), %error, "cannot read automatic memory index");
-            "(The index could not be read. Inspect it with the file tools before changing it.)"
-                .into()
-        }
-    };
+    let context = index::load(&root);
+    let index = if context.protected.trim().is_empty() {
+        "(This section is currently empty.)"
+    } else { &context.protected };
     Some(format!(
-        "{}\n\n## Memory directory\n\n`{}`\n\n## MEMORY.md\n\n<auto-memory-index>\n{index}\n</auto-memory-index>",
+        "{}\n\n## Memory directory\n\n`{}`\n\n## MEMORY.md\n\nUser/feedback and unclassified entries are listed here. Explicitly typed project/reference pointers arrive as internal memory-index context updates.\n\n<auto-memory-index>\n{index}\n</auto-memory-index>",
         include_str!("memory_prompt.md").trim(),
         root.display()
     ))

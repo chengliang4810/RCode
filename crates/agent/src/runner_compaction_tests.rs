@@ -281,6 +281,7 @@ async fn micro_compaction_fires_before_a_summary_is_spent() {
     // nothing to trim — exactly the trap the first version of this test fell
     // into.
     history.push(Message {
+        context: None,
         id: crate::message::MessageId::new(),
         role: crate::message::MessageRole::Tool,
         content: crate::message::MessageContent::Blocks(vec![

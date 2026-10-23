@@ -1,5 +1,21 @@
 use super::*;
 
+#[tokio::test]
+async fn internal_context_metadata_and_rendered_content_survive_native_history() {
+    let dir = tempfile::tempdir().unwrap();
+    let snapshot = rcode_agent::context::Snapshot { domain: rcode_agent::context::Domain::MemoryIndex,
+        scope: "memory".into(), status: rcode_agent::context::Status::Ready,
+        entries: std::collections::BTreeMap::from([("fact.md".into(), "fact".into())]) };
+    let context = rcode_agent::context::next_record(&[], snapshot.clone()).unwrap().message();
+    let recorder = Recorder::new(dir.path(), "entry", "model");
+    recorder.record(&context).await.unwrap();
+    recorder.record(&Message::assistant("done")).await.unwrap();
+    let restored = load(dir.path(), "entry", "model").await.unwrap().unwrap();
+    assert_eq!(restored[0], context);
+    assert!(!restored[0].is_user_input());
+    assert!(rcode_agent::context::next_record(&restored, snapshot).is_none());
+}
+
 fn assistant() -> Message {
     Message::assistant(vec![
         ContentBlock::Reasoning {

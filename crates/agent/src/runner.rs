@@ -110,6 +110,7 @@ pub struct AgentRunner {
     inbox: Option<Arc<crate::agent_tasks::MessageInbox>>,
     history_sink: Option<Arc<std::sync::Mutex<Vec<Message>>>>,
     history_recorder: Option<Arc<dyn crate::HistoryRecorder>>,
+    context_source: Option<Arc<dyn crate::context::ContextSource>>,
     /// Hand control back to the session at a safe boundary, preserving tool results.
     turn_yield: Option<CancellationToken>,
 }
@@ -129,6 +130,7 @@ impl AgentRunner {
             inbox: None,
             history_sink: None,
             history_recorder: None,
+            context_source: None,
             turn_yield: None,
         }
     }
@@ -168,6 +170,31 @@ impl AgentRunner {
     pub fn with_history_recorder(mut self, recorder: Arc<dyn crate::HistoryRecorder>) -> Self {
         self.history_recorder = Some(recorder);
         self
+    }
+
+    pub fn with_context_source(mut self, source: Arc<dyn crate::context::ContextSource>) -> Self {
+        self.context_source = Some(source);
+        self
+    }
+
+    async fn refresh_context(&self, messages: &mut Vec<Message>, cancel: &CancellationToken) -> Result<(), AgentError> {
+        let Some(source) = &self.context_source else { return Ok(()); };
+        let snapshots = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return Err(AgentError::Cancelled),
+            snapshots = source.snapshots() => snapshots,
+        };
+        for snapshot in snapshots {
+            if cancel.is_cancelled() { return Err(AgentError::Cancelled); }
+            if let Some(record) = crate::context::next_record(messages, snapshot) {
+                let message = record.message();
+                // Persistence must succeed before delivery; no separate cursor can get ahead.
+                self.record_message(&message).await?;
+                messages.push(message);
+                self.remember_history(messages);
+            }
+        }
+        Ok(())
     }
 
     pub fn with_turn_yield(mut self, signal: CancellationToken) -> Self {
@@ -347,7 +374,13 @@ impl AgentRunner {
             // loop grows the conversation between the caller's turns: the
             // moment the context fills is inside a run, and no caller can see
             // it coming.
+            self.refresh_context(&mut messages, cancel).await?;
+            let first = messages.iter().find(|message| message.role != crate::MessageRole::System).map(|message| message.id.clone());
             self.compact_if_needed(&mut messages, tx).await;
+            // A compacted tail may retain a patch but lose its baseline.
+            if first != messages.iter().find(|message| message.role != crate::MessageRole::System).map(|message| message.id.clone()) {
+                self.refresh_context(&mut messages, cancel).await?;
+            }
 
             let reasoned = self.reason(&messages, cancel, tx).await;
             // A cancelled provider may finish with EOF or an error rather than
@@ -1138,6 +1171,7 @@ mod tests {
 
     fn assistant_with_tool(id: &str, call_id: &str) -> Message {
         Message {
+            context: None,
             id: MessageId::new(),
             role: crate::message::MessageRole::Assistant,
             content: MessageContent::Blocks(vec![ContentBlock::ToolUse {
@@ -1150,6 +1184,7 @@ mod tests {
 
     fn assistant_text() -> Message {
         Message {
+            context: None,
             id: MessageId::new(),
             role: crate::message::MessageRole::Assistant,
             content: MessageContent::text("all done"),
@@ -1882,3 +1917,7 @@ mod compaction_tests;
 #[cfg(test)]
 #[path = "runner_tool_tests.rs"]
 mod tool_tests;
+
+#[cfg(test)]
+#[path = "runner_context_tests.rs"]
+mod context_tests;

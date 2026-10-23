@@ -285,8 +285,8 @@ where
     let (older, recent) = messages.split_at(keep_from);
     // When splitting inside one user task, keep its latest instruction verbatim
     // alongside the summary and the recent tool exchanges.
-    let task = (!recent.iter().any(|message| message.role == MessageRole::User))
-        .then(|| older.iter().rev().find(|message| message.role == MessageRole::User))
+    let task = (!recent.iter().any(Message::is_user_input))
+        .then(|| older.iter().rev().find(|message| message.is_user_input()))
         .flatten();
 
     if older.is_empty() {
@@ -312,6 +312,7 @@ where
 
     let mut compacted = Vec::with_capacity(recent.len() + 1);
     compacted.push(Message {
+        context: None,
         id: crate::message::MessageId::new(),
         role: MessageRole::User,
         content: MessageContent::text(format!(
@@ -336,6 +337,7 @@ pub fn exchange_boundaries(messages: &[Message]) -> Vec<usize> {
     let mut pending = std::collections::HashSet::new();
     let mut previous = None;
     for (index, message) in messages.iter().enumerate() {
+        if message.context.is_some() { continue; }
         if pending.is_empty() && (message.role == MessageRole::User
             || (message.role == MessageRole::Assistant && previous != Some(MessageRole::User))) {
             boundaries.push(index);
@@ -356,7 +358,7 @@ pub fn turn_boundaries(messages: &[Message]) -> Vec<usize> {
     messages
         .iter()
         .enumerate()
-        .filter(|(_, message)| matches!(message.role, MessageRole::User))
+        .filter(|(_, message)| message.is_user_input())
         .map(|(index, _)| index)
         .collect()
 }
@@ -386,6 +388,7 @@ fn render_for_summary(messages: &[Message]) -> String {
     let mut out = String::new();
     for message in messages {
         let role = match message.role {
+            MessageRole::User if message.context.is_some() => "Internal context",
             MessageRole::User => "User",
             MessageRole::Assistant => "Assistant",
             MessageRole::System => "System",
@@ -439,6 +442,7 @@ mod tests {
 
     fn user(text: &str) -> Message {
         Message {
+            context: None,
             id: MessageId::new(),
             role: MessageRole::User,
             content: MessageContent::text(text),
@@ -447,6 +451,7 @@ mod tests {
 
     fn assistant(text: &str) -> Message {
         Message {
+            context: None,
             id: MessageId::new(),
             role: MessageRole::Assistant,
             content: MessageContent::text(text),
@@ -455,6 +460,7 @@ mod tests {
 
     fn tool_call(id: &str) -> Message {
         Message {
+            context: None,
             id: MessageId::new(),
             role: MessageRole::Assistant,
             content: MessageContent::Blocks(vec![ContentBlock::ToolUse {
@@ -467,6 +473,7 @@ mod tests {
 
     fn tool_result(id: &str, content: &str) -> Message {
         Message {
+            context: None,
             id: MessageId::new(),
             role: MessageRole::Tool,
             content: MessageContent::Blocks(vec![ContentBlock::ToolResult {

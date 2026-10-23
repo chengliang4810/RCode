@@ -228,6 +228,7 @@ async fn optional_context_is_appended_in_order_after_the_complete_base() {
         "# Communication",
         "# Formatting rules",
         "# Environment",
+        "# Context updates",
         "MEMORY BODY",
         "# MCP server instructions\n\nMCP BODY",
     ];
@@ -236,7 +237,7 @@ async fn optional_context_is_appended_in_order_after_the_complete_base() {
     }
     assert_eq!(
         result.system.dynamic_sections.len(),
-        2 + usize::from(cfg!(windows))
+        3 + usize::from(cfg!(windows))
     );
     assert!(!text.contains("# Language"));
     assert!(!text.contains("# Output Style"));

@@ -1192,18 +1192,20 @@ impl NativeHarness {
         // The same number the compaction thresholds use, so the meter
         // and the loop cannot disagree about when the window is full.
         let window = model_config.context_window.map(u64::from);
-        let (system_prompt, history, prompt_system, session_id) = match prepared_prompt {
+        let (system_prompt, history, prompt_system, session_id, context_source) = match prepared_prompt {
             Some(prepared) => (
                 Some(prepared.system.text()),
                 history,
                 Some(prepared.system),
                 prepared.session_id,
+                prepared.context,
             ),
             None => (
                 system_prompt,
                 history,
                 None,
                 uuid::Uuid::new_v4().to_string(),
+                None,
             ),
         };
         let host = Arc::new(NativeHost {
@@ -1243,6 +1245,7 @@ impl NativeHarness {
             }
         }
         let mut runner = AgentRunner::new(host.clone(), tools, config).with_goal(goal);
+        if let Some(source) = context_source { runner = runner.with_context_source(source); }
         if let Some(root) = self.data_dir.as_deref() {
             runner = runner.with_history_recorder(Arc::new(
                 crate::native_history::Recorder::new(root, &host.assistant_message_id, &host.model),
@@ -1425,6 +1428,7 @@ pub(super) async fn conversation_history(
         };
         if !turn.text.trim().is_empty() {
             messages.push(rcode_agent::Message {
+                context: None,
                 id: rcode_agent::MessageId::new(), role,
                 content: rcode_agent::MessageContent::text(turn.text),
             });

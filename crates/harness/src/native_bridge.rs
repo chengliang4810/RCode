@@ -376,6 +376,7 @@ impl ResponseBuilder {
         }
 
         Message {
+            context: None,
             id: MessageId::new(),
             role: MessageRole::Assistant,
             content: MessageContent::Blocks(blocks),
@@ -495,6 +496,7 @@ mod tests {
 
     fn user(text: &str) -> Message {
         Message {
+            context: None,
             id: MessageId::new(),
             role: MessageRole::User,
             content: MessageContent::text(text),
@@ -503,6 +505,7 @@ mod tests {
 
     fn assistant_with_call(id: &str, name: &str) -> Message {
         Message {
+            context: None,
             id: MessageId::new(),
             role: MessageRole::Assistant,
             content: MessageContent::Blocks(vec![ContentBlock::ToolUse {
@@ -515,6 +518,7 @@ mod tests {
 
     fn tool_message(id: &str, output: &str) -> Message {
         Message {
+            context: None,
             id: MessageId::new(),
             role: MessageRole::Tool,
             content: MessageContent::Blocks(vec![ContentBlock::ToolResult {
@@ -816,6 +820,7 @@ mod tests {
         // `ContentBlock::Image`, so a screenshot the user attached reached the
         // model as nothing at all while the UI showed it as sent.
         let message = Message {
+            context: None,
             id: MessageId::new(),
             role: MessageRole::User,
             content: MessageContent::Blocks(vec![

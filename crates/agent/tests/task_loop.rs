@@ -91,6 +91,7 @@ impl AgentHost for TaskCallingHost {
             MessageContent::text("the review is in")
         };
         let message = Message {
+            context: None,
             id: MessageId::new(),
             role: MessageRole::Assistant,
             content,
