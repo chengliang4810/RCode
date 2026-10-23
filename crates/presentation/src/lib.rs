@@ -344,7 +344,7 @@ fn resources() -> Arc<Resources> {
 /// `include_str!` rather than a runtime directory read: the strings ship inside
 /// the binary, so there is no path to get wrong and no file a user can delete
 /// to make the UI unreadable.
-const SOURCES: [(Locale, &str); 20] = [
+const SOURCES: [(Locale, &str); 22] = [
     (Locale::EnUs, include_str!("../locales/en-US/common.ftl")),
     (Locale::EnUs, include_str!("../locales/en-US/shell.ftl")),
     (
@@ -358,6 +358,7 @@ const SOURCES: [(Locale, &str); 20] = [
     (Locale::EnUs, include_str!("../locales/en-US/browser.ftl")),
     (Locale::EnUs, include_str!("../locales/en-US/terminal.ftl")),
     (Locale::EnUs, include_str!("../locales/en-US/errors.ftl")),
+    (Locale::EnUs, include_str!("../locales/en-US/visual.ftl")),
     (Locale::ZhCn, include_str!("../locales/zh-CN/common.ftl")),
     (Locale::ZhCn, include_str!("../locales/zh-CN/shell.ftl")),
     (
@@ -371,6 +372,7 @@ const SOURCES: [(Locale, &str); 20] = [
     (Locale::ZhCn, include_str!("../locales/zh-CN/browser.ftl")),
     (Locale::ZhCn, include_str!("../locales/zh-CN/terminal.ftl")),
     (Locale::ZhCn, include_str!("../locales/zh-CN/errors.ftl")),
+    (Locale::ZhCn, include_str!("../locales/zh-CN/visual.ftl")),
 ];
 
 fn load_bundle(locale: Locale) -> FluentBundle<FluentResource> {

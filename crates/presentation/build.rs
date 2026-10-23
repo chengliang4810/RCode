@@ -28,7 +28,7 @@ const LANGUAGES: [&str; 2] = ["en-US", "zh-CN"];
 /// checked against it.
 const REFERENCE: &str = "en-US";
 /// Every domain file that must exist in every language.
-const DOMAINS: [&str; 10] = [
+const DOMAINS: [&str; 11] = [
     "common",
     "shell",
     "conversation",
@@ -39,6 +39,7 @@ const DOMAINS: [&str; 10] = [
     "browser",
     "terminal",
     "errors",
+    "visual",
 ];
 
 fn main() {

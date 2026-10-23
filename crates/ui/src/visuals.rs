@@ -231,14 +231,14 @@ impl VisualFrame {
                     let _ = this.update(cx, |this, cx| match script {
                         Some(script) => this.start(&script, assets, cx),
                         None => {
-                            this.load = Load::Failed("Visual unavailable".into());
+                            this.load = Load::Failed(crate::l10n::localizer().text(rcode_presentation::TextKey::VisualUnavailable).into());
                             cx.notify();
                         }
                     });
                 }));
                 Load::Loading
             }
-            None => Load::Failed("Visual unavailable".into()),
+            None => Load::Failed(crate::l10n::localizer().text(rcode_presentation::TextKey::VisualUnavailable).into()),
         };
         Self {
             id,
@@ -275,7 +275,10 @@ impl VisualFrame {
             }
             Err(error) => {
                 tracing::warn!(visual = %self.id, %error, "visual script failed to load");
-                self.load = Load::Failed(format!("Visual failed: {error}").into());
+                self.load = Load::Failed(crate::l10n::localizer().format_with(
+                    rcode_presentation::TextKey::VisualFailed,
+                    &[("error", &error.to_string())],
+                ).into());
                 cx.notify();
             }
         }
@@ -510,7 +513,7 @@ impl Render for VisualFrame {
                 let root = self.id.to_string();
                 self.node(&tree, &root, &theme, &palette, window, cx)
             }
-            _ => status_line("Loading visual…".into(), theme.text_faint),
+            _ => status_line(crate::l10n::localizer().text(rcode_presentation::TextKey::VisualLoading).into(), theme.text_faint),
         };
         let error = self
             .error
@@ -527,7 +530,10 @@ impl Render for VisualFrame {
             .child(body)
             .when_some(error, |el, error| {
                 el.child(status_line(
-                    format!("Visual error: {error}").into(),
+                    crate::l10n::localizer().format_with(
+                        rcode_presentation::TextKey::VisualError,
+                        &[("error", error.as_ref())],
+                    ).into(),
                     theme.danger,
                 ))
             })
