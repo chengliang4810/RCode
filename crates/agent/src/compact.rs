@@ -68,10 +68,6 @@ impl CompactConfig {
         }
     }
 
-    /// Whether the estimate has reached a share of the window.
-    fn reached(&self, estimate: u64, ratio: f32) -> bool {
-        estimate >= (self.context_window as f32 * ratio) as u64
-    }
 }
 
 #[derive(Debug, thiserror::Error)]
