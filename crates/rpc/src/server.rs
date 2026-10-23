@@ -65,7 +65,9 @@ pub async fn serve_connection(
                 method,
                 frame.params,
             ));
-            running.0.insert(frame.id, task.abort_handle());
+            if let Some(previous) = running.0.insert(frame.id, task.abort_handle()) {
+                previous.abort();
+            }
         }
     }
 }

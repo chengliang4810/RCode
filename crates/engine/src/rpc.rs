@@ -3965,16 +3965,19 @@ impl RpcService for EngineRpc {
             }
             methods::UPLOAD_CHUNK => {
                 let p: UploadChunkParams = parse_params(params)?;
-                self.uploads
-                    .append(&p.upload_id, &p.data, p.seq)
+                let uploads = self.uploads.clone();
+                tokio::task::spawn_blocking(move || uploads.append(&p.upload_id, &p.data, p.seq))
+                    .await
+                    .map_err(|e| RpcError::Failed(e.to_string()))?
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&serde_json::json!({ "ok": true }))
             }
             methods::UPLOAD_COMMIT => {
                 let p: UploadCommitParams = parse_params(params)?;
-                let path = self
-                    .uploads
-                    .commit(&p.upload_id, &p.file_name)
+                let uploads = self.uploads.clone();
+                let path = tokio::task::spawn_blocking(move || uploads.commit(&p.upload_id, &p.file_name))
+                    .await
+                    .map_err(|e| RpcError::Failed(e.to_string()))?
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 // Bytes just landed on this device: any command deferred on
                 // them (queued-attachment refs) is executable NOW.

@@ -80,26 +80,44 @@ impl RpcSubscription {
 
 impl Drop for RpcSubscription {
     fn drop(&mut self) {
-        if self.shared.lock().remove(&self.id).is_none() {
-            return;
+        cancel_pending(&self.shared, &self.out, self.id);
+    }
+}
+
+struct PendingRequestGuard<'a> {
+    client: &'a RpcClient,
+    id: u64,
+    armed: bool,
+}
+
+impl Drop for PendingRequestGuard<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            cancel_pending(&self.client.shared, &self.client.out, self.id);
         }
-        let Ok(frame) = serde_json::to_string(&ClientFrame {
-            id: self.id,
-            method: None,
-            params: serde_json::Value::Null,
-            cancel: true,
-        }) else {
-            return;
-        };
-        match self.out.try_send(frame) {
-            Ok(()) | Err(mpsc::error::TrySendError::Closed(_)) => {}
-            Err(mpsc::error::TrySendError::Full(frame)) => {
-                let out = self.out.clone();
-                if let Ok(runtime) = tokio::runtime::Handle::try_current() {
-                    runtime.spawn(async move {
-                        let _ = out.send(frame).await;
-                    });
-                }
+    }
+}
+
+fn cancel_pending(shared: &Shared, out: &mpsc::Sender<String>, id: u64) {
+    if shared.lock().remove(&id).is_none() {
+        return;
+    }
+    let Ok(frame) = serde_json::to_string(&ClientFrame {
+        id,
+        method: None,
+        params: serde_json::Value::Null,
+        cancel: true,
+    }) else {
+        return;
+    };
+    match out.try_send(frame) {
+        Ok(()) | Err(mpsc::error::TrySendError::Closed(_)) => {}
+        Err(mpsc::error::TrySendError::Full(frame)) => {
+            let out = out.clone();
+            if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+                runtime.spawn(async move {
+                    let _ = out.send(frame).await;
+                });
             }
         }
     }
@@ -178,6 +196,11 @@ impl RpcClient {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = oneshot::channel();
         self.shared.lock().insert(id, Pending::Call(tx));
+        let _guard = PendingRequestGuard {
+            client: self,
+            id,
+            armed: true,
+        };
         self.send(ClientFrame {
             id,
             method: Some(method.into()),
@@ -211,6 +234,11 @@ impl RpcClient {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = mpsc::channel(STREAM_QUEUE_CAP);
         self.shared.lock().insert(id, Pending::Stream(tx));
+        let mut guard = PendingRequestGuard {
+            client: self,
+            id,
+            armed: true,
+        };
         self.send(ClientFrame {
             id,
             method: Some(method.into()),
@@ -221,6 +249,7 @@ impl RpcClient {
         .inspect_err(|_| {
             self.shared.lock().remove(&id);
         })?;
+        guard.armed = false;
         Ok(rx)
     }
 
@@ -366,7 +395,7 @@ async fn route_frame(shared: &Arc<Shared>, out: &mpsc::Sender<String>, frame: Se
             _ => None,
         };
         let dead = match tx {
-            Some(tx) => match tx.try_send(item.clone()) {
+            Some(tx) => match tx.try_send(item) {
                 Ok(()) => false,
                 Err(mpsc::error::TrySendError::Full(_)) => {
                     // The consumer is not reading. Dropping the subscription
@@ -562,6 +591,38 @@ async fn connect_reconnecting(url: &str, api_key: Option<String>) -> Result<RpcC
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn dropping_unary_call_removes_pending_and_cancels_server_work() {
+        let (out, mut requests) = mpsc::channel(8);
+        let (_inbound, replies) = mpsc::channel(8);
+        let client = RpcClient::new(out, replies);
+        let mut call = Box::pin(client.call("Never", serde_json::Value::Null));
+        assert!(futures::poll!(&mut call).is_pending());
+        let request: ClientFrame = serde_json::from_str(&requests.recv().await.unwrap()).unwrap();
+        assert_eq!(client.shared.lock().len(), 1);
+        drop(call);
+        assert!(client.shared.lock().is_empty());
+        let cancel: ClientFrame = serde_json::from_str(&requests.recv().await.unwrap()).unwrap();
+        assert_eq!(cancel.id, request.id);
+        assert!(cancel.cancel);
+    }
+
+    #[tokio::test]
+    async fn cancelling_a_backpressured_send_does_not_leak_pending() {
+        let (out, _requests) = mpsc::channel(1);
+        out.send(String::new()).await.unwrap();
+        let (_inbound, replies) = mpsc::channel(8);
+        let client = RpcClient::new(out, replies);
+        let mut call = Box::pin(client.call("Never", serde_json::Value::Null));
+        assert!(futures::poll!(&mut call).is_pending());
+        drop(call);
+        assert!(client.shared.lock().is_empty());
+        let mut stream = Box::pin(client.subscribe("Never", serde_json::Value::Null));
+        assert!(futures::poll!(&mut stream).is_pending());
+        drop(stream);
+        assert!(client.shared.lock().is_empty());
+    }
 
     #[tokio::test]
     async fn a_peer_that_never_answers_heartbeats_is_disconnected() {

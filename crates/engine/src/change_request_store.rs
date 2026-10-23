@@ -253,12 +253,19 @@ fn open(path: &Path) -> rusqlite::Result<Connection> {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let conn = Connection::open(path)?;
     #[cfg(unix)]
     {
+        use std::os::unix::fs::OpenOptionsExt;
         use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+        let private_file = || -> std::io::Result<()> {
+            std::fs::OpenOptions::new().create(true).append(true).mode(0o600).open(path)?;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+        };
+        private_file().map_err(|error| rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CANTOPEN), Some(error.to_string())
+        ))?;
     }
+    let conn = Connection::open(path)?;
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.busy_timeout(std::time::Duration::from_secs(2))?;
     let version: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;

@@ -493,6 +493,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn reusing_request_id_cancels_the_previous_server_task() {
+        let (dropped_tx, dropped_rx) = tokio::sync::oneshot::channel();
+        let service = Arc::new(CancelAwareService {
+            dropped: Mutex::new(Some(dropped_tx)),
+        });
+        let (out, _replies) = tokio::sync::mpsc::channel(8);
+        let (requests, inbound) = tokio::sync::mpsc::channel(8);
+        let server = tokio::spawn(serve_connection(service.clone(), out, inbound));
+        let frame = serde_json::to_string(&ClientFrame {
+            id: 1,
+            method: Some("Silent".into()),
+            params: serde_json::Value::Null,
+            cancel: false,
+        })
+        .unwrap();
+        requests.send(frame.clone()).await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while service.dropped.lock().unwrap().is_some() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        requests.send(frame).await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(1), dropped_rx)
+            .await
+            .expect("reusing an id orphaned the original task")
+            .unwrap();
+        drop(requests);
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
     async fn memory_call_stream_and_error() {
         let client = memory_client(Arc::new(TestService));
 

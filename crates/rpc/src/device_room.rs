@@ -208,8 +208,28 @@ pub fn device_room_ws_url(
 ) -> String {
     let ws_base = edge_url.replacen("http", "ws", 1);
     let ws_base = ws_base.trim_end_matches('/');
-    let conn = conn_id.map(|c| format!("&connId={c}")).unwrap_or_default();
-    format!("{ws_base}/device/{device_id}/ws?role={role}{conn}&token={token}")
+    let conn = conn_id
+        .map(|c| format!("&connId={}", url_component(c)))
+        .unwrap_or_default();
+    format!(
+        "{ws_base}/device/{}/ws?role={}{conn}&token={}",
+        url_component(device_id),
+        url_component(role),
+        url_component(token)
+    )
+}
+
+fn url_component(value: &str) -> String {
+    use std::fmt::Write as _;
+    let mut encoded = String::new();
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
+            encoded.push(byte as char);
+        } else {
+            write!(&mut encoded, "%{byte:02X}").expect("writing to a string cannot fail");
+        }
+    }
+    encoded
 }
 
 // ---------------------------------------------------------------------------
@@ -847,14 +867,14 @@ impl LinkCache {
                 loop {
                     tokio::select! {
                         result = wake.recv() => {
-                            if result.is_err() { return; }
+                            if matches!(result, Err(tokio::sync::broadcast::error::RecvError::Closed)) { return; }
                             let Some(cache) = weak.upgrade() else { return };
                             lock(&cache.links).clear();
                             lock(&cache.dial_state).clear();
                             tracing::info!("peer: links + cooldowns cleared after wake");
                         }
                         result = online.recv() => {
-                            if result.is_err() { return; }
+                            if matches!(result, Err(tokio::sync::broadcast::error::RecvError::Closed)) { return; }
                             let Some(cache) = weak.upgrade() else { return };
                             lock(&cache.dial_state).clear();
                         }
@@ -1102,6 +1122,50 @@ impl LinkCache {
 
 #[cfg(test)]
 mod tests {
+    struct ChangingToken {
+        changes: watch::Sender<u64>,
+        signed_out: AtomicBool,
+    }
+
+    #[async_trait]
+    impl TokenSource for ChangingToken {
+        async fn token(&self) -> Result<String, TokenError> {
+            if self.signed_out.load(Ordering::Acquire) {
+                Err(TokenError::SignedOut)
+            } else {
+                Ok("test".into())
+            }
+        }
+        fn subscribe(&self) -> Option<watch::Receiver<u64>> {
+            Some(self.changes.subscribe())
+        }
+    }
+
+    #[tokio::test]
+    async fn online_event_lag_does_not_disable_sign_out() {
+        let token = Arc::new(ChangingToken {
+            changes: watch::channel(0).0,
+            signed_out: AtomicBool::new(false),
+        });
+        let cache = LinkCache::new(LinkCacheConfig::new("http://unused", token.clone()));
+        tokio::task::yield_now().await;
+        for _ in 0..16 {
+            rcode_sync::wake::notify_online();
+        }
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+        token.signed_out.store(true, Ordering::Release);
+        token.changes.send_replace(1);
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !cache.revoked.load(Ordering::Acquire) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("lag must not permanently disable credential revocation");
+    }
+
     #[tokio::test(start_paused = true)]
     async fn blocked_relay_upload_closes_link_and_fails_pending_rpc() {
         use tokio_tungstenite::{WebSocketStream, tungstenite::protocol::Role};
@@ -1234,5 +1298,15 @@ mod tests {
         );
         let host = device_room_ws_url("http://localhost:26640", "d", "host", None, "t");
         assert_eq!(host, "ws://localhost:26640/device/d/ws?role=host&token=t");
+        assert_eq!(
+            device_room_ws_url(
+                "https://edge.example",
+                "d/1",
+                "client",
+                Some("c&2"),
+                "a+b&c=#"
+            ),
+            "wss://edge.example/device/d%2F1/ws?role=client&connId=c%262&token=a%2Bb%26c%3D%23"
+        );
     }
 }
