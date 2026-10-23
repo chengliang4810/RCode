@@ -12,6 +12,14 @@ import tomllib
 import zipfile
 
 
+FONT_LICENSES = (
+    "Geist-OFL.txt", "Sarasa-OFL.txt", "GUST-FONT-LICENSE.txt",
+    "OFL-EulerMath.txt", "OFL-FiraMath.txt", "OFL-LibertinusMath.txt",
+    "OFL-STIXTwoMath.txt",
+)
+ROOT_NOTICES = ("LICENSE", "LICENSE-APACHE", "THIRD_PARTY_NOTICES.md")
+
+
 def required_assets(version):
     platforms = [
         "linux-x86_64.tar.gz", "linux-aarch64.tar.gz",
@@ -45,6 +53,11 @@ def verify_mac(path, arch, version):
                 or plist.get("CFBundleShortVersionString") != numeric
                 or plist.get("CFBundleVersion") != numeric):
             raise ValueError(f"Wrong bundle version in {path.name}")
+        for name in ROOT_NOTICES:
+            archive.getmember(f"RCode.app/Contents/Resources/licenses/{name}")
+        for name in FONT_LICENSES:
+            archive.getmember(f"RCode.app/Contents/Resources/licenses/fonts/{name}")
+        archive.getmember("RCode.app/Contents/Resources/licenses/icons/LICENSE.symbols")
         binary_info = archive.getmember("RCode.app/Contents/MacOS/rcode")
         if not binary_info.isfile() or not binary_info.mode & 0o111:
             raise ValueError(f"App binary is not executable in {path.name}")
@@ -69,8 +82,11 @@ def verify_windows(directory, version):
         marker = json.loads(archive.read("rcode-update.json"))
         if not marker.get("releases_url", "").startswith("https://"):
             raise ValueError("Portable package is missing its HTTPS update feed")
-        for name in ["LICENSE", "LICENSE-APACHE", "THIRD_PARTY_NOTICES.md"]:
+        for name in ROOT_NOTICES:
             archive.getinfo(name)
+        for name in FONT_LICENSES:
+            archive.getinfo(f"licenses/fonts/{name}")
+        archive.getinfo("licenses/icons/LICENSE.symbols")
 
 
 def prepare_release(directory, version, tag=None):

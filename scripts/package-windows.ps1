@@ -78,7 +78,10 @@ try {
     Copy-Item -LiteralPath 'LICENSE','LICENSE-APACHE','THIRD_PARTY_NOTICES.md' -Destination $stage
     $licenses = Join-Path $stage 'licenses/fonts'
     New-Item -ItemType Directory -Force -Path $licenses | Out-Null
-    Copy-Item -Path 'crates/ui/assets/fonts/licenses/*' -Destination $licenses
+    Copy-Item -Path 'crates/ui/assets/fonts/licenses/*','crates/zatex/fonts/*.txt' -Destination $licenses
+    $iconLicenses = Join-Path $stage 'licenses/icons'
+    New-Item -ItemType Directory -Force -Path $iconLicenses | Out-Null
+    Copy-Item -LiteralPath 'crates/ui/assets/file-icons/LICENSE.symbols' -Destination $iconLicenses
     Compress-Archive -Path "$stage/*" -DestinationPath "$stage.zip" -Force
     Copy-Item -LiteralPath './target/release/rcode.exe' -Destination "$stage.exe"
     # The per-user installer wraps the same staged directory (rcode-update.json

@@ -34,8 +34,11 @@ class ReleasePackagingTests(unittest.TestCase):
         with zipfile.ZipFile(self.asset("windows-x86_64.zip"), "w") as archive:
             archive.writestr("rcode.exe", binary)
             archive.writestr("rcode-update.json", json.dumps({"releases_url": "https://example.invalid/releases"}))
-            for name in ["LICENSE", "LICENSE-APACHE", "THIRD_PARTY_NOTICES.md"]:
+            for name in release.ROOT_NOTICES:
                 archive.writestr(name, "license")
+            for name in release.FONT_LICENSES:
+                archive.writestr(f"licenses/fonts/{name}", "font license")
+            archive.writestr("licenses/icons/LICENSE.symbols", "icon license")
 
     def asset(self, suffix):
         return self.root / f"rcode-{VERSION}-{suffix}"
@@ -44,13 +47,23 @@ class ReleasePackagingTests(unittest.TestCase):
         cpu = cpu or {"x86_64": 0x01000007, "arm64": 0x0100000C}[arch]
         plist = {"RCodeVersion": version, "CFBundleShortVersionString": "0.0.1", "CFBundleVersion": "0.0.1"}
         with tarfile.open(self.asset(f"macos-{arch}-app.tar.gz"), "w:gz") as archive:
-            for name, data, mode in [
+            files = [
                 ("MacOS/rcode", struct.pack("<II", 0xFEEDFACF, cpu), 0o755),
                 ("Info.plist", plistlib.dumps(plist), 0o644),
-            ]:
+            ]
+            files += [(f"Resources/licenses/{name}", b"license", 0o644) for name in release.ROOT_NOTICES]
+            files += [(f"Resources/licenses/fonts/{name}", b"license", 0o644) for name in release.FONT_LICENSES]
+            files += [("Resources/licenses/icons/LICENSE.symbols", b"license", 0o644)]
+            for name, data, mode in files:
                 info = tarfile.TarInfo(f"RCode.app/Contents/{name}")
                 info.size, info.mode = len(data), mode
                 archive.addfile(info, io.BytesIO(data))
+
+    def test_mobile_math_license_copies_match_sources(self):
+        root = Path(__file__).resolve().parent.parent
+        for source in (root / "crates/zatex/fonts").glob("*.txt"):
+            copy = root / "apps/mobile/assets/licenses/math" / source.name
+            self.assertEqual(copy.read_bytes(), source.read_bytes(), source.name)
 
     def test_all_platforms_generate_matching_metadata(self):
         manifest = release.prepare_release(self.root, VERSION, f"v{VERSION}")

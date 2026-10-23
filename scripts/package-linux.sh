@@ -36,6 +36,9 @@ install -m 644 "$ROOT/dist/rcode.png" "$STAGE/rcode.png"
 install -m 644 "$ROOT/LICENSE" "$ROOT/LICENSE-APACHE" "$ROOT/THIRD_PARTY_NOTICES.md" "$STAGE/"
 mkdir -p "$STAGE/licenses/fonts"
 cp "$ROOT/crates/ui/assets/fonts/licenses/"* "$STAGE/licenses/fonts/"
+cp "$ROOT/crates/zatex/fonts/"*.txt "$STAGE/licenses/fonts/"
+mkdir -p "$STAGE/licenses/icons"
+cp "$ROOT/crates/ui/assets/file-icons/LICENSE.symbols" "$STAGE/licenses/icons/"
 
 cat >"$STAGE/install.sh" <<'INSTALL'
 #!/usr/bin/env bash

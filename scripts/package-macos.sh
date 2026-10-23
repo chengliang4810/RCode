@@ -55,6 +55,9 @@ sed -e "s/__VERSION__/$VERSION/" -e "s/__NUMERIC_VERSION__/$NUMERIC_VERSION/" \
 plutil -lint "$APP/Contents/Info.plist"
 mkdir -p "$APP/Contents/Resources/licenses/fonts"
 cp "$ROOT/crates/ui/assets/fonts/licenses/"* "$APP/Contents/Resources/licenses/fonts/"
+cp "$ROOT/crates/zatex/fonts/"*.txt "$APP/Contents/Resources/licenses/fonts/"
+mkdir -p "$APP/Contents/Resources/licenses/icons"
+cp "$ROOT/crates/ui/assets/file-icons/LICENSE.symbols" "$APP/Contents/Resources/licenses/icons/"
 cp "$ROOT/THIRD_PARTY_NOTICES.md" "$ROOT/LICENSE" "$ROOT/LICENSE-APACHE" "$APP/Contents/Resources/licenses/"
 
 # Icon: iconset from the pre-masked macOS icon (squircle + margins + shadow
