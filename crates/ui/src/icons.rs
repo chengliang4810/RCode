@@ -54,7 +54,6 @@ icon_assets![
     (USAGE_GAUGE, "usage-gauge"),
     (USAGE_TOKENS, "usage-tokens"),
     (PROJECT_DEFAULT, "project-default"),
-    (REMOTE_SERVER, "remote-server"),
     // Service-tier bolt, drawn in the toolbar family's linear weight; the
     // filled twin marks fast mode on.
     (FAST_TIER, "fast-tier"),
@@ -67,11 +66,7 @@ icon_assets![
     (GLOBE, "globe"),
     (LAPTOP, "laptop"),
     (PEN_NEW_SQUARE, "pen-new-square"),
-    (SORT, "sort"),
     (MORE_HORIZONTAL, "more-horizontal"),
-    (SORT_VERTICAL, "sort-vertical"),
-    // Compact six-dot grip used to reorder queued prompts.
-    (DRAG_HANDLE, "drag-handle"),
     // Original queue-only line family: 24px canvas, 1.5px round strokes and
     // medium-radius geometry. Kept separate so the queue can adopt the visual
     // language of the supplied Central Icons reference without changing
@@ -88,8 +83,6 @@ icon_assets![
     // Original tree glyph with compact nodes for the independent Files panel.
     (FILE_TREE, "file-tree"),
     (FOLDER_TREE, "folder-tree"),
-    // Hand-drawn floppy disk in the Solar Linear style. Workspace editor save.
-    (FLOPPY_DISK, "floppy-disk"),
     // The icon set: 24px canvas, 1.75px round strokes. The
     // git family shares rails at x=6/18 and 2.25-radius nodes; the carets
     // and arrows are the site's one path pre-rotated per direction.
@@ -138,7 +131,6 @@ icon_assets![
     (ARCHIVE_UP_MINIMALISTIC, "archive-up-minimalistic"),
     (REFRESH, "refresh"),
     (RESTART, "restart"),
-    (ADD_CIRCLE, "add-circle"),
     (TUNING, "tuning"),
     (EYE, "eye"),
     (EYE_CLOSED, "eye-closed"),
@@ -150,7 +142,6 @@ icon_assets![
     (TRASH_BIN_MINIMALISTIC, "trash-bin-minimalistic"),
     // Shared settings glyph: user-supplied horizontal sliders.
     (SETTINGS, "settings"),
-    (SETTINGS_MINIMALISTIC, "settings-minimalistic"),
     (LOGOUT_2, "logout-2"),
     (MAGNIFER, "magnifer"),
     // Compact magnifier with a distinct handle, matching the linear icon family.
@@ -160,8 +151,6 @@ icon_assets![
     (DOCUMENT_ADD, "document-add"),
     // File-kind glyphs, drawn in the same linear family for transcript badges.
     (FILE_CODE, "file-code"),
-    (FILE_STYLE, "file-style"),
-    (FILE_DATA, "file-data"),
     (FILE_MARKDOWN, "file-markdown"),
     (FILE_IMAGE, "file-image"),
     // A framed picture: the icon of `Image N` chips.
@@ -189,7 +178,6 @@ icon_assets![
     // Hand-drawn bell + speaker in the Solar Linear style (like the terminal/
     // plus/return ports) — the embedded set has neither.
     (BELL, "bell"),
-    (VOLUME_LOUD, "volume-loud"),
     // Hand-drawn the original app glyphs (terminal-panel.tsx / composer-actions.tsx /
     // menu-check.tsx / logo.tsx).
     (TERMINAL, "terminal"),
@@ -212,11 +200,6 @@ icon_assets![
     // Project Action icon family (Solar Linear-compatible strokes).
     (ACTION_PLAY, "action-play"),
     (GOAL, "goal"),
-    (ACTION_TEST, "action-test"),
-    (ACTION_LINT, "action-lint"),
-    (ACTION_CONFIGURE, "action-configure"),
-    (ACTION_BUILD, "action-build"),
-    (ACTION_DEBUG, "action-debug"),
     // Hand-drawn star pair in the Solar Linear style (like the terminal/
     // plus/return ports) — outline for the favorite affordance, bold for the
     // favorited state and the picker's favorites rail tab.
