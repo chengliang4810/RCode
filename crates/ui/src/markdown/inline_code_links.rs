@@ -402,6 +402,7 @@ mod tests {
                 .and_then(|run| run.style.link.clone())
         }
 
+        #[cfg(unix)]
         fn file_target(&self, relative: &str) -> String {
             format!(
                 "file://{}",
