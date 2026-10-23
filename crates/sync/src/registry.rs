@@ -311,15 +311,6 @@ impl RegistryClient {
         Self::connect_with_transport(connector, doc, device_id, tuning, Some(transport)).await
     }
 
-    pub(crate) async fn connect_with_tuned(
-        connector: Arc<dyn TextConnector>,
-        doc: Arc<Mutex<RegistryDoc>>,
-        device_id: &str,
-        tuning: RegistryTuning,
-    ) -> Result<Self, SyncError> {
-        Self::connect_with_transport(connector, doc, device_id, tuning, None).await
-    }
-
     pub(crate) async fn connect_with_transport(
         connector: Arc<dyn TextConnector>,
         doc: Arc<Mutex<RegistryDoc>>,
