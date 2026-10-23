@@ -4350,9 +4350,11 @@ impl Pickers {
         let searching = !query.is_empty();
         let descriptors = self.rail_descriptors(cx);
         // No-agents empty state: the catalog loaded but offers nothing
-        // runnable (every enabled harness is missing its CLI, or nothing is
-        // enabled) and there's no committed chat harness to force-include —
-        // guidance instead of an empty tab row.
+        // runnable and there's no committed chat harness to force-include —
+        // guidance instead of an empty tab row. The shipped registry registers
+        // the built-in agent alone and that agent is always installed, so only
+        // a foreign or degraded catalog reaches this (the engine re-enables the
+        // lone runnable agent when a prefs file disables everything).
         if descriptors.is_empty() {
             return div()
                 .p(px(16.0))
@@ -4376,9 +4378,9 @@ impl Pickers {
                         .text_size(crate::typography::ui_rems(12.0))
                         .text_color(theme.text_muted)
                         .text_center()
-                        .child(SharedString::from(
-                            "Enable an agent in Settings → Providers.",
-                        )),
+                        .child(
+                            crate::l10n::localizer().text(TextKey::PickersNoAgentsHint),
+                        ),
                 )
                 .into_any_element();
         }
@@ -5946,7 +5948,10 @@ fn visible_harnesses_impl(list: &[HarnessDescriptor], allow_mock: bool) -> Vec<H
 /// survives the filter. There is NO fallback: a catalog where nothing is
 /// both enabled and installed offers nothing, and the composer surfaces the
 /// no-agents empty state + blocks new sends — resurrecting descriptors that
-/// can only fail with NotInstalled is the #128 bug.
+/// can only fail with NotInstalled is the #128 bug. The shipped engine
+/// registers the built-in agent alone, always installed, and refuses to
+/// disable the last enabled one, so this list is empty only for a catalog
+/// from somewhere else (an older engine, or a device whose prefs predate it).
 pub fn offered_harnesses(list: &[HarnessDescriptor]) -> Vec<HarnessDescriptor> {
     offered_harnesses_impl(list, mock_harness_enabled())
 }

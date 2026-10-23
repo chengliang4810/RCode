@@ -59,6 +59,7 @@ pickers-no-project-selected = 未选择项目
 pickers-new-project = 新建项目
 pickers-no-refs = 没有找到引用。
 pickers-no-agents = 没有可用的 agent
+pickers-no-agents-hint = 在「设置 → 模型设置」中启用智能体。
 pickers-add-model = 添加模型
 pickers-default = 默认
 pickers-fast-mode = 快速模式

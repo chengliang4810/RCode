@@ -64,6 +64,7 @@ pickers-no-project-selected = No project selected
 pickers-new-project = New project
 pickers-no-refs = No refs found.
 pickers-no-agents = No agents available
+pickers-no-agents-hint = Enable an agent in Settings → Providers.
 pickers-add-model = Add model
 pickers-default = Default
 pickers-fast-mode = Fast mode

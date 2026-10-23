@@ -222,3 +222,49 @@ fn native_loading_failed_and_other_device_catalogs_are_not_empty_states(
         assert!(!picker.needs_model_setup(cx));
     });
 }
+
+/// A catalog that offers nothing runnable names that state instead of a model:
+/// the chip reads "no agents", carries no effort suffix, and resolves nothing
+/// to send — the send guard reads it separately.
+///
+/// Only a foreign or degraded catalog gets here (the shipped engine registers
+/// the built-in agent alone and re-enables it when a prefs file disables
+/// everything), so this pins a defensive branch that had no coverage at all.
+#[gpui::test]
+fn catalog_offering_nothing_runnable_names_the_state_instead_of_a_model(
+    cx: &mut gpui::TestAppContext,
+) {
+    let state = cx.new(|_| AppState::new());
+    let picker = cx.new(|cx| Pickers::new(state, cx));
+    picker.update(cx, |picker, cx| {
+        picker.harnesses = Loadable::Ready(vec![HarnessDescriptor {
+            id: HarnessId::Native,
+            name: "RCode".into(),
+            installed: true,
+            // Registered and runnable, but switched off on this device.
+            enabled: Some(false),
+            supports_steering: true,
+            steering_mode: rcode_proto::SteeringMode::StepBoundary,
+            reasoning_levels: vec![],
+        }]);
+        picker.harnesses_stale = false;
+
+        assert!(picker.no_agents_available());
+        assert!(picker.effective_harness(cx).is_none());
+        assert_eq!(picker.model_name(cx), ModelName::None { no_agents: true });
+        assert!(picker.model_chip_suffix(cx).is_none());
+        assert!(picker.compact_effort(cx).is_none());
+        assert!(picker.resolved(cx).model.is_none());
+        assert!(picker.resolved(cx).reasoning.is_none());
+        // Empty rows are what put the guidance card in the popover, and no
+        // harness tabs at all is what draws it without a tab row.
+        assert!(picker.visible_model_rows(cx).is_empty());
+        assert!(picker.rail_descriptors(cx).is_empty());
+
+        // Enabling the agent again — what the engine does when a prefs file
+        // left nothing enabled — returns the chip to a model name.
+        picker.test_native_catalog(vec![model("m")], cx);
+        assert!(!picker.no_agents_available());
+        assert_eq!(picker.model_name(cx), ModelName::Named("Vendor · m".into()));
+    });
+}
