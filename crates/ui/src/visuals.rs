@@ -1235,7 +1235,7 @@ impl VisualFrame {
             return gpui::Empty.into_any_element();
         };
         let (local, generation, time) = (self.local.clone(), self.generation, self.time());
-        let (draw, animate) = (node.draw, node.animate);
+        let (draw, animate) = (node.draw, node.animate && !cx.reduce_motion());
         let paint_palette = Rc::new(Palette::new(Theme::of(cx)));
         let cache_key = key.clone();
         let mut el = div()
@@ -1840,11 +1840,12 @@ impl VisualFrame {
             pitch: orbit.pitch,
             zoom: node.zoom,
         };
-        let moving = (spin != 0.0 && orbit.drag.is_none()) || node.animate;
+        let animate = node.animate && !cx.reduce_motion();
+        let moving = (spin != 0.0 && orbit.drag.is_none()) || animate;
         let dragging = orbit.drag.is_some();
         let (local, generation, time) = (self.local.clone(), self.generation, self.time());
         let entity = cx.entity().downgrade();
-        let (draw, animate) = (node.draw, node.animate);
+        let draw = node.draw;
         let paint_palette = Rc::new(Palette::new(Theme::of(cx)));
         let mut el = div()
             .id(self.element_id(&format!("{key}-scene")))
@@ -2744,6 +2745,38 @@ fn dot(center: Point<Pixels>, radius: f32) -> Vec<Point<Pixels>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[gpui::test]
+    fn animated_canvas_stops_requesting_frames_when_motion_is_reduced(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            cx.set_global(Theme::default());
+            cx.set_reduce_motion(true);
+        });
+        let view = cx.add_window(|_, cx| {
+            let mut frame = VisualFrame::new("canvas".into(), String::new(), String::new(), None, None, cx);
+            frame.start(
+                "return ui.canvas { height = 80, animate = true, draw = function() end }",
+                rcode_visual::Assets::default(),
+                cx,
+            );
+            frame
+        });
+        let callbacks = |cx: &mut gpui::TestAppContext| {
+            cx.update_window(view.into(), |_, window, cx| {
+                window.draw(cx).clear();
+                window.simulate_next_frame(cx)
+            }).unwrap()
+        };
+        callbacks(cx); // Drain callbacks from mounting the window.
+        assert_eq!(callbacks(cx), 0, "a static canvas must not schedule another frame");
+        cx.update(|cx| cx.set_reduce_motion(false));
+        assert!(callbacks(cx) > 0, "animation resumes when the setting allows it");
+        cx.update(|cx| cx.set_reduce_motion(true));
+        callbacks(cx); // A callback requested before the change may still land.
+        assert_eq!(callbacks(cx), 0, "reduced motion must park an active canvas");
+    }
 
     #[test]
     fn chart_series_drops_the_fixed_hue_nearest_the_accent() {
