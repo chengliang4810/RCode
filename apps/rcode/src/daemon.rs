@@ -97,18 +97,7 @@ pub fn install(data_dir: &Path) -> anyhow::Result<()> {
     } else if cfg!(target_os = "linux") {
         let unit = systemd_unit_path()?;
         std::fs::create_dir_all(unit.parent().expect("systemd user dir"))?;
-        let contents = render_systemd_unit(&exe, &env).replace(
-            "EnvironmentFile=-%h/.rcode/env",
-            &format!(
-                "EnvironmentFile=\"{}\"",
-                data_dir
-                    .join("env")
-                    .to_string_lossy()
-                    .replace('\\', "\\\\")
-                    .replace('"', "\\\"")
-                    .replace('%', "%%")
-            ),
-        );
+        let contents = render_systemd_unit(&exe, &env, Some(&data_dir.join("env")))?;
         std::fs::write(&unit, contents)?;
         run("systemctl", &["--user", "daemon-reload"])?;
         run("systemctl", &["--user", "enable", "--now", SYSTEMD_UNIT])?;
@@ -300,20 +289,50 @@ fn captured_env() -> Vec<(String, String)> {
         .collect()
 }
 
-fn render_systemd_unit(exe: &Path, env: &[(String, String)]) -> String {
+fn render_systemd_unit(
+    exe: &Path,
+    env: &[(String, String)],
+    environment_file: Option<&Path>,
+) -> anyhow::Result<String> {
+    let environment_file = match environment_file {
+        Some(path) => systemd_environment_file_path(path)?,
+        // This is an intentional specifier, unlike '%' in an actual path.
+        None => "-%h/.rcode/env".into(),
+    };
     let mut unit = String::from(
         "[Unit]\nDescription=RCode headless engine\nAfter=network-online.target\nStartLimitIntervalSec=60\nStartLimitBurst=5\n\n[Service]\n",
     );
     for (key, value) in env {
         // systemd unquotes the value; escape the characters it treats specially.
-        let value = value.replace('\\', "\\\\").replace('"', "\\\"");
+        let value = value
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"")
+            .replace('%', "%%");
         unit.push_str(&format!("Environment=\"{key}={value}\"\n"));
     }
     unit.push_str(&format!(
-        "ExecStart={} headless\nRestart=on-failure\nRestartSec=5\nEnvironmentFile=-%h/.rcode/env\n\n[Install]\nWantedBy=default.target\n",
+        "ExecStart={} headless\nRestart=on-failure\nRestartSec=5\nEnvironmentFile={environment_file}\n\n[Install]\nWantedBy=default.target\n",
         systemd_exec_path(exe)
     ));
-    unit
+    Ok(unit)
+}
+
+/// EnvironmentFile= takes one raw path, not a quoted/C-unescaped word.
+/// systemd expands unit specifiers, then glob() resolves the file name.
+fn systemd_environment_file_path(path: &Path) -> anyhow::Result<String> {
+    let mut escaped = String::new();
+    for character in path.to_string_lossy().chars() {
+        match character {
+            '\r' | '\n' => bail!("service environment file path must not contain a line break"),
+            '%' => escaped.push_str("%%"),
+            '\\' | '*' | '?' | '[' | ']' => {
+                escaped.push('\\');
+                escaped.push(character);
+            }
+            _ => escaped.push(character),
+        }
+    }
+    Ok(escaped)
 }
 
 /// The ExecStart binary path. An exe under `~/.rcode/app/` came from the
@@ -462,7 +481,9 @@ mod tests {
                 ("RCODE_EDGE_URL".into(), "https://edge.example".into()),
                 ("RUST_LOG".into(), "info,rcode=\"debug\"".into()),
             ],
-        );
+            None,
+        )
+        .unwrap();
         assert!(unit.contains("ExecStart=/usr/local/bin/rcode headless\n"));
         assert!(unit.contains("Environment=\"PATH=/usr/bin:/bin\"\n"));
         assert!(unit.contains("Environment=\"RCODE_EDGE_URL=https://edge.example\"\n"));
@@ -475,6 +496,80 @@ mod tests {
         assert!(!unit.contains("ConditionPathExists"));
         assert!(unit.contains("EnvironmentFile=-%h/.rcode/env"));
         assert!(unit.contains("WantedBy=default.target"));
+    }
+
+    #[test]
+    fn systemd_environment_file_uses_the_actual_config_path_without_quotes() {
+        let unit = render_systemd_unit(
+            Path::new("/usr/local/bin/rcode"),
+            &[],
+            Some(Path::new("/opt/rcode-debug/profile/env")),
+        )
+        .unwrap();
+        let lines: Vec<_> = unit
+            .lines()
+            .filter(|line| line.starts_with("EnvironmentFile="))
+            .collect();
+        assert_eq!(lines, ["EnvironmentFile=/opt/rcode-debug/profile/env"]);
+        assert!(!unit.contains("EnvironmentFile=-%h/.rcode/env"));
+    }
+
+    #[test]
+    fn systemd_environment_file_preserves_literal_path_characters() {
+        // EnvironmentFile first expands % specifiers, then uses glob() with
+        // backslash escaping enabled. Spaces/quotes are not word delimiters.
+        for (path, expected) in [
+            ("/srv/RCode Profiles/env", "/srv/RCode Profiles/env"),
+            ("/srv/literal%h%u/env", "/srv/literal%%h%%u/env"),
+            (r#"/srv/inner"quote/env"#, r#"/srv/inner"quote/env"#),
+            (r"/srv/back\slash/env", r"/srv/back\\slash/env"),
+            ("/srv/glob[*?]/env", r"/srv/glob\[\*\?\]/env"),
+            (
+                r#"/srv/RCode Profiles/%h\slash"quote[*?]/env"#,
+                r#"/srv/RCode Profiles/%%h\\slash"quote\[\*\?\]/env"#,
+            ),
+        ] {
+            let unit = render_systemd_unit(
+                Path::new("/usr/local/bin/rcode"),
+                &[],
+                Some(Path::new(path)),
+            )
+            .unwrap();
+            assert_eq!(
+                unit.lines()
+                    .find_map(|line| line.strip_prefix("EnvironmentFile=")),
+                Some(expected),
+                "path: {path:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn systemd_captured_config_root_keeps_literal_percent_specifiers() {
+        let unit = render_systemd_unit(
+            Path::new("/usr/local/bin/rcode"),
+            &[("RCODE_DATA_DIR".into(), r#"/srv/%h\slash"quote"#.into())],
+            Some(Path::new(r#"/srv/%h\slash"quote/env"#)),
+        )
+        .unwrap();
+        assert!(unit.contains("Environment=\"RCODE_DATA_DIR=/srv/%%h\\\\slash\\\"quote\"\n"));
+        assert!(unit.contains(r#"EnvironmentFile=/srv/%%h\\slash"quote/env"#));
+    }
+
+    #[test]
+    fn systemd_environment_file_rejects_line_break_injection() {
+        for path in [
+            "/srv/profile\nExecStart=/bin/false/env",
+            "/srv/profile\renv",
+        ] {
+            let error = render_systemd_unit(
+                Path::new("/usr/local/bin/rcode"),
+                &[],
+                Some(Path::new(path)),
+            )
+            .unwrap_err();
+            assert!(error.to_string().contains("line break"));
+        }
     }
 
     #[test]
