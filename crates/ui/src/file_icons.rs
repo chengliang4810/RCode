@@ -511,11 +511,18 @@ mod tests {
     #[test]
     fn complete_theme_bundle_is_registered() {
         let assets = Assets.list(ASSET_PREFIX).unwrap();
-        assert!(
-            assets.len() >= 350,
-            "unexpectedly small icon bundle: {}",
-            assets.len()
-        );
+        let referenced: std::collections::HashSet<_> = MANIFEST
+            .icon_definitions
+            .values()
+            .map(|icon| icon.icon_path.strip_prefix("./icons/").unwrap().to_owned())
+            .collect();
+        let embedded: std::collections::HashSet<_> = EmbeddedFileIcons::iter()
+            .filter(|asset| asset.ends_with(".svg"))
+            .map(|asset| asset.into_owned())
+            .collect();
+        assert_eq!(embedded, referenced, "embed only artwork used by the theme");
+        assert!(!assets.is_empty());
+        assert!(Assets.load("file-icons/LICENSE.symbols").unwrap().is_some());
         for asset in EmbeddedFileIcons::iter().filter(|asset| asset.ends_with(".svg")) {
             let bytes = EmbeddedFileIcons::get(&asset)
                 .unwrap_or_else(|| panic!("listed asset is missing: {asset}"));
