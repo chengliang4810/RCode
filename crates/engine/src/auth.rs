@@ -12,7 +12,7 @@ use tokio::sync::watch;
 use rcode_rpc::TokenError;
 
 // ---------------------------------------------------------------------------
-// Wire types (ARCHITECTURE.md AuthRpc)
+// Local identity wire types (ARCHITECTURE.md §5; shared proto AuthState shape).
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
