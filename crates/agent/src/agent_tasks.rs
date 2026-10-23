@@ -18,6 +18,7 @@ use tokio_util::sync::CancellationToken;
 pub struct MessageInbox {
     queue: Mutex<VecDeque<String>>,
 }
+
 impl MessageInbox {
     pub fn push(&self, message: String) -> Result<(), String> {
         let mut queue = self
@@ -63,6 +64,14 @@ struct AgentTask {
     started_at: std::time::Instant,
     generation: u64,
     notified: u64,
+}
+
+impl Drop for AgentTask {
+    fn drop(&mut self) {
+        if let Some(path) = &self.output_file {
+            let _ = std::fs::remove_file(path);
+        }
+    }
 }
 
 #[derive(Default)]
@@ -445,8 +454,7 @@ impl AgentTasks {
                 _ = &mut deadline, if auto_ms.is_some() => {
                     if promote { self.background(id); }
                     else { if let Some(task) = self.store.tasks.lock().unwrap().get(id) { if task.background { continue; } task.cancel.cancel(); }
-                        let reap = CancellationToken::new();
-                        let _ = self.output(id, true, 600_000, &reap).await;
+                        self.output(id, true, 600_000, &ctx.cancel).await?;
                         return Err(ToolError::Timeout("The foreground command timed out and its process tree was stopped".into())); }
                 }
                 _ = notified => {}
@@ -527,8 +535,9 @@ fn make_room(tasks: &mut HashMap<String, AgentTask>) -> Result<(), ToolError> {
 }
 
 fn task_json(task: &AgentTask) -> Value {
+    let pending = task.inbox.queue.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     json!({"task_id":task.id,"agentId":task.id,"task_type":task_type(task),"agentType":task.definition.as_ref().map(|definition| &definition.name),"isBackgrounded":task.background,"output_file":task.output_file,
-        "description":task.description,"status":task.status,"output":crate::tools::truncate(&if task.output.is_empty() { task.live_output.lock().unwrap().clone() } else { task.output.clone() }, 30_000).0,"outputTruncated":crate::tools::truncate(&if task.output.is_empty() { task.live_output.lock().unwrap().clone() } else { task.output.clone() }, 30_000).1,"error":task.error})
+        "description":task.description,"status":task.status,"output":crate::tools::truncate(&if task.output.is_empty() { task.live_output.lock().unwrap().clone() } else { task.output.clone() }, 30_000).0,"outputTruncated":crate::tools::truncate(&if task.output.is_empty() { task.live_output.lock().unwrap().clone() } else { task.output.clone() }, 30_000).1,"error":task.error,"pending_messages":*pending})
 }
 
 fn task_type(task: &AgentTask) -> &'static str {
@@ -656,11 +665,6 @@ impl Tool for AgentManagementTool {
                 std::fs::create_dir_all(&directory)
                     .map_err(|error| ToolError::Execution(error.to_string()))?;
                 let output_file = directory.join(format!("{id}.log"));
-                std::fs::OpenOptions::new()
-                    .create_new(true)
-                    .write(true)
-                    .open(&output_file)
-                    .map_err(|error| ToolError::Execution(error.to_string()))?;
                 {
                     let mut tasks = self
                         .tasks
@@ -669,6 +673,11 @@ impl Tool for AgentManagementTool {
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
                     make_room(&mut tasks)?;
+                    std::fs::OpenOptions::new()
+                        .create_new(true)
+                        .write(true)
+                        .open(&output_file)
+                        .map_err(|error| ToolError::Execution(error.to_string()))?;
                     tasks.insert(
                         id.clone(),
                         AgentTask {
@@ -771,7 +780,7 @@ impl Tool for AgentManagementTool {
             _ => {
                 let id = text("to", 200)?;
                 text("summary", 200)?;
-                let message = text("message", 20_000)?;
+                let mut message = text("message", 20_000)?;
                 let resumed = {
                     let mut tasks = self
                         .tasks
@@ -810,7 +819,9 @@ impl Tool for AgentManagementTool {
                             .lock()
                             .unwrap()
                             .child_token();
-                        task.inbox = Arc::new(MessageInbox::default());
+                        let mut pending = task.inbox.drain();
+                        pending.push(message);
+                        message = pending.join("\n\n");
                         true
                     }
                 };
@@ -1062,5 +1073,45 @@ impl Tool for ManagedShell {
             is_error: task["status"] != "completed",
             diff: None,
         })
+    }
+}
+
+#[cfg(test)]
+mod cancellation_tests {
+    use super::*;
+
+    struct UnusedRuntime;
+    #[async_trait::async_trait]
+    impl SubagentRuntime for UnusedRuntime {
+        fn definitions(&self, _: &std::path::Path) -> Vec<SubagentDefinition> { Vec::new() }
+        async fn run(&self, _: SubagentSpawn) -> Result<crate::tools::SubagentOutcome, String> { unreachable!() }
+    }
+
+    #[tokio::test]
+    async fn stop_interrupts_the_reap_wait_after_a_foreground_timeout() {
+        let store = Arc::new(AgentTaskStore::default());
+        let task_cancel = CancellationToken::new();
+        store.tasks.lock().unwrap().insert("held".into(), AgentTask {
+            id: "held".into(), description: "stalled cleanup".into(), definition: None,
+            background: false, tool_use_id: String::new(), live_output: Arc::default(),
+            output_file: None, cwd: std::env::temp_dir(), status: "running", output: String::new(),
+            error: None, history: Vec::new(), inbox: Arc::default(), cancel: task_cancel.clone(),
+            started_at: std::time::Instant::now(), generation: 1, notified: 0,
+        });
+        let manager = Arc::new(AgentTasks::new(store, Arc::new(UnusedRuntime)));
+        let cancel = CancellationToken::new();
+        let wait = {
+            let cancel = cancel.clone();
+            tokio::spawn(async move {
+                let ctx = ToolContext { cwd: std::env::temp_dir(), cancel, nested: None };
+                manager.wait_foreground("held", Some(1), false, &ctx).await
+            })
+        };
+        // The timeout requested process termination, but cleanup is deliberately
+        // still running. Stop must interrupt the subsequent reap wait.
+        tokio::time::timeout(Duration::from_secs(1), task_cancel.cancelled()).await.unwrap();
+        cancel.cancel();
+        let result = tokio::time::timeout(Duration::from_secs(1), wait).await.expect("Stop waited for the 10-minute reap deadline").unwrap();
+        assert!(matches!(result, Err(ToolError::Cancelled)));
     }
 }

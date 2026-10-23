@@ -252,7 +252,20 @@ impl AgentRunner {
     ) -> BoxStream<'static, Result<AgentEvent, AgentError>> {
         let (tx, rx) = mpsc::channel(64);
         tokio::spawn(async move {
-            let outcome = self.drive(prompt, &cancel, &tx).await;
+            // Losing the event consumer stops this foreground run as well.
+            // Keep polling drive after cancellation so tools can reap processes
+            // and persist their terminal state instead of dropping their futures.
+            let cancel = cancel.child_token();
+            let drive = self.drive(prompt, &cancel, &tx);
+            tokio::pin!(drive);
+            let outcome = tokio::select! {
+                biased;
+                _ = tx.closed() => {
+                    cancel.cancel();
+                    drive.await
+                }
+                outcome = &mut drive => outcome,
+            };
             if let Err(error) = outcome {
                 if let Some(tasks) = &self.tasks { tasks.cancel_foreground(); }
                 if let Some((store, id)) = self.goal.as_ref().zip(self.goal_id.as_ref()) {
@@ -286,6 +299,7 @@ impl AgentRunner {
         cancel: &CancellationToken,
         tx: &mpsc::Sender<Result<AgentEvent, AgentError>>,
     ) -> Result<(), AgentError> {
+        if cancel.is_cancelled() { return Err(AgentError::Cancelled); }
         let mut messages = Vec::with_capacity(self.config.history.len() + 2);
         // The system turn goes first, and only when the host supplied one:
         // an empty system message is a request the provider has to serialize
@@ -1196,6 +1210,44 @@ mod tests {
             .run("go".to_owned(), CancellationToken::new())
             .collect()
             .await
+    }
+
+    #[tokio::test]
+    async fn dropping_the_event_consumer_cancels_an_active_tool_and_allows_cleanup() {
+        struct WaitingTool {
+            started: Arc<tokio::sync::Notify>,
+            cleaned: Arc<tokio::sync::Notify>,
+        }
+        #[async_trait::async_trait]
+        impl Tool for WaitingTool {
+            fn name(&self) -> &str { "Wait" }
+            fn description(&self) -> &str { "wait for cancellation" }
+            fn input_schema(&self) -> serde_json::Value { serde_json::json!({"type":"object"}) }
+            async fn call(&self, _: serde_json::Value, ctx: &ToolContext) -> Result<ToolResult, ToolError> {
+                self.started.notify_one();
+                ctx.cancel.cancelled().await;
+                // Asynchronous cleanup still runs after the consumer disappears.
+                tokio::task::yield_now().await;
+                self.cleaned.notify_one();
+                Err(ToolError::Cancelled)
+            }
+        }
+        let started = Arc::new(tokio::sync::Notify::new());
+        let cleaned = Arc::new(tokio::sync::Notify::new());
+        let mut tools = ToolRegistry::new();
+        tools.register(Arc::new(WaitingTool { started: started.clone(), cleaned: cleaned.clone() }));
+        let host = Arc::new(ScriptedHost {
+            turns: std::sync::Mutex::new([assistant_with_tool("Wait", "wait")].into()),
+            answers: Default::default(),
+            asked: AtomicUsize::new(0),
+        });
+        let runner = Arc::new(AgentRunner::new(host, Arc::new(tools), AgentConfig::default()));
+        let caller_cancel = CancellationToken::new();
+        let stream = runner.run("go".into(), caller_cancel.clone());
+        tokio::time::timeout(std::time::Duration::from_secs(2), started.notified()).await.unwrap();
+        drop(stream);
+        tokio::time::timeout(std::time::Duration::from_secs(2), cleaned.notified()).await.expect("orphaned tool did not cancel and finish cleanup");
+        assert!(!caller_cancel.is_cancelled(), "a disappeared consumer cancels only its own run");
     }
 
     /// A host that reports token counts on its first call only.

@@ -220,6 +220,14 @@ impl NativeHarness {
         self.mcp.client(cwd, data_dir).await
     }
 
+    async fn mcp_for_run(&self, cwd: &std::path::Path, interrupt: &CancellationToken) -> Option<Arc<rcode_mcp::McpClient>> {
+        tokio::select! {
+            biased;
+            _ = interrupt.cancelled() => None,
+            client = self.mcp(cwd) => client,
+        }
+    }
+
     /// The store this harness shares with the engine, if any.
     pub fn store(&self) -> Option<std::sync::Arc<crate::provider_store::ProviderStore>> {
         self.store.clone()
@@ -1004,7 +1012,7 @@ impl NativeHarness {
                     }
                 });
                 let mcp = if settings.mcp {
-                    self.mcp(&cwd).await
+                    self.mcp_for_run(&cwd, &interrupt).await
                 } else {
                     None
                 };

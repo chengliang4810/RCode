@@ -51,10 +51,14 @@ impl Tool for McpTool {
     async fn call(
         &self,
         input: serde_json::Value,
-        _ctx: &ToolContext,
+        ctx: &ToolContext,
     ) -> Result<ToolResult, ToolError> {
         let arguments = (!input.is_null()).then_some(input);
-        match self.client.call(&self.info.wire_name, arguments).await {
+        match self
+            .client
+            .call_with_cancel(&self.info.wire_name, arguments, &ctx.cancel)
+            .await
+        {
             Ok(result) => {
                 let text = result_text(&result);
                 // A tool-level failure is a *result*, not a tool error: the
@@ -72,6 +76,7 @@ impl Tool for McpTool {
             // A server that could not be reached is also a result: the model
             // can report it to the user, and the run continues with the rest
             // of the tools.
+            Err(_) if ctx.cancel.is_cancelled() => Err(ToolError::Cancelled),
             Err(error) => Ok(ToolResult::error(format!(
                 "MCP server `{}` is unavailable: {error}",
                 self.info.server

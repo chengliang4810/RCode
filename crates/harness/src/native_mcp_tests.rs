@@ -1,6 +1,34 @@
 use super::*;
 
 #[tokio::test]
+async fn stop_interrupts_mcp_initialization_before_the_connection_deadline() {
+    let root = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let script = root.path().join("snapshot_server.py");
+    let starts = root.path().join("starts");
+    std::fs::write(&script, include_str!("../../mcp/tests/snapshot_server.py")).unwrap();
+    let python = ["python", "python3"].into_iter().find(|candidate| {
+        std::process::Command::new(candidate).arg("--version").output().is_ok_and(|output| output.status.success())
+    }).expect("MCP regression fixture requires Python");
+    std::fs::write(root.path().join("mcp.json"), serde_json::json!({"mcpServers": {"fixture": {
+        "command": python, "args": ["-u", script.to_str().unwrap(), "test", "-", "held_initialize", starts.to_str().unwrap()]
+    }}}).to_string()).unwrap();
+    let harness = Arc::new(NativeHarness::from_data_dir(root.path()));
+    let cancel = CancellationToken::new();
+    let task = tokio::spawn({
+        let harness = harness.clone(); let cancel = cancel.clone();
+        let cwd = project.path().to_path_buf();
+        async move { harness.mcp_for_run(&cwd, &cancel).await }
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while !starts.exists() { tokio::task::yield_now().await; }
+    }).await.unwrap();
+    cancel.cancel();
+    assert!(tokio::time::timeout(std::time::Duration::from_secs(1), task).await
+        .expect("Stop must not wait for the 30-second initialization deadline").unwrap().is_none());
+}
+
+#[tokio::test]
 async fn one_harness_reloads_mcp_for_projects_and_settings_changes() {
     let root = tempfile::tempdir().unwrap();
     let a = tempfile::tempdir().unwrap();

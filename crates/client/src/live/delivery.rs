@@ -32,8 +32,11 @@ pub(crate) fn start(inner: &Arc<ClientInner>, wake: Arc<Notify>, cancel: Cancell
             // Preserve the scan cursor while full: wrapping here would let
             // the same first page reclaim every released slot.
             if active.len() < MAX_ACTIVE {
-                match live.store.pending_viewer_deliveries(&after, 64) {
-                    Ok(page) => {
+                let store = live.store.clone();
+                let cursor = after.clone();
+                let page = tokio::task::spawn_blocking(move || store.pending_viewer_deliveries(&cursor, 64)).await;
+                match page {
+                    Ok(Ok(page)) => {
                         if page.is_empty() {
                             after.clear();
                         }
@@ -57,7 +60,8 @@ pub(crate) fn start(inner: &Arc<ClientInner>, wake: Arc<Notify>, cancel: Cancell
                             });
                         }
                     }
-                    Err(err) => tracing::warn!(%err, "delivery discovery failed"),
+                    Ok(Err(err)) => tracing::warn!(%err, "delivery discovery failed"),
+                    Err(err) => tracing::warn!(%err, "delivery discovery task failed"),
                 }
             }
             drop(inner);
@@ -73,12 +77,12 @@ pub(crate) fn start(inner: &Arc<ClientInner>, wake: Arc<Notify>, cancel: Cancell
 async fn deliver(weak: std::sync::Weak<ClientInner>, chat: &str) {
     // Hold the session (not the account) while delivering: a detached room
     // must remain alive through its outgoing ACK, including queue-only writes.
-    let _session = {
-        let Some(inner) = weak.upgrade() else { return };
-        let Ok(session) = inner.resume_delivery(chat) else {
-            return;
-        };
-        session
+    let resume = weak.clone();
+    let chat_id = chat.to_owned();
+    let Ok(Some(_session)) =
+        tokio::task::spawn_blocking(move || resume.upgrade()?.resume_delivery(&chat_id).ok()).await
+    else {
+        return;
     };
     let mut backoff = super::JOIN_RETRY_BASE;
     loop {
@@ -87,14 +91,23 @@ async fn deliver(weak: std::sync::Weak<ClientInner>, chat: &str) {
         let Some(row) = inner.workspace.chat(chat) else {
             return;
         };
-        let version = match live.store.sync_job_version(chat, JOB) {
-            Ok(version) => version,
-            Err(err) => {
-                tracing::warn!(%err, %chat, "delivery receipt load failed");
-                None
-            }
+        let store = live.store.clone();
+        let chat_id = chat.to_owned();
+        let Ok((version, rows_flushed)) = tokio::task::spawn_blocking(move || {
+            let version = match store.sync_job_version(&chat_id, JOB) {
+                Ok(version) => version,
+                Err(err) => {
+                    tracing::warn!(%err, chat = %chat_id, "delivery receipt load failed");
+                    None
+                }
+            };
+            let rows_flushed = store.has_pending_chat_updates(&chat_id).ok() == Some(false);
+            (version, rows_flushed)
+        })
+        .await
+        else {
+            return;
         };
-        let rows_flushed = live.store.has_pending_chat_updates(chat).ok() == Some(false);
         // No registry wait: hosts durably admit a wake before CreateChat
         // arrives and default missing rows to chat2 (the born-chat race).
         let result = async {
@@ -125,22 +138,30 @@ async fn deliver(weak: std::sync::Weak<ClientInner>, chat: &str) {
         }
         .await;
         if result.is_ok() && rows_flushed {
-            match live.store.has_pending_chat_updates(chat) {
-                Ok(false) => {
-                    // This wake was posted AFTER the outgoing row ACKs. A
-                    // wake sent before them can catch up to an empty room.
-                    if let Some(version) = version {
-                        if let Err(err) = live.store.complete_sync_job(chat, JOB, version) {
-                            tracing::warn!(%err, %chat, "delivery receipt completion failed");
-                        } else if live.store.sync_job_version(chat, JOB).ok() == Some(None) {
-                            return;
+            let store = live.store.clone();
+            let chat_id = chat.to_owned();
+            let settled = tokio::task::spawn_blocking(move || {
+                match store.has_pending_chat_updates(&chat_id) {
+                    Ok(false) => {
+                        // This wake was posted AFTER the outgoing row ACKs. A
+                        // wake sent before them can catch up to an empty room.
+                        if let Some(version) = version {
+                            if let Err(err) = store.complete_sync_job(&chat_id, JOB, version) {
+                                tracing::warn!(%err, chat = %chat_id, "delivery receipt completion failed");
+                            } else if store.sync_job_version(&chat_id, JOB).ok() == Some(None) {
+                                return true;
+                            }
+                        } else {
+                            return true;
                         }
-                    } else {
-                        return;
                     }
+                    Ok(true) => {}
+                    Err(err) => tracing::warn!(%err, chat = %chat_id, "delivery outbox check failed"),
                 }
-                Ok(true) => {}
-                Err(err) => tracing::warn!(%err, %chat, "delivery outbox check failed"),
+                false
+            }).await;
+            if matches!(settled, Ok(true)) {
+                return;
             }
         } else if let Err(err) = result {
             tracing::debug!(%err, %chat, "host wake retrying");

@@ -19,11 +19,15 @@ for line in sys.stdin:
     message = json.loads(line)
     method, identity = message.get("method"), message.get("id")
     if method == "initialize":
+        if mode == "held_initialize":
+            time.sleep(60)
         send({"jsonrpc": "2.0", "id": identity, "result": {
             "protocolVersion": "2025-06-18", "capabilities": {"tools": {}},
             "serverInfo": {"name": "snapshot", "version": "1"},
             "instructions": label}})
     elif method == "tools/list":
+        if mode == "held_list":
+            time.sleep(60)
         send({"jsonrpc": "2.0", "id": identity, "result": {"tools": [{
             "name": "record", "description": label,
             "inputSchema": {"type": "object", "properties": {}},
@@ -39,6 +43,9 @@ for line in sys.stdin:
             with open(marker, "a", encoding="utf-8") as output:
                 output.write("executed\n")
             count = len(Path(marker).read_text(encoding="utf-8").splitlines())
+        if count == 1 and mode == "held_after_commit":
+            Path(marker + ".ready").write_text(str(os.getpid()), encoding="utf-8")
+            time.sleep(60)
         if count == 1 and mode == "disconnect_once":
             sys.exit(0)
         if count == 1 and mode == "error_once":

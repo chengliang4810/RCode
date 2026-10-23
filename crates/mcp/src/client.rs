@@ -24,9 +24,14 @@ use rmcp::model::{CallToolRequestParams, CallToolResult, ContentBlock};
 use rmcp::service::{RoleClient, RunningService, ServiceError};
 use rmcp::transport::child_process::TokioChildProcess;
 use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
+use std::time::Duration;
 use tokio::sync::Mutex;
+use tokio_util::sync::CancellationToken;
 
 use crate::config::{McpServer, McpTransport};
+
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+const CALL_TIMEOUT: Duration = Duration::from_secs(600);
 
 /// One tool a server advertises.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -71,6 +76,8 @@ struct ServerState {
     config: McpServer,
     cwd: Option<PathBuf>,
     connection: Mutex<Connection>,
+    /// Single-flight reconnects without holding the connection state lock.
+    reconnect: Mutex<()>,
     /// The tools listed at startup, so a call can be routed without asking the
     /// server which endpoint it belongs to.
     tools: Vec<McpToolInfo>,
@@ -112,6 +119,7 @@ impl McpClient {
                     config,
                     cwd: cwd.clone(),
                     connection: Mutex::new(Connection::Failed),
+                    reconnect: Mutex::new(()),
                     tools: Vec::new(),
                     problem: Some("switched off".to_owned()),
                 }));
@@ -135,6 +143,7 @@ impl McpClient {
                 config,
                 cwd: cwd.clone(),
                 connection: Mutex::new(connection),
+                reconnect: Mutex::new(()),
                 tools: listed,
                 problem,
             }));
@@ -198,26 +207,59 @@ impl McpClient {
         wire_name: &str,
         arguments: Option<serde_json::Value>,
     ) -> Result<CallToolResult, String> {
+        self.call_with_cancel(wire_name, arguments, &CancellationToken::new())
+            .await
+    }
+
+    /// Stop the current request and retire its connection on cancellation.
+    /// Its effects may already have happened, so it is never replayed.
+    pub async fn call_with_cancel(
+        &self,
+        wire_name: &str,
+        arguments: Option<serde_json::Value>,
+        cancel: &CancellationToken,
+    ) -> Result<CallToolResult, String> {
+        self.call_inner(wire_name, arguments, cancel, CALL_TIMEOUT)
+            .await
+    }
+
+    async fn call_inner(
+        &self,
+        wire_name: &str,
+        arguments: Option<serde_json::Value>,
+        cancel: &CancellationToken,
+        timeout: Duration,
+    ) -> Result<CallToolResult, String> {
         let (server_index, tool) = self
             .resolve(wire_name)
             .ok_or_else(|| format!("no MCP tool named `{wire_name}`"))?;
 
         let state = &self.servers[server_index];
-        let service = {
-            let mut connection = state.connection.lock().await;
-            if matches!(*connection, Connection::Failed) {
-                let (service, _) = open(&state.config, state.cwd.as_deref()).await?;
-                *connection = Connection::Live(Arc::new(service));
+        let service = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return Err("cancelled before the MCP call was sent".into()),
+            result = tokio::time::timeout(CONNECT_TIMEOUT, state.service()) => {
+                result.map_err(|_| "MCP reconnection timed out after 30 seconds".to_owned())??
             }
-            let Connection::Live(service) = &*connection else { unreachable!() };
-            service.clone()
         };
         // A slow tool must not block other calls or a new run's instructions.
-        match call_once(&service, &tool.name, arguments).await {
+        let result = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => Err("cancelled".to_owned()),
+            result = tokio::time::timeout(timeout, call_once(&service, &tool.name, arguments)) => {
+                match result {
+                    Ok(result) => result.map_err(|error| error.to_string()),
+                    Err(_) => Err(format!("tool response timed out after {} seconds", timeout.as_secs_f64())),
+                }
+            }
+        };
+        match result {
             Ok(result) => Ok(result),
             Err(error) => {
                 let mut connection = state.connection.lock().await;
-                if matches!(&*connection, Connection::Live(current) if Arc::ptr_eq(current, &service)) {
+                if matches!(&*connection, Connection::Live(current) if Arc::ptr_eq(current, &service))
+                {
+                    service.cancellation_token().cancel();
                     *connection = Connection::Failed;
                 }
                 Err(format!(
@@ -242,6 +284,23 @@ impl McpClient {
     }
 }
 
+impl ServerState {
+    async fn service(&self) -> Result<Arc<RunningService<RoleClient, ()>>, String> {
+        if let Connection::Live(service) = &*self.connection.lock().await {
+            return Ok(service.clone());
+        }
+        let _reconnect = self.reconnect.lock().await;
+        // Another caller may have reconnected while this one was waiting.
+        if let Connection::Live(service) = &*self.connection.lock().await {
+            return Ok(service.clone());
+        }
+        let (service, _) = open(&self.config, self.cwd.as_deref()).await?;
+        let service = Arc::new(service);
+        *self.connection.lock().await = Connection::Live(service.clone());
+        Ok(service)
+    }
+}
+
 /// What the settings page shows for one server.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -257,6 +316,29 @@ pub struct ServerReport {
 
 /// Start one server and list its tools.
 async fn open(
+    server: &McpServer,
+    cwd: Option<&Path>,
+) -> Result<(RunningService<RoleClient, ()>, Vec<McpToolInfo>), String> {
+    open_with_timeout(server, cwd, CONNECT_TIMEOUT).await
+}
+
+async fn open_with_timeout(
+    server: &McpServer,
+    cwd: Option<&Path>,
+    timeout: Duration,
+) -> Result<(RunningService<RoleClient, ()>, Vec<McpToolInfo>), String> {
+    tokio::time::timeout(timeout, open_unbounded(server, cwd))
+        .await
+        .map_err(|_| {
+            format!(
+                "MCP server `{}` initialization or tool discovery timed out after {} seconds",
+                server.name,
+                timeout.as_secs_f64()
+            )
+        })?
+}
+
+async fn open_unbounded(
     server: &McpServer,
     cwd: Option<&Path>,
 ) -> Result<(RunningService<RoleClient, ()>, Vec<McpToolInfo>), String> {
@@ -396,4 +478,115 @@ pub fn tool_counts(client: &McpClient) -> BTreeMap<String, usize> {
         .into_iter()
         .map(|server| (server.name, server.tool_count))
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fixture(mode: &str, marker: &Path) -> McpServer {
+        let python = ["python", "python3"]
+            .into_iter()
+            .find(|command| {
+                std::process::Command::new(command)
+                    .arg("--version")
+                    .output()
+                    .is_ok_and(|output| output.status.success())
+            })
+            .expect("MCP fixtures require Python on PATH");
+        McpServer {
+            name: "fixture".into(),
+            enabled: true,
+            source: crate::config::McpSource::User,
+            transport: McpTransport::Stdio {
+                command: python.into(),
+                args: vec![
+                    "-u".into(),
+                    Path::new(env!("CARGO_MANIFEST_DIR"))
+                        .join("tests/snapshot_server.py")
+                        .to_string_lossy()
+                        .into_owned(),
+                    "test".into(),
+                    marker.to_string_lossy().into_owned(),
+                    mode.into(),
+                    "-".into(),
+                ],
+                env: BTreeMap::new(),
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn initialization_and_tool_discovery_have_deadlines() {
+        let directory = tempfile::tempdir().unwrap();
+        for mode in ["held_initialize", "held_list"] {
+            let config = fixture(mode, &directory.path().join(mode));
+            let result = tokio::time::timeout(
+                Duration::from_secs(3),
+                open_with_timeout(&config, None, Duration::from_millis(500)),
+            )
+            .await
+            .expect("initialization hung");
+            assert!(result.err().unwrap().contains("timed out"));
+        }
+    }
+
+    #[tokio::test]
+    async fn cancellation_and_timeout_retire_the_connection_without_replaying_effects() {
+        let directory = tempfile::tempdir().unwrap();
+        for cancelled in [true, false] {
+            let marker = directory
+                .path()
+                .join(if cancelled { "cancel" } else { "timeout" });
+            let client =
+                Arc::new(McpClient::connect(vec![fixture("held_after_commit", &marker)]).await);
+            assert_eq!(client.tools().len(), 1, "{:?}", client.servers());
+            let cancel = CancellationToken::new();
+            let task = {
+                let client = client.clone();
+                let cancel = cancel.clone();
+                tokio::spawn(async move {
+                    client
+                        .call_inner(
+                            "mcp__fixture__record",
+                            None,
+                            &cancel,
+                            Duration::from_millis(500),
+                        )
+                        .await
+                })
+            };
+            tokio::time::timeout(Duration::from_secs(3), async {
+                while !marker.with_extension("ready").exists() {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("fixture did not commit its effect");
+            if cancelled {
+                cancel.cancel();
+            }
+            let error = tokio::time::timeout(Duration::from_secs(3), task)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap_err();
+            assert!(
+                error.contains(if cancelled { "cancelled" } else { "timed out" }),
+                "{error}"
+            );
+            assert!(error.contains("not retried"));
+            assert_eq!(std::fs::read_to_string(&marker).unwrap().lines().count(), 1);
+            // A new explicit call reconnects, rather than keeping a hung peer.
+            let second = tokio::time::timeout(
+                Duration::from_secs(3),
+                client.call("mcp__fixture__record", None),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert!(result_text(&second).contains("\"count\": 2"));
+            assert_eq!(std::fs::read_to_string(&marker).unwrap().lines().count(), 2);
+        }
+    }
 }

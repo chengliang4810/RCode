@@ -13,6 +13,7 @@ use tokio_util::sync::CancellationToken;
 #[derive(Default)]
 struct Runtime {
     gate: Option<Arc<tokio::sync::Semaphore>>,
+    fail_first: bool,
     running: AtomicUsize,
     seen: Mutex<Vec<(String, usize, String)>>,
 }
@@ -38,6 +39,9 @@ impl SubagentRuntime for Runtime {
         };
         self.running.fetch_sub(1, Ordering::SeqCst);
         ready?;
+        if self.fail_first && self.seen.lock().unwrap().len() == 1 {
+            return Err("scripted failure before reading the inbox".into());
+        }
         let queued = spawn
             .inbox
             .as_ref()
@@ -233,6 +237,39 @@ async fn send_message_queues_for_a_running_agent_and_resumes_a_finished_one_with
         "the original child conversation survives continuation"
     );
     assert_eq!(seen[0].2, seen[1].2, "continuation uses the original role");
+}
+
+#[tokio::test]
+async fn messages_queued_before_failure_or_stop_are_visible_and_delivered_on_explicit_resume() {
+    for stop in [false, true] {
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        let runtime = Arc::new(Runtime { gate: Some(gate.clone()), fail_first: true, ..Default::default() });
+        let (manager, tools, ctx) = setup(runtime.clone());
+        let id = start(&tools, &ctx, true).await["agentId"].as_str().unwrap().to_owned();
+        call(&tools, "SendMessage", json!({"to":id,"summary":"queued","message":"retained instruction"}), &ctx).await;
+        if stop {
+            call(&tools, "TaskStop", json!({"task_id":id}), &ctx).await;
+        } else {
+            gate.add_permits(1);
+        }
+        let terminal = call(&tools, "TaskOutput", json!({"task_id":id}), &ctx).await;
+        assert_eq!(terminal["task"]["status"], if stop { "stopped" } else { "failed" });
+        assert_eq!(terminal["task"]["pending_messages"], json!(["retained instruction"]));
+        call(&tools, "SendMessage", json!({"to":id,"summary":"resume","message":"new instruction"}), &ctx).await;
+        gate.add_permits(1);
+        let resumed = call(&tools, "TaskOutput", json!({"task_id":id}), &ctx).await;
+        assert_eq!(resumed["task"]["status"], "completed");
+        let text = resumed["task"]["output"].as_str().unwrap();
+        assert!(text.contains("retained instruction\n\nnew instruction"), "{text}");
+        assert_eq!(resumed["task"]["pending_messages"], json!([]));
+        let output_file = std::path::PathBuf::from(resumed["task"]["output_file"].as_str().unwrap());
+        assert!(output_file.exists());
+        drop(tools);
+        drop(manager);
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while output_file.exists() { tokio::task::yield_now().await; }
+        }).await.expect("task output file outlived its task store");
+    }
 }
 #[tokio::test]
 async fn management_is_conversation_scoped_and_model_overrides_are_rejected() {

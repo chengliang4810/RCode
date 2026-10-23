@@ -70,7 +70,7 @@ impl Tool for WebFetchTool {
             .build()
             .map_err(|error| ToolError::Execution(error.to_string()))?;
 
-        let response = tokio::select! {
+        let mut response = tokio::select! {
             result = client.get(url).send() => {
                 result.map_err(|error| ToolError::Execution(format!("cannot fetch {url}: {error}")))?
             }
@@ -85,17 +85,23 @@ impl Tool for WebFetchTool {
             .unwrap_or_default()
             .to_owned();
 
-        let bytes = tokio::select! {
-            result = response.bytes() => {
-                result.map_err(|error| ToolError::Execution(format!("cannot read {url}: {error}")))?
-            }
-            _ = ctx.cancel.cancelled() => return Err(ToolError::Cancelled),
-        };
-        if bytes.len() > MAX_BYTES {
+        if response.content_length().is_some_and(|length| length > MAX_BYTES as u64) {
             return Err(ToolError::Execution(format!(
-                "{url} returned {} bytes, over the {MAX_BYTES}-byte limit",
-                bytes.len()
+                "{url} exceeds the {MAX_BYTES}-byte limit"
             )));
+        }
+        let mut bytes = Vec::new();
+        loop {
+            let chunk = tokio::select! {
+                biased;
+                _ = ctx.cancel.cancelled() => return Err(ToolError::Cancelled),
+                result = response.chunk() => result.map_err(|error| ToolError::Execution(format!("cannot read {url}: {error}")))?,
+            };
+            let Some(chunk) = chunk else { break; };
+            if chunk.len() > MAX_BYTES.saturating_sub(bytes.len()) {
+                return Err(ToolError::Execution(format!("{url} exceeds the {MAX_BYTES}-byte limit")));
+            }
+            bytes.extend_from_slice(&chunk);
         }
 
         let body = String::from_utf8_lossy(&bytes);
@@ -129,6 +135,9 @@ impl Tool for WebFetchTool {
 /// remaining tags and decodes the entities that actually appear in prose.
 pub(crate) fn html_to_text(html: &str) -> String {
     let mut out = String::with_capacity(html.len() / 2);
+    // ASCII folding preserves byte offsets. Compute it once rather than
+    // copying the remaining document for every script or style block.
+    let lower = html.to_ascii_lowercase();
     let mut rest = html;
 
     while let Some(start) = rest.find('<') {
@@ -149,7 +158,8 @@ pub(crate) fn html_to_text(html: &str) -> String {
         // Skip the contents of these entirely — they are not prose.
         if matches!(name.as_str(), "script" | "style" | "noscript" | "template") {
             let closing = format!("</{name}");
-            match rest[start..].to_ascii_lowercase().find(&closing) {
+            let consumed = html.len() - rest.len();
+            match lower[consumed + start..].find(&closing) {
                 Some(offset) => {
                     let after = start + offset;
                     rest = match rest[after..].find('>') {
@@ -270,6 +280,64 @@ mod tests {
         assert!(text.contains("before"));
         assert!(text.contains("after"));
         assert!(!text.contains("fake"), "script body leaked: {text}");
+    }
+
+    #[test]
+    fn mixed_case_hidden_blocks_preserve_unicode_prose() {
+        let html = "<p>前文</p><ScRiPt>ignored</sCrIpT><STYLE>ignored</STYLE><p>后文</p>";
+        assert_eq!(html_to_text(html), "前文\n\n后文");
+        let many = format!("{}<p>kept</p>", "<STYLE>ignored</STYLE>".repeat(10_000));
+        assert_eq!(html_to_text(&many), "kept");
+    }
+
+    #[tokio::test]
+    async fn an_oversized_chunked_body_is_refused_before_eof() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0; 4096];
+            socket.read(&mut request).await.unwrap();
+            socket.write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n").await.unwrap();
+            let chunk = vec![b'x'; 64 * 1024];
+            for _ in 0..=MAX_BYTES / chunk.len() {
+                if socket.write_all(b"10000\r\n").await.is_err() { return; }
+                if socket.write_all(&chunk).await.is_err() { return; }
+                if socket.write_all(b"\r\n").await.is_err() { return; }
+            }
+            // Do not send the terminating chunk: the limit must stop reading.
+            let mut eof = [0];
+            let _ = socket.read(&mut eof).await;
+        });
+        let error = tokio::time::timeout(std::time::Duration::from_secs(3), WebFetchTool.call(json!({"url":url}), &context()))
+            .await.expect("body limit must not wait for EOF").unwrap_err();
+        assert!(error.to_string().contains("byte limit"), "{error}");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn reading_a_stalled_body_remains_cancellable() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let (ready, wait) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0; 4096];
+            socket.read(&mut request).await.unwrap();
+            socket.write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n1\r\nx\r\n").await.unwrap();
+            let _ = ready.send(());
+            let _ = socket.read(&mut request).await;
+        });
+        let ctx = context();
+        let cancel = ctx.cancel.clone();
+        let fetch = tokio::spawn(async move { WebFetchTool.call(json!({"url":url}), &ctx).await });
+        wait.await.unwrap();
+        cancel.cancel();
+        let error = tokio::time::timeout(std::time::Duration::from_secs(1), fetch).await.unwrap().unwrap().unwrap_err();
+        assert!(matches!(error, ToolError::Cancelled));
+        server.abort();
     }
 
     #[test]
