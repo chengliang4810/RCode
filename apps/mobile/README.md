@@ -90,6 +90,11 @@ property `-PrcodeQa=true`, then pass that APK to `flutter drive` with
 the driver can uninstall it without changing the ordinary installed app.
 The default debug and release application identifiers are unchanged.
 
+For physical-device performance checks, use `:app:assembleProfile` with the same
+`-PrcodeQa=true` property. Its `RCode QA` launcher entry preserves the ordinary
+installed app and its data. Debug builds run the Dart development runtime and
+must not be used to assess scrolling or keyboard animation performance.
+
 On macOS, resolve the locked dependencies, then run from the repository root:
 
 ```sh
