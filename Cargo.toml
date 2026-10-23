@@ -40,6 +40,10 @@ publish = false
 [patch."https://github.com/zeronsh/zui"]
 gpui_windows = { path = "vendor/gpui_windows" }
 
+# Keep stacksafe 0.1.x while using maintained procedural-macro diagnostics.
+[patch.crates-io]
+stacksafe-macro = { path = "vendor/stacksafe-macro" }
+
 [workspace.dependencies]
 rcode-veil = { path = "crates/veil" }
 rcode-proto = { path = "crates/proto" }

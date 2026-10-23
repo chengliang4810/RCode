@@ -1,0 +1,45 @@
+# Vendored from stacksafe-macro 0.1.4; see README.md for local changes.
+[package]
+edition = "2021"
+rust-version = "1.80.0"
+name = "stacksafe-macro"
+version = "0.1.4"
+build = false
+autolib = false
+autobins = false
+autoexamples = false
+autotests = false
+autobenches = false
+description = "Procedural macro implementation for the stacksafe crate."
+documentation = "https://docs.rs/stacksafe-macro"
+readme = "README.md"
+keywords = [
+    "recursion",
+    "recursive",
+    "stacker",
+    "stack",
+    "overflow",
+]
+categories = [
+    "memory-management",
+    "rust-patterns",
+]
+license = "Apache-2.0"
+repository = "https://github.com/fast/stacksafe"
+
+[lib]
+name = "stacksafe_macro"
+path = "src/lib.rs"
+proc-macro = true
+
+[dependencies.proc-macro-error3]
+version = "=3.1.1"
+default-features = false
+features = ["syn2-error"]
+
+[dependencies.quote]
+version = "1"
+
+[dependencies.syn]
+version = "2"
+features = ["full"]
