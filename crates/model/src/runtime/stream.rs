@@ -34,7 +34,7 @@ pub(crate) type SseDecoderFactory = Arc<dyn Fn() -> SseDecoders + Send + Sync>;
 /// 将 crate-private HTTP seam、SSE parser、provider decoder 与通用 retry 串为一条可取消的流。
 ///
 /// request factory 与 decoder 由后续 provider adapter 提供；本函数不认识 provider-native payload。
-pub(crate) fn retrying_http_sse_stream(
+fn observed_http_sse_stream(
     config: RetryConfig,
     cancellation: CancellationToken,
     observer: Option<Arc<dyn RetryObserver>>,
@@ -42,25 +42,49 @@ pub(crate) fn retrying_http_sse_stream(
     request: Arc<dyn Fn() -> ModelResult<HttpRequest> + Send + Sync>,
     provider: Arc<str>,
     decoders: SseDecoderFactory,
+    diagnostics: Option<Arc<dyn crate::diagnostics::DiagnosticsObserver>>,
 ) -> ModelStream {
     let attempt: StreamAttempt = Arc::new(move |attempt_cancellation| {
         let transport = transport.clone();
         let request = request.clone();
         let provider = provider.clone();
+        let diagnostics = diagnostics.clone();
         let (decoder, completion_decoder) = decoders();
         Box::pin(async move {
             let request = request()?;
-            let response = transport
+            let trace = diagnostics.and_then(|observer| crate::diagnostics::AttemptTrace::start(
+                observer, &request.request, &provider, attempt_cancellation.clone(),
+            ));
+            let response = match transport
                 .send(request, attempt_cancellation.clone())
-                .await?;
-            response_to_sse_stream(
+                .await {
+                    Ok(response) => response,
+                    Err(error) => {
+                        if let Some(trace) = &trace { trace.failed(&error); }
+                        return Err(error);
+                    }
+                };
+            if let Some(trace) = &trace { trace.headers(response.status, response.request_id.as_deref()); }
+            let decoder: SseDecoder = if let Some(trace) = &trace {
+                let trace = trace.clone();
+                Arc::new(move |event, request_id| {
+                    trace.payload(&event.data);
+                    decoder(event, request_id)
+                })
+            } else { decoder };
+            let result = response_to_sse_stream(
                 response,
-                attempt_cancellation,
+                attempt_cancellation.clone(),
                 provider,
                 decoder,
                 completion_decoder,
             )
-            .await
+            .await;
+            match (result, trace) {
+                (Ok(stream), Some(trace)) => Ok(trace.stream(stream, attempt_cancellation)),
+                (Err(error), Some(trace)) => { trace.failed(&error); Err(error) }
+                (result, None) => result,
+            }
         })
     });
     retrying_stream(config, cancellation, observer, attempt)
@@ -75,7 +99,7 @@ pub(crate) fn runtime_http_sse_stream(
     provider: Arc<str>,
     decoders: SseDecoderFactory,
 ) -> ModelStream {
-    retrying_http_sse_stream(
+    observed_http_sse_stream(
         runtime.retry().clone(),
         cancellation,
         runtime.retry_observer(),
@@ -83,6 +107,7 @@ pub(crate) fn runtime_http_sse_stream(
         request,
         provider,
         decoders,
+        runtime.diagnostics(),
     )
 }
 

@@ -2,6 +2,7 @@
 //! 与模型提供商无关的协议 DTO 和流式优先模型接口。
 
 pub mod anthropic;
+pub mod diagnostics;
 mod endpoint;
 pub mod openai_compatible;
 pub mod openai_responses;

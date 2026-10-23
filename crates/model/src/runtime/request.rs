@@ -37,6 +37,7 @@ pub struct ModelRuntimeConfig {
     observation: ObservationConfig,
     retry: RetryConfig,
     retry_observer: Option<Arc<dyn RetryObserver>>,
+    diagnostics: Option<Arc<dyn crate::diagnostics::DiagnosticsObserver>>,
 }
 
 impl Clone for ModelRuntimeConfig {
@@ -45,6 +46,7 @@ impl Clone for ModelRuntimeConfig {
             observation: self.observation.clone(),
             retry: self.retry.clone(),
             retry_observer: self.retry_observer.clone(),
+            diagnostics: self.diagnostics.clone(),
         }
     }
 }
@@ -55,6 +57,7 @@ impl fmt::Debug for ModelRuntimeConfig {
             .debug_struct("ModelRuntimeConfig")
             .field("observation", &self.observation)
             .field("retry", &self.retry)
+            .field("diagnostics", &self.diagnostics.as_ref().map(|_| "[REGISTERED]"))
             .field(
                 "retry_observer",
                 &self.retry_observer.as_ref().map(|_| "[REGISTERED]"),
@@ -72,12 +75,23 @@ impl ModelRuntimeConfig {
             observation: ObservationConfig::full_content(),
             retry: RetryConfig::default(),
             retry_observer: None,
+            diagnostics: None,
         }
     }
 
     pub fn with_retry(mut self, retry: RetryConfig) -> Self {
         self.retry = retry;
         self
+    }
+
+    /// Opt-in fingerprints and allowlisted response counters; never request contents or headers.
+    pub fn with_diagnostics_observer(mut self, observer: Arc<dyn crate::diagnostics::DiagnosticsObserver>) -> Self {
+        self.diagnostics = Some(observer);
+        self
+    }
+
+    pub(crate) fn diagnostics(&self) -> Option<Arc<dyn crate::diagnostics::DiagnosticsObserver>> {
+        self.diagnostics.clone()
     }
 
     /// 注册 protocol-neutral 的 retry observer。该 observer 不会接收请求、响应或认证信息。

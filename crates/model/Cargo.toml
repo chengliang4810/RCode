@@ -20,6 +20,7 @@ tokio-util.workspace = true
 reqwest.workspace = true
 uuid.workspace = true
 tracing.workspace = true
+sha2.workspace = true
 # Added for the port: `retry` jitters its backoff with `rand`, and the
 # provider adapters parse/validate endpoints with `url`.
 rand = "0.10"
