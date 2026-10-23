@@ -160,12 +160,38 @@ surfaces, visible completion text and stable text scrolling before capture.
 It also confirms that the accepted turn is still running before disconnecting,
 then checks that reconnecting restores one completed result without resending.
 
-Physical iPhone/iPad execution, native keyboard behavior, signing and TestFlight
-upload remain unverified. The device gate closes and rebuilds the app models;
-it does not terminate the iOS operating-system process.
+The same gate also passed on the physical arm64 phone `23113RKC6C`, running
+Android 16/API 36 on SM8550/Adreno hardware: six checks in 27 seconds and five
+reviewed PNGs. It used the isolated `com.rcode.rcode_mobile.qa` debug package.
+Its actual memory page size is 4096 bytes; the 16 KiB ELF/ZIP alignment checks
+are package checks and do not establish execution on a 16 KiB-page device.
 
-Android arm64 has been compiled and package-validated, but no physical Android
-device was available for this run. The manual Android pass covers the emulator
-flows above; tool/subagent and shared-queue behavior rely on their dedicated
-widget and real-engine tests. Local notification permission has been exercised;
-the product boundary about OS-terminated push delivery still applies.
+The ordinary shipping application was separately force-stopped after the
+server acknowledged `slow physical force-stop 20261023` as streaming/working at
+`2026-10-23T07:10:06.199553Z`. Android `am force-stop` was invoked at
+`07:10:06.5690622Z` and the app process was confirmed absent; the server
+independently reached complete/idle at `07:10:21.078918Z`. After a cold start,
+saved credentials restored the connection and the completed response/native
+visual were reviewed; the observer confirmed the recovered turn at
+`07:10:51.770412Z`. User messages, completed assistant responses and commands each
+increased from a baseline of three to four, and remained four after restoration,
+showing no prompt or command replay. Android system IME text entry and keyboard
+avoidance were also checked manually.
+
+Physical-device evidence is in the ignored
+`build/qa/physical-device/run-20261023-arm64` directory: `device-gate` contains
+the five PNGs, `drive.log` and `result.json`; `force-stop-action.json`,
+`force-stop-observer.jsonl`, `force-stop-restored.jsonl` and
+`09-main-restored-chat.png` record process termination and recovery. This run
+reused the CI APK and native libraries from `afee6e6`, with the APK SHA256 recorded
+above, and an engine fixture built from clean validation source `2d86810`.
+It does not validate unrelated uncommitted Rust changes in the working tree.
+
+Physical iPhone/iPad execution, physical hardware keyboards, signing and
+TestFlight upload remain unverified. The automated device gate closes and
+rebuilds the app models; it does not terminate the iOS operating-system process.
+The deterministic fixture does not validate a real model provider. The broader
+manual Android flows above were exercised on the emulator; tool/subagent and
+shared-queue behavior rely on their dedicated widget and real-engine tests.
+Local notification permission has been exercised; the product boundary about
+OS-terminated push delivery still applies.

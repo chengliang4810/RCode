@@ -108,8 +108,19 @@ Both Android arm64 and x86_64 debug APKs have been built and checked for 16 KiB
 native-library/ZIP alignment. The x86_64 app was exercised on Android 16/API 36
 against a real local engine with a mock model: pairing, interrupted-client
 recovery, questions, image upload/preview/sharing, native visuals/math,
-notifications permission and phone/tablet draft preservation. Physical Android
-arm64 execution remains unverified. Detailed evidence and remaining limits are
+notifications permission and phone/tablet draft preservation.
+
+The physical arm64 phone `23113RKC6C` (Android 16/API 36, SM8550/Adreno) passed
+the same six-check gate in 27 seconds, producing five reviewed PNGs through the
+isolated QA package. The ordinary shipping app also recovered credentials and
+the completed response after a real force-stop while the server kept running,
+without replaying the prompt or command. Android system IME input and keyboard
+avoidance were checked manually. This phone uses 4096-byte pages; 16 KiB refers
+to the verified package alignment, not a 16 KiB-page runtime test.
+
+This physical-device run reused the CI APK/native libraries from `afee6e6` and
+an engine fixture built from clean validation source `2d86810`; it does not
+validate unrelated uncommitted Rust changes. Evidence and remaining limits are
 in [the migration record](../../docs/flutter-mobile-migration.md).
 
 The real engine/Dart integration, Rust visual/math suite and native Flutter FFI
@@ -117,7 +128,8 @@ checks also pass separately. [GitHub-hosted macOS CI](https://github.com/chengli
 built the unsigned iOS simulator app and passed its six-check device gate at
 `afee6e6`, using Xcode 26.6 and an iOS 26.5 iPhone 11 simulator. Its five PNGs
 were reviewed, including the running turn and restored text/native content.
-Physical iPhone/iPad execution, signing and TestFlight upload remain unverified.
+Physical iPhone/iPad execution, physical hardware keyboards, real model provider
+accounts, signing and TestFlight upload remain unverified.
 
 Notifications are local and depend on receiving workspace events while the app
 is running. The direct service does not implement background APNs/FCM delivery
