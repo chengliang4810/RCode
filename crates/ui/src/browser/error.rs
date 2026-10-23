@@ -4,6 +4,7 @@ use rcode_presentation::{Localizer, TextKey};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum BrowserError {
     Message(TextKey),
+    #[cfg(any(target_os = "linux", test))]
     WithReason(TextKey, String),
     /// Raw diagnostics supplied by the operating system or WebView runtime.
     Native(String),
@@ -17,6 +18,7 @@ impl BrowserError {
     fn localized(&self, localizer: &Localizer) -> String {
         match self {
             Self::Message(key) => localizer.text(*key),
+            #[cfg(any(target_os = "linux", test))]
             Self::WithReason(key, reason) => localizer.format_with(*key, &[("reason", reason)]),
             Self::Native(reason) => {
                 localizer.format_with(TextKey::BrowserOpenFailed, &[("reason", reason)])
