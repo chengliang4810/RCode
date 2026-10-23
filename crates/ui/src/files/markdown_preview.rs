@@ -1014,7 +1014,7 @@ impl MarkdownPreview {
         self.suspended
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "linux"))]
     pub(super) fn test_block_bounds(&self, ix: usize) -> gpui::Bounds<gpui::Pixels> {
         let mut bounds = self.list.bounds_for_item(ix).unwrap();
         // GPUI's bounds_for_item omits the list padding applied during paint.
