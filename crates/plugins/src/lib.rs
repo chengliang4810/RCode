@@ -220,7 +220,7 @@ pub fn discover(config_root: &Path) -> Vec<Plugin> {
             );
             continue;
         }
-        match read_plugin(&root, &manifest_path, &state) {
+        match read_plugin(&root, &manifest_path, state.as_ref()) {
             Ok(plugin) => plugins.push(plugin),
             Err(error) => tracing::warn!(%error, "a plugin could not be read; skipping it"),
         }
@@ -273,25 +273,29 @@ pub fn manifest_path(root: &Path) -> PathBuf {
     root.join(MANIFEST_DIR).join(MANIFEST_FILE)
 }
 
-fn read_state(plugins_dir: &Path) -> StateFile {
+fn read_state(plugins_dir: &Path) -> Option<StateFile> {
     let path = plugins_dir.join(STATE_FILE);
     match std::fs::read_to_string(&path) {
-        Ok(text) => serde_json::from_str(&text).unwrap_or_else(|error| {
+        Ok(text) => serde_json::from_str(&text).map(Some).unwrap_or_else(|error| {
             tracing::warn!(
                 path = %path.display(),
                 %error,
-                "the plugin state file is not valid JSON; treating every plugin as on"
+                "the plugin state file is not valid JSON; leaving plugins disabled"
             );
-            StateFile::default()
+            None
         }),
-        Err(_) => StateFile::default(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Some(StateFile::default()),
+        Err(error) => {
+            tracing::warn!(path = %path.display(), %error, "could not read plugin state; leaving plugins disabled");
+            None
+        }
     }
 }
 
 fn read_plugin(
     root: &Path,
     manifest_path: &Path,
-    state: &StateFile,
+    state: Option<&StateFile>,
 ) -> Result<Plugin, PluginError> {
     let text = std::fs::read_to_string(manifest_path).map_err(|error| PluginError::Unreadable {
         path: manifest_path.to_path_buf(),
@@ -330,7 +334,7 @@ fn read_plugin(
     };
 
     Ok(Plugin {
-        enabled: !state.disabled.iter().any(|disabled| disabled == &name),
+        enabled: state.is_some_and(|state| !state.disabled.iter().any(|disabled| disabled == &name)),
         name,
         version: manifest.version,
         description: manifest.description,

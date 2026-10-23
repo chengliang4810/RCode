@@ -435,7 +435,7 @@ fn publish_archive(
     super::read_plugin(
         &staging,
         &super::manifest_path(&staging),
-        &super::StateFile::default(),
+        Some(&super::StateFile::default()),
     )?;
     let plugins = config.join(crate::PLUGINS_DIR);
     std::fs::create_dir_all(&plugins)?;
@@ -594,7 +594,7 @@ fn normalize(entry: &Entry, root: &Path, installed_root: &Path) -> anyhow::Resul
     }
     std::fs::create_dir_all(manifest_path.parent().unwrap())?;
     std::fs::write(&manifest_path, serde_json::to_vec_pretty(&manifest)?)?;
-    let plugin = super::read_plugin(root, &manifest_path, &super::StateFile::default())?;
+    let plugin = super::read_plugin(root, &manifest_path, Some(&super::StateFile::default()))?;
     ensure!(
         !plugin.contributions.is_empty(),
         "plugin has no supported contributions (LSP-only plugins are not supported)"
