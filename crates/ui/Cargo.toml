@@ -90,7 +90,6 @@ rcode-visual-gpu.workspace = true
 gpui.workspace = true
 gpui_platform.workspace = true
 gpui_tokio.workspace = true
-tokio-util.workspace = true
 gpui-base.workspace = true
 tokio.workspace = true
 futures.workspace = true
@@ -154,7 +153,6 @@ tracing-subscriber.workspace = true
 # overlay plane. Same windows 0.61 as gpui_windows, so COM types interoperate.
 webview2-com = "0.38"
 windows = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Direct2D_Common", "Win32_Graphics_DirectComposition", "Win32_System_Com", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging"] }
-windows-core = "0.61"
 raw-window-handle = "0.6"
 reqwest.workspace = true
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging"] }

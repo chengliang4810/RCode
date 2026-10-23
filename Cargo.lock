@@ -4957,12 +4957,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "loro-protocol"
-version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d9f1697b501f505f286c411c38b062a73f080028157c766cd75f12e243239454"
-
-[[package]]
 name = "loro-rle"
 version = "1.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7314,12 +7308,10 @@ dependencies = [
 name = "rcode-agent"
 version = "0.0.1-beta"
 dependencies = [
- "anyhow",
  "async-trait",
  "futures",
  "glob",
  "libc",
- "rcode-model",
  "rcode-proto",
  "regex",
  "reqwest 0.12.28",
@@ -7523,7 +7515,6 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
- "thiserror 2.0.20",
  "tokio",
  "tokio-util",
  "tracing",
@@ -7556,7 +7547,6 @@ dependencies = [
  "fluent-syntax",
  "rcode-proto",
  "serde",
- "serde_json",
  "sys-locale",
  "thiserror 2.0.20",
  "tracing",
@@ -7597,14 +7587,12 @@ dependencies = [
  "pulldown-cmark",
  "serde",
  "serde_json",
- "uuid",
 ]
 
 [[package]]
 name = "rcode-rpc"
 version = "0.0.1-beta"
 dependencies = [
- "anyhow",
  "async-trait",
  "futures",
  "rcode-doc",
@@ -7627,7 +7615,6 @@ dependencies = [
  "chrono",
  "futures",
  "loro",
- "loro-protocol",
  "rcode-doc",
  "rcode-proto",
  "reqwest 0.12.28",
@@ -7769,7 +7756,6 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
- "tokio-util",
  "tracing",
  "tracing-subscriber",
  "ttf-parser",
@@ -7780,7 +7766,6 @@ dependencies = [
  "uuid",
  "webview2-com",
  "windows 0.61.3",
- "windows-core 0.61.2",
  "windows-sys 0.61.2",
  "wry",
  "x11rb 0.14.0",
@@ -9346,7 +9331,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.3",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix 1.1.4",
  "windows-sys 0.61.2",

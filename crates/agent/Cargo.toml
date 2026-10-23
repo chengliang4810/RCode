@@ -13,11 +13,9 @@ publish.workspace = true
 # caller (see `rcode-harness`'s native driver), so this crate stays free of
 # engine, UI and storage dependencies.
 [dependencies]
-rcode-model.workspace = true
 # The shared run protocol (permission, interaction, tool data). This crate
 # re-exports those types rather than defining its own copies of them.
 rcode-proto.workspace = true
-anyhow.workspace = true
 async-trait.workspace = true
 futures.workspace = true
 # `Glob` matches paths, `Grep` matches contents.

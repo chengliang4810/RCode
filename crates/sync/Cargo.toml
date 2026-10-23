@@ -8,7 +8,6 @@ publish.workspace = true
 [dependencies]
 rcode-doc.workspace = true
 loro.workspace = true
-loro-protocol.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
