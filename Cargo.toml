@@ -43,6 +43,8 @@ gpui_windows = { path = "vendor/gpui_windows" }
 # Keep stacksafe 0.1.x while using maintained procedural-macro diagnostics.
 [patch.crates-io]
 stacksafe-macro = { path = "vendor/stacksafe-macro" }
+# Preserve Loro's data model while applying container memory-safety fixes.
+sized-chunks = { path = "vendor/sized-chunks" }
 
 [workspace.dependencies]
 rcode-veil = { path = "crates/veil" }

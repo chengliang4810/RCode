@@ -1,0 +1,16 @@
+[package]
+name = "rcode-sized-chunks-regressions"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# Keep this small consumer test independent from the desktop workspace.
+[workspace]
+
+[dependencies]
+im = "=15.1.0"
+sized-chunks = { path = "..", features = ["ringbuffer"] }
+typenum = "1.12"
+
+[patch.crates-io]
+sized-chunks = { path = ".." }
