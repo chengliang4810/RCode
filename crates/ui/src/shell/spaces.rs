@@ -68,6 +68,7 @@ pub(super) fn reorder_visible_pins(
 
 /// Remove only ids absent from the workspace. Archived sessions remain known
 /// so unarchiving restores their local pin and position.
+#[cfg(test)]
 pub(super) fn retain_known_pins(
     pinned_ids: &mut Vec<String>,
     known_chat_ids: &HashSet<String>,
