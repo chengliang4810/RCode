@@ -48,8 +48,10 @@ Devices**. That page also enables a desktop's external listener and generates a
 client disconnects do not stop accepted runs; quitting the desktop that hosts
 the engine does stop its engine. Use the headless service for a persistent host.
 The [Flutter mobile app](../apps/mobile/README.md) uses the same protocol on
-Android and iOS. Widget and real engine integration checks have passed; Android
-packaging is being checked, while Xcode and physical iOS remain unverified.
+Android and iOS. Widget and real-engine integration checks, Android packaging
+and device checks, and unsigned Xcode/iOS simulator checks are recorded in
+[development validation](../docs/development-validation.md). Physical iPhone/iPad,
+signing, TestFlight and real-provider acceptance remain unverified.
 
 ## macOS
 

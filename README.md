@@ -76,7 +76,7 @@ rcode daemon start|stop|restart|status
 
 In the desktop app, open **Settings → Devices**, add a host, and enter `ws://server-address:27655` and the same API key. A desktop can also enable **External access** there: the first enable generates and activates a random 12-character alphanumeric key. You can replace it with a custom key that meets the rules above and save it.
 
-A network disconnect or a remote client closing does not stop runs already accepted by the remote engine. Quitting the desktop that hosts the engine stops that machine's engine; use the headless service for a persistent server. The [Flutter mobile app](apps/mobile/README.md) supports Android and iOS using the same direct WebSocket protocol. Its screens follow the former iOS app. Flutter widget and authenticated engine integration tests have passed; Android packaging is being checked, and Xcode/physical iOS execution remain unverified.
+A network disconnect or a remote client closing does not stop runs already accepted by the remote engine. Quitting the desktop that hosts the engine stops that machine's engine; use the headless service for a persistent server. The [Flutter mobile app](apps/mobile/README.md) supports Android and iOS using the same direct WebSocket protocol. Its screens follow the former iOS app. Flutter widget and authenticated engine integration tests have passed. Android arm64/x86_64 packaging, Android simulator and arm64 device checks, and unsigned Xcode/iOS simulator checks are recorded in [development validation](docs/development-validation.md). Physical iPhone/iPad, signing, TestFlight and real-provider acceptance remain unverified.
 
 ---
 
