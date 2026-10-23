@@ -87,7 +87,6 @@ where
 {
     /// Get the length of the ring buffer.
     #[inline]
-    #[must_use]
     fn len(&self) -> usize {
         self.length
     }
@@ -98,7 +97,6 @@ where
     N: ChunkLength<A>,
 {
     /// Get a reference to the value at a given index.
-    #[must_use]
     fn get(&self, index: usize) -> Option<&A> {
         if index >= self.len() {
             None
@@ -113,7 +111,6 @@ where
     N: ChunkLength<A>,
 {
     /// Get a mutable reference to the value at a given index.
-    #[must_use]
     fn get_mut(&mut self, index: usize) -> Option<&mut A> {
         if index >= self.len() {
             None
@@ -790,7 +787,6 @@ where
 
 impl<A, N: ChunkLength<A>> Default for RingBuffer<A, N> {
     #[inline]
-    #[must_use]
     fn default() -> Self {
         Self::new()
     }
@@ -818,7 +814,6 @@ where
 {
     type Output = A;
 
-    #[must_use]
     fn index(&self, index: usize) -> &Self::Output {
         if index >= self.len() {
             panic!(
@@ -835,7 +830,6 @@ impl<A, N> IndexMut<usize> for RingBuffer<A, N>
 where
     N: ChunkLength<A>,
 {
-    #[must_use]
     fn index_mut(&mut self, index: usize) -> &mut Self::Output {
         if index >= self.len() {
             panic!(
@@ -850,7 +844,6 @@ where
 
 impl<A: PartialEq, N: ChunkLength<A>> PartialEq for RingBuffer<A, N> {
     #[inline]
-    #[must_use]
     fn eq(&self, other: &Self) -> bool {
         self.len() == other.len() && self.iter().eq(other.iter())
     }
@@ -863,7 +856,6 @@ where
     N: ChunkLength<A>,
 {
     #[inline]
-    #[must_use]
     fn eq(&self, other: &PrimSlice) -> bool {
         let other = other.borrow();
         self.len() == other.len() && self.iter().eq(other.iter())
@@ -894,7 +886,6 @@ impl<A: Eq, N: ChunkLength<A>> Eq for RingBuffer<A, N> {}
 
 impl<A: PartialOrd, N: ChunkLength<A>> PartialOrd for RingBuffer<A, N> {
     #[inline]
-    #[must_use]
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         self.iter().partial_cmp(other.iter())
     }
@@ -902,7 +893,6 @@ impl<A: PartialOrd, N: ChunkLength<A>> PartialOrd for RingBuffer<A, N> {
 
 impl<A: Ord, N: ChunkLength<A>> Ord for RingBuffer<A, N> {
     #[inline]
-    #[must_use]
     fn cmp(&self, other: &Self) -> Ordering {
         self.iter().cmp(other.iter())
     }
@@ -976,7 +966,6 @@ impl<N: ChunkLength<u8>> std::io::Read for RingBuffer<u8, N> {
 }
 
 impl<A, N: ChunkLength<A>> FromIterator<A> for RingBuffer<A, N> {
-    #[must_use]
     fn from_iter<I: IntoIterator<Item = A>>(iter: I) -> Self {
         let mut buffer = RingBuffer::new();
         buffer.extend(iter);
@@ -989,7 +978,6 @@ impl<A, N: ChunkLength<A>> IntoIterator for RingBuffer<A, N> {
     type IntoIter = OwnedIter<A, N>;
 
     #[inline]
-    #[must_use]
     fn into_iter(self) -> Self::IntoIter {
         OwnedIter { buffer: self }
     }
@@ -1000,7 +988,6 @@ impl<'a, A, N: ChunkLength<A>> IntoIterator for &'a RingBuffer<A, N> {
     type IntoIter = Iter<'a, A, N>;
 
     #[inline]
-    #[must_use]
     fn into_iter(self) -> Self::IntoIter {
         self.iter()
     }
@@ -1011,7 +998,6 @@ impl<'a, A, N: ChunkLength<A>> IntoIterator for &'a mut RingBuffer<A, N> {
     type IntoIter = IterMut<'a, A, N>;
 
     #[inline]
-    #[must_use]
     fn into_iter(self) -> Self::IntoIter {
         self.iter_mut()
     }

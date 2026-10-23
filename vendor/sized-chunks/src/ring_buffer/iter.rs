@@ -37,7 +37,6 @@ where
     }
 
     #[inline]
-    #[must_use]
     fn size_hint(&self) -> (usize, Option<usize>) {
         (self.remaining, Some(self.remaining))
     }
@@ -119,7 +118,6 @@ where
     }
 
     #[inline]
-    #[must_use]
     fn size_hint(&self) -> (usize, Option<usize>) {
         (self.remaining, Some(self.remaining))
     }
@@ -169,7 +167,6 @@ impl<'a, A: 'a, N: ChunkLength<A> + 'a> Iterator for Drain<'a, A, N> {
     }
 
     #[inline]
-    #[must_use]
     fn size_hint(&self) -> (usize, Option<usize>) {
         (self.buffer.len(), Some(self.buffer.len()))
     }
@@ -200,7 +197,6 @@ impl<A, N: ChunkLength<A>> Iterator for OwnedIter<A, N> {
     }
 
     #[inline]
-    #[must_use]
     fn size_hint(&self) -> (usize, Option<usize>) {
         (self.buffer.len(), Some(self.buffer.len()))
     }

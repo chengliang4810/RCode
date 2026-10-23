@@ -9,6 +9,9 @@ licensed under MPL-2.0; see `LICENCE.md` and the source headers.
 - `Chunk::force_copy` derives both source and destination pointers from the
   same mutable base pointer. This removes the shared-then-exclusive reborrow
   that invalidated the read pointer during `im::OrdSet` insertion.
+- Remove ineffective `#[must_use]` attributes on trait implementation methods
+  that current Rust warns will become hard errors, and exercise the existing
+  alignment test fields with value assertions.
 
 The aliasing issue is tracked by
 [RUSTSEC-2023-0126](https://rustsec.org/advisories/RUSTSEC-2023-0126.html)

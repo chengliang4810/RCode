@@ -672,6 +672,8 @@ mod test {
         #[repr(align(32))]
         struct MediumAlign(u8);
 
+        assert_eq!(BigAlign(0).0, 0);
+        assert_eq!(MediumAlign(0).0, 0);
         assert_eq!(0, InlineArray::<BigAlign, [usize; 256]>::CAPACITY);
         assert_eq!(0, InlineArray::<BigAlign, [u64; 256]>::CAPACITY);
         assert_eq!(0, InlineArray::<BigAlign, [f64; 256]>::CAPACITY);
@@ -683,6 +685,7 @@ mod test {
         #[repr(align(256))]
         struct BigAlign(usize);
 
+        assert_eq!(BigAlign(0).0, 0);
         let mut bad: InlineArray<BigAlign, [usize; 256]> = InlineArray::new();
         assert_eq!(0, InlineArray::<BigAlign, [usize; 256]>::CAPACITY);
         assert_eq!(0, bad.len());
@@ -706,6 +709,7 @@ mod test {
 
         let mut chunk: InlineArray<BigAlign, [BigAlign; 2]> = InlineArray::new();
         chunk.push(BigAlign(42));
+        assert_eq!(chunk[0].0, 42);
         assert_eq!(
             chunk.get(0).unwrap() as *const _ as usize % mem::align_of::<BigAlign>(),
             0
@@ -718,6 +722,7 @@ mod test {
         struct BigAlign([u8; 64]);
         #[repr(align(256))]
         struct BiggerAlign(u8);
+        assert_eq!(BiggerAlign(0).0, 0);
         assert_eq!(128, mem::align_of::<BigAlign>());
         assert_eq!(256, mem::align_of::<BiggerAlign>());
 
@@ -728,6 +733,7 @@ mod test {
 
         let mut chunk: InlineArray<BigAlign, [BiggerAlign; 1]> = InlineArray::new();
         chunk.push(BigAlign([0; 64]));
+        assert_eq!(chunk[0].0, [0; 64]);
         assert_eq!(
             chunk.get(0).unwrap() as *const _ as usize % mem::align_of::<BigAlign>(),
             0
