@@ -308,6 +308,52 @@ type Source = Arc<Mutex<SourceState>>;
 type Cache = Vec<(PathBuf, Source)>;
 static CACHE: OnceLock<Mutex<Cache>> = OnceLock::new();
 
+/// The atlas keeps tiles after the last application reference disappears.
+/// Keep one release handle per painted image and retire it after the current
+/// frame, once neither the source cache nor any window's crossfade uses it.
+#[derive(Default)]
+struct ArtworkImages {
+    images: Vec<Arc<gpui::RenderImage>>,
+    cleanup_pending: bool,
+}
+impl gpui::Global for ArtworkImages {}
+
+impl ArtworkImages {
+    fn take_unused(&mut self) -> Vec<Arc<gpui::RenderImage>> {
+        let mut unused = Vec::new();
+        self.images.retain(|image| {
+            if Arc::strong_count(image) == 1 {
+                unused.push(image.clone());
+                false
+            } else {
+                true
+            }
+        });
+        unused
+    }
+}
+
+fn track_artwork(image: Option<&Arc<gpui::RenderImage>>, cx: &mut gpui::App) {
+    let images = cx.default_global::<ArtworkImages>();
+    if let Some(image) = image
+        && !images.images.iter().any(|tracked| tracked.id == image.id)
+    {
+        images.images.push(image.clone());
+    }
+    if images.cleanup_pending {
+        return;
+    }
+    images.cleanup_pending = true;
+    cx.defer(|cx| {
+        let images = cx.default_global::<ArtworkImages>();
+        images.cleanup_pending = false;
+        let unused = images.take_unused();
+        for image in unused {
+            cx.drop_image(image, None);
+        }
+    });
+}
+
 fn decode_source(bytes: &[u8]) -> Option<Arc<BackgroundLuminance>> {
     Some(source_from_image(
         &crate::new_thread_background_image::decode(bytes).ok()?,
@@ -422,7 +468,10 @@ pub(super) fn prepare(
     cx: &mut gpui::App,
 ) -> Option<Arc<gpui::RenderImage>> {
     let light = matches!(theme.appearance, crate::theme::Appearance::Light);
-    background_luminance(path, cx).and_then(|source| source.raster_image(effect, light, cx))
+    let image = background_luminance(path, cx)
+        .and_then(|source| source.raster_image(effect, light, cx));
+    track_artwork(image.as_ref(), cx);
+    image
 }
 fn dither_color([r, g, b, a]: [u8; 4], threshold: u8) -> [u8; 4] {
     let peak = r.max(g).max(b) as f32;
@@ -444,6 +493,26 @@ mod tests {
         Arc::new(gpui::RenderImage::new([image::Frame::new(
             image::RgbaImage::new(1, 1),
         )]))
+    }
+
+    #[test]
+    fn retired_artwork_waits_for_cache_and_crossfade_owners_before_atlas_release() {
+        let cached = artwork();
+        let previous_frame = cached.clone();
+        let weak = Arc::downgrade(&cached);
+        let mut tracked = ArtworkImages {
+            images: vec![cached.clone()],
+            cleanup_pending: false,
+        };
+        assert!(tracked.take_unused().is_empty());
+        drop(cached); // Source cache evicts the image during another window's fade.
+        assert!(tracked.take_unused().is_empty());
+        drop(previous_frame);
+        let released = tracked.take_unused();
+        assert_eq!(released.len(), 1);
+        assert!(tracked.images.is_empty());
+        drop(released);
+        assert!(weak.upgrade().is_none());
     }
 
     #[test]
