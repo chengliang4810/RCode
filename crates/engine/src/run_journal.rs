@@ -152,13 +152,27 @@ impl RunJournal {
         after_seq: u64,
     ) -> Result<Vec<(u64, AgentEvent)>, JournalError> {
         let path = self.path_for(chat_id);
-        if !path.exists() {
-            return Ok(Vec::new());
+        if after_seq == 0 {
+            return Ok(read_lines(&path)?.into_iter().filter(|(seq, _)| *seq > 0).collect());
         }
-        let all = read_lines(&path)?;
-        let last_seq = all.last().map(|(seq, _)| *seq).unwrap_or(0);
-        let from = if after_seq > last_seq { 0 } else { after_seq };
-        Ok(all.into_iter().filter(|(seq, _)| *seq > from).collect())
+        // Incremental subscriptions normally resume at the tail. Read only
+        // their suffix instead of allocating/parsing every preceding delta.
+        // append() guarantees monotonically increasing seq values.
+        let mut events = RevEvents::open(&path)?;
+        let Some(latest) = events.next().transpose()? else { return Ok(Vec::new()) };
+        if after_seq > latest.0 {
+            // Preserve the replaced-file/previous-era full replay contract.
+            return Ok(read_lines(&path)?.into_iter().filter(|(seq, _)| *seq > 0).collect());
+        }
+        if after_seq == latest.0 { return Ok(Vec::new()); }
+        let mut suffix = vec![latest];
+        for event in events {
+            let event = event?;
+            if event.0 <= after_seq { break; }
+            suffix.push(event);
+        }
+        suffix.reverse();
+        Ok(suffix)
     }
 
     /// The last event in a chat's journal, if any (ignores a torn tail line).
@@ -252,6 +266,8 @@ fn parse_line(path: &Path, line: &str) -> Option<(u64, AgentEvent)> {
     if line.trim().is_empty() {
         return None;
     }
+    #[cfg(test)]
+    PARSED_LINES.with(|count| count.set(count.get() + 1));
     match serde_json::from_str::<JournalLine>(line) {
         Ok(parsed) => Some((parsed.seq, parsed.event)),
         Err(err) => {
@@ -260,6 +276,9 @@ fn parse_line(path: &Path, line: &str) -> Option<(u64, AgentEvent)> {
         }
     }
 }
+
+#[cfg(test)]
+thread_local! { static PARSED_LINES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
 
 /// The last valid event in the file — what `read_lines(path).last()` returns, without
 /// reading more than the tail.
@@ -464,6 +483,40 @@ mod tests {
         assert!(matches!(after[0].1, AgentEvent::Done { .. }));
         // Era fallback: cursor ahead of last seq replays everything.
         assert_eq!(journal.replay("chat-1", 99).unwrap().len(), 3);
+    }
+
+    #[test]
+    fn incremental_replay_parses_only_the_requested_tail() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = RunJournal::open(dir.path()).unwrap();
+        let count = 8192_u64;
+        let mut file = std::io::BufWriter::new(File::create(journal.path_for("long")).unwrap());
+        for seq in 1..=count { writeln!(file, "{}", line(seq, text(&"x".repeat(1024)))).unwrap(); }
+        file.flush().unwrap();
+        PARSED_LINES.with(|value| value.set(0));
+        assert!(journal.replay("long", count).unwrap().is_empty());
+        assert_eq!(PARSED_LINES.with(|value| value.get()), 1);
+        PARSED_LINES.with(|value| value.set(0));
+        let suffix = journal.replay("long", count - 2).unwrap();
+        assert_eq!(suffix.iter().map(|entry| entry.0).collect::<Vec<_>>(), vec![count - 1, count]);
+        assert_eq!(PARSED_LINES.with(|value| value.get()), 3);
+    }
+
+    #[test]
+    fn incremental_replay_preserves_sparse_sequences_torn_tails_and_era_fallback() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = RunJournal::open(dir.path()).unwrap();
+        for (name, bytes) in tail_cases() {
+            let path = journal.path_for(name);
+            std::fs::write(&path, bytes).unwrap();
+            let expected = read_lines(&path).unwrap();
+            let last = expected.last().map(|entry| entry.0).unwrap_or(0);
+            for cursor in [0, 1, 2, 3, 99] {
+                let from = if cursor > last { 0 } else { cursor };
+                let filtered: Vec<_> = expected.iter().filter(|entry| entry.0 > from).cloned().collect();
+                assert_eq!(journal.replay(name, cursor).unwrap(), filtered, "{name}, cursor {cursor}");
+            }
+        }
     }
 
     #[test]
