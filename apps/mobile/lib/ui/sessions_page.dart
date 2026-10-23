@@ -917,97 +917,120 @@ class _SessionsPageState extends State<SessionsPage> {
               Expanded(
                 child: RefreshIndicator(
                   onRefresh: widget.workspace.reconnect,
-                  child: ListView(
-                    padding: const EdgeInsets.fromLTRB(8, 4, 8, 100),
+                  child: CustomScrollView(
                     physics: const AlwaysScrollableScrollPhysics(),
-                    children: [
-                      if (groups.every((group) => group.rows.isEmpty) &&
-                          !groups.any((group) => group.userSection))
-                        Padding(
-                          padding: const EdgeInsets.only(top: 96),
-                          child: Center(
-                            child: Text(
-                              widget.search
-                                  ? context.tr(
-                                      '没有匹配的会话',
-                                      'No matching sessions',
-                                    )
-                                  : widget.archived
-                                  ? context.tr(
-                                      '没有已归档会话',
-                                      'No archived sessions',
-                                    )
-                                  : context.tr(
-                                      '点击新建会话开始',
-                                      'Tap New session to begin',
+                    slivers: [
+                      SliverPadding(
+                        padding: const EdgeInsets.fromLTRB(8, 4, 8, 100),
+                        sliver: SliverMainAxisGroup(
+                          slivers: [
+                            if (groups.every((group) => group.rows.isEmpty) &&
+                                !groups.any((group) => group.userSection))
+                              SliverToBoxAdapter(
+                                child: Padding(
+                                  padding: const EdgeInsets.only(top: 96),
+                                  child: Center(
+                                    child: Text(
+                                      widget.search
+                                          ? context.tr(
+                                              '没有匹配的会话',
+                                              'No matching sessions',
+                                            )
+                                          : widget.archived
+                                          ? context.tr(
+                                              '没有已归档会话',
+                                              'No archived sessions',
+                                            )
+                                          : context.tr(
+                                              '点击新建会话开始',
+                                              'Tap New session to begin',
+                                            ),
+                                      style: TextStyle(color: colors.secondary),
                                     ),
-                              style: TextStyle(color: colors.secondary),
-                            ),
-                          ),
-                        ),
-                      for (final group in groups) ...[
-                        if (group.title.isNotEmpty)
-                          DragTarget<String>(
-                            onWillAcceptWithDetails: (_) =>
-                                group.id == 'pinned' ||
-                                group.id == 'recent' ||
-                                group.userSection,
-                            onAcceptWithDetails: (details) => performUiAction(
-                              context,
-                              () => _place(details.data, group.id),
-                            ),
-                            builder: (context, candidates, rejected) => InkWell(
-                              onTap: () => _collapse(group.id),
-                              onLongPress:
-                                  group.userSection || group.id == 'pinned'
-                                  ? () => _headerMenu(group)
-                                  : null,
-                              borderRadius: BorderRadius.circular(10),
-                              child: Container(
-                                color: candidates.isNotEmpty
-                                    ? colors.accent.withValues(alpha: .1)
-                                    : null,
-                                padding: const EdgeInsets.fromLTRB(
-                                  12,
-                                  18,
-                                  12,
-                                  8,
-                                ),
-                                child: Row(
-                                  children: [
-                                    Icon(
-                                      _collapsed.contains(group.id)
-                                          ? Icons.chevron_right
-                                          : Icons.keyboard_arrow_down,
-                                      size: 18,
-                                      color: colors.secondary,
-                                    ),
-                                    const SizedBox(width: 5),
-                                    Expanded(
-                                      child: Text(
-                                        group.title,
-                                        style: TextStyle(
-                                          fontSize: 13,
-                                          fontWeight: FontWeight.w600,
-                                          color: colors.secondary,
-                                        ),
-                                      ),
-                                    ),
-                                    Text(
-                                      '${group.rows.length}',
-                                      style: TextStyle(
-                                        fontSize: 12,
-                                        color: colors.tertiary,
-                                      ),
-                                    ),
-                                  ],
+                                  ),
                                 ),
                               ),
-                            ),
-                          ),
-                        if (!_collapsed.contains(group.id))
-                          for (final chat in group.rows) _row(chat, group),
-                      ],
+                            for (final group in groups) ...[
+                              if (group.title.isNotEmpty)
+                                SliverToBoxAdapter(
+                                  child: DragTarget<String>(
+                                    onWillAcceptWithDetails: (_) =>
+                                        group.id == 'pinned' ||
+                                        group.id == 'recent' ||
+                                        group.userSection,
+                                    onAcceptWithDetails: (details) =>
+                                        performUiAction(
+                                          context,
+                                          () => _place(details.data, group.id),
+                                        ),
+                                    builder: (context, candidates, rejected) =>
+                                        InkWell(
+                                          onTap: () => _collapse(group.id),
+                                          onLongPress:
+                                              group.userSection ||
+                                                  group.id == 'pinned'
+                                              ? () => _headerMenu(group)
+                                              : null,
+                                          borderRadius: BorderRadius.circular(
+                                            10,
+                                          ),
+                                          child: Container(
+                                            color: candidates.isNotEmpty
+                                                ? colors.accent.withValues(
+                                                    alpha: .1,
+                                                  )
+                                                : null,
+                                            padding: const EdgeInsets.fromLTRB(
+                                              12,
+                                              18,
+                                              12,
+                                              8,
+                                            ),
+                                            child: Row(
+                                              children: [
+                                                Icon(
+                                                  _collapsed.contains(group.id)
+                                                      ? Icons.chevron_right
+                                                      : Icons
+                                                            .keyboard_arrow_down,
+                                                  size: 18,
+                                                  color: colors.secondary,
+                                                ),
+                                                const SizedBox(width: 5),
+                                                Expanded(
+                                                  child: Text(
+                                                    group.title,
+                                                    style: TextStyle(
+                                                      fontSize: 13,
+                                                      fontWeight:
+                                                          FontWeight.w600,
+                                                      color: colors.secondary,
+                                                    ),
+                                                  ),
+                                                ),
+                                                Text(
+                                                  '${group.rows.length}',
+                                                  style: TextStyle(
+                                                    fontSize: 12,
+                                                    color: colors.tertiary,
+                                                  ),
+                                                ),
+                                              ],
+                                            ),
+                                          ),
+                                        ),
+                                  ),
+                                ),
+                              if (!_collapsed.contains(group.id))
+                                SliverList.builder(
+                                  itemCount: group.rows.length,
+                                  itemBuilder: (_, index) =>
+                                      _row(group.rows[index], group),
+                                ),
+                            ],
+                          ],
+                        ),
+                      ),
                     ],
                   ),
                 ),
