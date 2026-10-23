@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use rcode_mcp::{McpClient, McpClientPool, McpToolInfo};
+use rcode_mcp::{McpClient, McpClientPool, McpServer, McpSource, McpToolInfo, McpTransport};
 use serde_json::{Value, json};
 
 fn python() -> String {
@@ -68,6 +68,115 @@ async fn call(client: &McpClient) -> Result<Value, String> {
 
 fn lines(path: &Path) -> usize {
     std::fs::read_to_string(path).unwrap().lines().count()
+}
+
+fn catalog_server(name: &str, label: &str, tools: &[&str], marker: &Path) -> McpServer {
+    McpServer {
+        name: name.into(),
+        enabled: true,
+        source: McpSource::User,
+        transport: McpTransport::Stdio {
+            command: python(),
+            args: vec![
+                "-u".into(),
+                Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("tests/catalog_server.py")
+                    .to_string_lossy()
+                    .into_owned(),
+                label.into(),
+                marker.to_string_lossy().into_owned(),
+                serde_json::to_string(tools).unwrap(),
+            ],
+            env: Default::default(),
+        },
+    }
+}
+
+#[tokio::test]
+async fn ambiguous_wire_names_are_rejected_and_unique_tools_keep_their_schema_route() {
+    for (server_a, tool_a, server_b, tool_b) in [
+        ("a.b", "record", "a_b", "record"),
+        ("kit:docs", "record", "plugin_kit_docs", "record"),
+        ("a__b", "record", "a", "b__record"),
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let marker_a = root.path().join("a.calls");
+        let marker_b = root.path().join("b.calls");
+        let client = McpClient::connect(vec![
+            catalog_server(server_a, "SERVER_A", &[tool_a, "only_a"], &marker_a),
+            catalog_server(server_b, "SERVER_B", &[tool_b, "only_b"], &marker_b),
+        ])
+        .await;
+        let ambiguous = McpToolInfo::wire_name(server_a, tool_a);
+        assert_eq!(ambiguous, McpToolInfo::wire_name(server_b, tool_b));
+        assert_eq!(client.tools().len(), 2, "{:?}", client.servers());
+        assert!(
+            client
+                .tools()
+                .iter()
+                .all(|info| info.wire_name != ambiguous)
+        );
+        assert!(
+            client
+                .call(&ambiguous, Some(json!({"label": "SERVER_B"})))
+                .await
+                .is_err()
+        );
+        assert!(
+            !marker_a.exists() && !marker_b.exists(),
+            "ambiguous tools must never execute"
+        );
+        for report in client.servers() {
+            assert!(report.connected, "{report:?}");
+            assert_eq!(report.tool_count, 1);
+            assert!(
+                report
+                    .problem
+                    .as_deref()
+                    .is_some_and(|problem| problem.contains("ambiguous"))
+            );
+        }
+        for info in client.tools() {
+            let label = info.input_schema["properties"]["label"]["const"]
+                .as_str()
+                .unwrap();
+            assert_eq!(info.description, label);
+            let result = client
+                .call(&info.wire_name, Some(json!({"label": label})))
+                .await
+                .unwrap();
+            let executed: Value = serde_json::from_str(&rcode_mcp::result_text(&result)).unwrap();
+            assert_eq!(
+                executed["label"], label,
+                "schema and execution must have one owner"
+            );
+            assert_eq!(executed["name"], info.name);
+        }
+        assert_eq!(lines(&marker_a), 1);
+        assert_eq!(lines(&marker_b), 1);
+    }
+}
+
+#[tokio::test]
+async fn tool_name_sanitization_collisions_are_all_rejected_within_one_server() {
+    let root = tempfile::tempdir().unwrap();
+    let marker = root.path().join("calls");
+    let client = McpClient::connect(vec![catalog_server(
+        "fixture",
+        "SERVER",
+        &["read.file", "read_file", "safe"],
+        &marker,
+    )])
+    .await;
+    assert_eq!(client.tools().len(), 1, "{:?}", client.servers());
+    assert_eq!(client.tools()[0].name, "safe");
+    assert!(
+        client
+            .call("mcp__fixture__read_file", Some(json!({"label": "SERVER"})))
+            .await
+            .is_err()
+    );
+    assert!(!marker.exists());
 }
 
 #[tokio::test]

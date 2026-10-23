@@ -70,6 +70,10 @@ enum Connection {
 pub struct McpClient {
     servers: Vec<Arc<ServerState>>,
     tools: Vec<Arc<McpToolInfo>>,
+    /// Both registration and calls use this catalog, so a name can never
+    /// advertise one server's schema while routing to a different server.
+    routes: BTreeMap<String, (usize, Arc<McpToolInfo>)>,
+    catalog_problems: BTreeMap<usize, Vec<String>>,
 }
 
 struct ServerState {
@@ -104,13 +108,13 @@ impl McpClient {
         previous: Option<Arc<Self>>,
     ) -> Self {
         let mut states = Vec::with_capacity(servers.len());
-        let mut tools = Vec::new();
 
         for config in servers {
-            if let Some(state) = previous.as_ref().and_then(|client| client.servers.iter().find(|state| {
-                state.config == config && state.cwd == cwd && state.problem.is_none()
-            })) {
-                tools.extend(state.tools.iter().cloned().map(Arc::new));
+            if let Some(state) = previous.as_ref().and_then(|client| {
+                client.servers.iter().find(|state| {
+                    state.config == config && state.cwd == cwd && state.problem.is_none()
+                })
+            }) {
                 states.push(state.clone());
                 continue;
             }
@@ -136,9 +140,6 @@ impl McpClient {
                     (Connection::Failed, Vec::new(), Some(error))
                 }
             };
-            for tool in &listed {
-                tools.push(Arc::new(tool.clone()));
-            }
             states.push(Arc::new(ServerState {
                 config,
                 cwd: cwd.clone(),
@@ -149,9 +150,57 @@ impl McpClient {
             }));
         }
 
+        let mut names: BTreeMap<String, Vec<(usize, &McpToolInfo)>> = BTreeMap::new();
+        for (index, state) in states.iter().enumerate() {
+            for tool in &state.tools {
+                names
+                    .entry(tool.wire_name.clone())
+                    .or_default()
+                    .push((index, tool));
+            }
+        }
+        let mut routes = BTreeMap::new();
+        let mut catalog_problems: BTreeMap<usize, Vec<String>> = BTreeMap::new();
+        for (wire_name, candidates) in names {
+            if candidates.len() == 1 {
+                let (index, tool) = candidates[0];
+                routes.insert(wire_name, (index, Arc::new(tool.clone())));
+            } else {
+                let identities = candidates
+                    .iter()
+                    .map(|(_, tool)| format!("`{}` / `{}`", tool.server, tool.name))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let problem = format!(
+                    "MCP tool name `{wire_name}` is ambiguous between {identities}; all tools with this name are unavailable"
+                );
+                tracing::warn!(%problem, "ambiguous MCP tools were not registered");
+                for (index, _) in candidates {
+                    let problems = catalog_problems.entry(index).or_default();
+                    if !problems.contains(&problem) {
+                        problems.push(problem.clone());
+                    }
+                }
+            }
+        }
+        let tools = states
+            .iter()
+            .enumerate()
+            .flat_map(|(index, state)| {
+                let routes = &routes;
+                state.tools.iter().filter_map(move |tool| {
+                    routes
+                        .get(&tool.wire_name)
+                        .filter(|(owner, _)| *owner == index)
+                        .map(|(_, info)| info.clone())
+                })
+            })
+            .collect();
         Self {
             servers: states,
             tools,
+            routes,
+            catalog_problems,
         }
     }
 
@@ -186,14 +235,23 @@ impl McpClient {
     pub fn servers(&self) -> Vec<ServerReport> {
         self.servers
             .iter()
-            .map(|state| ServerReport {
+            .enumerate()
+            .map(|(index, state)| ServerReport {
                 name: state.config.name.clone(),
                 source: state.config.source,
                 transport: state.config.transport.describe(),
                 enabled: state.config.enabled,
                 connected: state.problem.is_none(),
-                problem: state.problem.clone(),
-                tool_count: state.tools.len(),
+                problem: state.problem.clone().or_else(|| {
+                    self.catalog_problems
+                        .get(&index)
+                        .map(|problems| problems.join("\n"))
+                }),
+                tool_count: self
+                    .routes
+                    .values()
+                    .filter(|(owner, _)| *owner == index)
+                    .count(),
             })
             .collect()
     }
@@ -271,16 +329,9 @@ impl McpClient {
 
     /// Which server advertises `wire_name`, and the server's own name for it.
     fn resolve(&self, wire_name: &str) -> Option<(usize, McpToolInfo)> {
-        self.servers
-            .iter()
-            .position(|state| state.tools.iter().any(|tool| tool.wire_name == wire_name))
-            .and_then(|index| {
-                self.servers[index]
-                    .tools
-                    .iter()
-                    .find(|tool| tool.wire_name == wire_name)
-                    .map(|tool| (index, tool.clone()))
-            })
+        self.routes
+            .get(wire_name)
+            .map(|(index, tool)| (*index, (**tool).clone()))
     }
 }
 
