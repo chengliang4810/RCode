@@ -988,6 +988,7 @@ impl Tool for ManagedShell {
                     id: id.clone(), chat_id: chat_id.clone(), command: command.to_owned(),
                     cwd: ctx.cwd.clone(), pid: 0,
                     output_path: Some(path.clone()), status: "running".into(), exit_code: None, rotated: false,
+                    delete_when_finished: false,
                     job_name: format!("Local\\RCode.Command.{}", uuid::Uuid::new_v4()),
                     background,
                     members: Vec::new(), recovered: false,

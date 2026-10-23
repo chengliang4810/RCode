@@ -611,6 +611,17 @@ impl Harness for NativeHarness {
         // Drop histories, temporary output and runtime callbacks outside the
         // map lock. Persistent command output remains owned by its registry.
         drop(removed);
+        let cleanup = || self.command_process_registry().forget_chat(chat_id);
+        let result = if tokio::runtime::Handle::try_current()
+            .is_ok_and(|runtime| runtime.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread)
+        {
+            tokio::task::block_in_place(cleanup)
+        } else {
+            cleanup()
+        };
+        if let Err(error) = result {
+            tracing::warn!(%error, "could not reclaim deleted conversation command output");
+        }
     }
 
     fn background_subagent(&self, chat_id: &str, tool_use_id: &str) -> bool {

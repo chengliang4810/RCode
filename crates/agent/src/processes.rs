@@ -24,6 +24,10 @@ pub struct ProcessRecord {
     pub exit_code: Option<i32>,
     #[serde(default)]
     pub rotated: bool,
+    /// Permanent conversation deletion may race a surviving detached writer.
+    /// Persist cleanup intent, but retain its append file until the tree exits.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub(crate) delete_when_finished: bool,
     #[serde(default)]
     pub background: bool,
     #[serde(default)]
@@ -35,6 +39,7 @@ pub struct ProcessRecord {
 fn running_status() -> String {
     "running".into()
 }
+fn is_false(value: &bool) -> bool { !*value }
 
 pub(crate) struct Registration {
     pub registry: Arc<ProcessRegistry>,
@@ -84,6 +89,7 @@ impl crate::Tool for TrackedShell {
                 status: running_status(),
                 exit_code: None,
                 rotated: false,
+                delete_when_finished: false,
                 chat_id: self.chat.clone(),
                 command: input["command"].as_str().unwrap_or_default().to_owned(),
                 cwd: ctx.cwd.clone(),
@@ -153,6 +159,7 @@ impl Control {
         }
     }
 }
+
 // Losing the last recognized Unix member does not prove the group is empty:
 // an unrecognized descendant may still own an inherited append handle. This
 // stricter observation is only for destructive output operations, never signals.
@@ -177,6 +184,7 @@ struct Entry {
     control: Control,
     stop: Option<Arc<dyn Fn() + Send + Sync>>,
     launcher_pending: bool,
+    cleanup_needs_persist: bool,
 }
 #[derive(Default)]
 struct State {
@@ -239,7 +247,14 @@ impl ProcessRegistry {
                             }
                             Err(error) => return Err(error),
                         };
-                        if matches!(control, Control::Finished) {
+                        if matches!(control, Control::Finished)
+                            && ((record.output_path.is_none() && !record.delete_when_finished)
+                                || writers_finished(&record, &control, false)?)
+                        {
+                            if record.delete_when_finished {
+                                registry.remove_record_files(&record.id)?;
+                                return Ok(());
+                            }
                             if record
                                 .output_path
                                 .as_ref()
@@ -258,6 +273,7 @@ impl ProcessRegistry {
                                 control,
                                 stop: None,
                                 launcher_pending: false,
+                                cleanup_needs_persist: false,
                             },
                         );
                         Ok(())
@@ -302,6 +318,9 @@ impl ProcessRegistry {
             if record.id != id || record.chat_id != chat {
                 return Err(std::io::Error::from(std::io::ErrorKind::NotFound));
             }
+            if record.delete_when_finished {
+                return Err(std::io::Error::from(std::io::ErrorKind::NotFound));
+            }
             settle_record(&mut record);
             state.entries.insert(
                 id.to_owned(),
@@ -310,13 +329,14 @@ impl ProcessRegistry {
                     control: Control::Finished,
                     stop: None,
                     launcher_pending: false,
+                    cleanup_needs_persist: false,
                 },
             );
         }
         let entry = state
             .entries
             .get_mut(id)
-            .filter(|entry| entry.record.chat_id == chat)
+            .filter(|entry| entry.record.chat_id == chat && !entry.record.delete_when_finished)
             .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::NotFound))?;
         let previous_status = entry.record.status.clone();
         let writers_finished = writers_finished(&entry.record, &entry.control, entry.launcher_pending)?;
@@ -378,6 +398,7 @@ impl ProcessRegistry {
                 control,
                 stop: Some(stop),
                 launcher_pending: true,
+                cleanup_needs_persist: false,
             },
         );
         Ok(())
@@ -425,11 +446,96 @@ impl ProcessRegistry {
             let _ = std::fs::remove_file(directory.join(format!("{id}.json")));
         }
     }
+
+    fn remove_record_files(&self, id: &str) -> std::io::Result<()> {
+        if !valid_id(id) { return Err(std::io::Error::other("invalid process id")); }
+        // Derive owned filenames from the verified ID. Never delete an
+        // arbitrary output_path restored from a journal or follow its links.
+        let directory = self.directory.clone()
+            .unwrap_or_else(|| std::env::temp_dir().join("rcode-command-processes"));
+        let output = directory.join("output").join(format!("{id}.log"));
+        for path in [output.with_extension("previous.log"), output] {
+            match std::fs::remove_file(path) {
+                Ok(()) => {},
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
+                Err(error) => return Err(error),
+            }
+        }
+        if self.directory.is_some() {
+            match std::fs::remove_file(directory.join(format!("{id}.json"))) {
+                Ok(()) => {},
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(())
+    }
+
+    /// Reclaim output only for a permanently deleted conversation. Live
+    /// writers retain their files and a durable cleanup marker in the journal.
+    pub fn forget_chat(&self, chat_id: &str) -> std::io::Result<()> {
+        let mut state = self.state.lock().unwrap();
+        if let Some(directory) = &self.directory {
+            match std::fs::read_dir(directory) {
+                Ok(files) => for file in files {
+                    let file = file?;
+                    if !file.file_type()?.is_file() || file.path().extension().and_then(|value| value.to_str()) != Some("json") { continue; }
+                    let record: ProcessRecord = match serde_json::from_slice(&std::fs::read(file.path())?) {
+                        Ok(record) => record,
+                        Err(error) => { tracing::warn!(%error, "could not inspect command output for deleted chat"); continue; }
+                    };
+                    if record.chat_id != chat_id || !valid_id(&record.id)
+                        || file.file_name().to_string_lossy() != format!("{}.json", record.id)
+                        || state.entries.contains_key(&record.id) { continue; }
+                    let control = match recover_control(&record) {
+                        Ok(control) => control,
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Control::Finished,
+                        Err(error) => return Err(error),
+                    };
+                    state.entries.insert(record.id.clone(), Entry { record, control, stop: None, launcher_pending: false, cleanup_needs_persist: false });
+                },
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
+                Err(error) => return Err(error),
+            }
+        }
+        let mut failure = None;
+        state.entries.retain(|_, entry| {
+            if entry.record.chat_id != chat_id { return true; }
+            entry.record.delete_when_finished = true;
+            entry.cleanup_needs_persist = match self.persist(&entry.record) {
+                Ok(()) => false,
+                Err(error) => { failure = Some(error); true },
+            };
+            if !matches!(writers_finished(&entry.record, &entry.control, entry.launcher_pending), Ok(true)) { return true; }
+            match self.remove_record_files(&entry.record.id) {
+                Ok(()) => false,
+                Err(error) => { failure = Some(error); true },
+            }
+        });
+        failure.map_or(Ok(()), Err)
+    }
     pub fn list(&self, chat_id: &str) -> Vec<ProcessRecord> {
         let mut state = self.state.lock().unwrap();
         state.entries.retain(|id, entry| {
             let previous = entry.record.status.clone();
             let writers_finished = matches!(writers_finished(&entry.record, &entry.control, entry.launcher_pending), Ok(true));
+            if entry.record.delete_when_finished {
+                if writers_finished {
+                    return match self.remove_record_files(id) {
+                        Ok(()) => false,
+                        Err(error) => { tracing::warn!(%error, "could not reclaim deleted chat output"); true },
+                    };
+                }
+                // Retry a failed cleanup-intent write without touching an
+                // active child's log. A later restart must retain this intent.
+                if entry.cleanup_needs_persist {
+                    match self.persist(&entry.record) {
+                        Ok(()) => entry.cleanup_needs_persist = false,
+                        Err(error) => tracing::warn!(%error, "could not persist deleted chat output cleanup"),
+                    }
+                }
+                return true;
+            }
             if let Some(path) = &entry.record.output_path
                 && writers_finished
             {
@@ -459,6 +565,7 @@ impl ProcessRegistry {
             .values()
             .filter(|e| {
                 e.record.chat_id == chat_id
+                    && !e.record.delete_when_finished
                     && e.record.background
                     && matches!(e.record.status.as_str(), "running" | "stopping")
             })
@@ -615,6 +722,7 @@ mod tests {
                 status: running_status(),
                 exit_code: None,
                 rotated: false,
+                delete_when_finished: false,
                 command: "fixture server".into(),
                 cwd,
                 pid: 0,
@@ -783,6 +891,65 @@ mod tests {
         );
     }
 
+    #[test]
+    fn deleting_a_chat_reclaims_its_completed_logs_without_removing_other_data() {
+        let root = tempfile::tempdir().unwrap();
+        let registry = Arc::new(ProcessRegistry::open(Some(root.path())));
+        let outside = root.path().join("user-data.txt");
+        std::fs::write(&outside, b"keep user data").unwrap();
+        let mut records = Vec::new();
+        for chat in ["deleted", "retained"] {
+            let mut record = registration(registry.clone(), root.path().into()).record;
+            record.chat_id = chat.into();
+            record.status = "completed".into();
+            record.exit_code = Some(0);
+            let output = registry.output_path(&record.id).unwrap();
+            std::fs::write(&output, b"current output").unwrap();
+            std::fs::write(output.with_extension("previous.log"), b"archived output").unwrap();
+            // Even a corrupt output_path cannot redirect cleanup outside the
+            // registry's verified, ID-derived output files.
+            record.output_path = Some(if chat == "deleted" { outside.clone() } else { output.clone() });
+            registry.persist(&record).unwrap();
+            records.push((record.id, output));
+        }
+        registry.forget_chat("deleted").unwrap();
+        registry.forget_chat("deleted").unwrap();
+        let (deleted, output) = &records[0];
+        assert!(!output.exists());
+        assert!(!output.with_extension("previous.log").exists());
+        assert!(!root.path().join("command-processes").join(format!("{deleted}.json")).exists());
+        assert!(registry.read_output("deleted", deleted).is_err());
+        assert_eq!(std::fs::read(&outside).unwrap(), b"keep user data");
+        let (retained, output) = &records[1];
+        assert!(output.exists() && output.with_extension("previous.log").exists());
+        assert!(registry.read_output("retained", retained).unwrap()["output"].as_str().unwrap().contains("current output"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn deleted_output_is_retained_when_recovery_cannot_prove_a_nonempty_group_finished() {
+        let root = tempfile::tempdir().unwrap();
+        let registry = Arc::new(ProcessRegistry::open(Some(root.path())));
+        let mut record = registration(registry.clone(), root.path().into()).record;
+        // A real nonempty group with deliberately unrecognized identities.
+        // No control is recovered and no signal must be sent to this group.
+        record.pid = unsafe { libc::getpgrp() } as u32;
+        record.members = vec![(record.pid, "wrong creation time".into())];
+        assert!(!group_members(record.pid).unwrap().is_empty());
+        assert!(recover_control(&record).is_err());
+        let output = registry.output_path(&record.id).unwrap();
+        record.output_path = Some(output.clone());
+        std::fs::write(&output, b"keep potentially active output").unwrap();
+        registry.persist(&record).unwrap();
+        registry.forget_chat("chat").unwrap();
+        assert!(output.exists());
+        let journal = root.path().join("command-processes").join(format!("{}.json", record.id));
+        let recovered = ProcessRegistry::open(Some(root.path()));
+        recovered.list("chat");
+        assert!(output.exists() && journal.exists());
+        assert_eq!(std::fs::read(&output).unwrap(), b"keep potentially active output");
+    }
+
     #[tokio::test]
     async fn file_output_is_bounded_in_preview_and_retained_after_completion() {
         let root = tempfile::tempdir().unwrap();
@@ -863,11 +1030,8 @@ mod tests {
         command.spawn().unwrap();
     }
 
-    #[tokio::test]
-    async fn detached_service_keeps_logging_after_its_launcher_exits() {
-        let root = tempfile::tempdir().unwrap();
-        let registry = Arc::new(ProcessRegistry::open(Some(root.path())));
-        let mut registration = registration(registry.clone(), root.path().into());
+    async fn launch_logging_detached(registry: Arc<ProcessRegistry>, root: &std::path::Path) -> String {
+        let mut registration = registration(registry.clone(), root.into());
         let id = registration.record.id.clone();
         registration.record.output_path = Some(registry.output_path(&id).unwrap());
         let exe = std::env::current_exe()
@@ -879,7 +1043,7 @@ mod tests {
             if cfg!(windows) { "& " } else { "" }
         );
         let ctx = ToolContext {
-            cwd: root.path().into(),
+            cwd: root.into(),
             cancel: CancellationToken::new(),
             nested: None,
         };
@@ -891,6 +1055,14 @@ mod tests {
             .await
             .unwrap();
         assert!(!result.is_error, "{}", result.output);
+        id
+    }
+
+    #[tokio::test]
+    async fn detached_service_keeps_logging_after_its_launcher_exits() {
+        let root = tempfile::tempdir().unwrap();
+        let registry = Arc::new(ProcessRegistry::open(Some(root.path())));
+        let id = launch_logging_detached(registry.clone(), root.path()).await;
         assert_eq!(registry.list("chat").len(), 1);
         let first = registry.read_output("chat", &id).unwrap();
         assert_eq!(first["status"], "running");
@@ -902,6 +1074,30 @@ mod tests {
             registry.read_output("chat", &id).unwrap()["status"],
             "stopped"
         );
+    }
+
+    #[tokio::test]
+    async fn deleted_chat_cleanup_survives_recovery_without_interrupting_live_log_writers() {
+        let root = tempfile::tempdir().unwrap();
+        let registry = Arc::new(ProcessRegistry::open(Some(root.path())));
+        let id = launch_logging_detached(registry.clone(), root.path()).await;
+        let output = registry.output_path(&id).unwrap();
+        let journal = root.path().join("command-processes").join(format!("{id}.json"));
+        registry.forget_chat("chat").unwrap();
+        assert!(output.exists());
+        assert!(registry.read_output("chat", &id).is_err());
+        let record: ProcessRecord = serde_json::from_slice(&std::fs::read(&journal).unwrap()).unwrap();
+        assert!(record.delete_when_finished);
+        let recovered = ProcessRegistry::open(Some(root.path()));
+        assert!(recovered.state.lock().unwrap().entries.contains_key(&id));
+        let before = std::fs::metadata(&output).unwrap().len();
+        wait_until(|| std::fs::metadata(&output).unwrap().len() > before).await;
+        assert!(recovered.stop("chat", &id).unwrap());
+        wait_until(|| {
+            recovered.list("chat");
+            !output.exists() && !journal.exists()
+        }).await;
+        assert!(!output.with_extension("previous.log").exists());
     }
 
     #[tokio::test]
