@@ -1962,7 +1962,7 @@ mod pinned_session_tests {
         );
         assert_eq!(
             pinned_session_drop_index(
-                super::pinned_session_pointer_y(row_top, viewport_top, 63.0),
+                super::pinned_session_pointer_y(row_top, viewport_top, super::super::SIDEBAR_SESSION_SLOT),
                 3
             ),
             Some(1),
