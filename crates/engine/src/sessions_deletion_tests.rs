@@ -16,6 +16,7 @@ struct LifecycleHarness {
     reaped: Arc<AtomicUsize>,
     dropped: Arc<AtomicBool>,
     held_worker: Mutex<Option<rcode_harness::RuntimeWorkerLease>>,
+    forgotten: Mutex<Vec<(String, usize)>>,
 }
 
 impl LifecycleHarness {
@@ -26,6 +27,7 @@ impl LifecycleHarness {
             reaped: Arc::default(),
             dropped: Arc::default(),
             held_worker: Mutex::default(),
+            forgotten: Mutex::default(),
         })
     }
 }
@@ -56,6 +58,10 @@ impl Harness for LifecycleHarness {
     }
     async fn models(&self) -> Result<Vec<rcode_proto::Model>, rcode_harness::HarnessError> {
         Ok(vec![])
+    }
+
+    fn forget_conversation(&self, chat_id: &str) {
+        lock(&self.forgotten).push((chat_id.to_owned(), self.reaped.load(Ordering::Acquire)));
     }
 
     async fn run(
@@ -242,6 +248,7 @@ async fn deleting_running_chat_waits_for_real_tool_exit_and_rejects_late_work() 
         1,
         "delete acknowledgement requires actual process reap"
     );
+    assert_eq!(*lock(&harness.forgotten), vec![("delete-chat".into(), 1)]);
     assert!(core.workspace.chat("delete-chat").unwrap().is_none());
     core.workspace.record_session(&late_session);
     assert!(
@@ -345,6 +352,7 @@ async fn unfinished_background_shutdown_returns_error_and_preserves_chat_and_sna
         .await
         .unwrap_err();
     assert!(error.to_string().contains("shutdown incomplete"), "{error}");
+    assert!(lock(&harness.forgotten).is_empty(), "failed deletion released resumable state");
     assert!(core.workspace.chat("unsettled-chat").unwrap().is_some());
     assert!(store.has_snapshot("unsettled-chat").unwrap());
     assert!(core.sessions.ensure_chat_open("unsettled-chat").is_err());

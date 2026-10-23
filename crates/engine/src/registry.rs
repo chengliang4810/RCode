@@ -408,6 +408,16 @@ impl HarnessRegistry {
         }
     }
 
+    pub(crate) fn forget_conversation(&self, chat_id: &str) {
+        let harnesses: Vec<_> = self.slots().values().filter_map(|slot| match slot {
+            Slot::Ready(harness) => Some(harness.clone()),
+            Slot::Lazy { .. } => None,
+        }).collect();
+        // Do not initialize an unused driver or hold the registry mutex while
+        // releasing a driver's conversation resources.
+        for harness in harnesses { harness.forget_conversation(chat_id); }
+    }
+
     /// Catalog for `ListHarnesses` — never forces a lazy resolve.
     pub fn descriptors(&self) -> Vec<HarnessDescriptor> {
         let enabled = self.enabled_set();

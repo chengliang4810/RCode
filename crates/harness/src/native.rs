@@ -605,6 +605,14 @@ impl Harness for NativeHarness {
         self.command_process_registry().stop_all().map_err(|e| e.to_string())
     }
 
+    fn forget_conversation(&self, chat_id: &str) {
+        let removed = self.agent_task_stores.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner).remove(chat_id);
+        // Drop histories, temporary output and runtime callbacks outside the
+        // map lock. Persistent command output remains owned by its registry.
+        drop(removed);
+    }
+
     fn background_subagent(&self, chat_id: &str, tool_use_id: &str) -> bool {
         self.agent_task_stores.lock().unwrap().get(chat_id)
             .is_some_and(|store| store.background(tool_use_id))
@@ -2322,6 +2330,25 @@ mod mcp_tests;
 mod tests {
     use super::*;
     use rcode_agent::DoneReason;
+
+    #[test]
+    fn forgetting_a_deleted_conversation_releases_its_task_store_across_clones() {
+        let harness = NativeHarness::default();
+        let clone = harness.clone();
+        let live = Arc::new(rcode_agent::agent_tasks::AgentTaskStore::default());
+        harness.agent_task_stores.lock().unwrap().insert("live".into(), live.clone());
+        for index in 0..256 {
+            let id = format!("deleted-{index}");
+            let store = Arc::new(rcode_agent::agent_tasks::AgentTaskStore::default());
+            let released = Arc::downgrade(&store);
+            harness.agent_task_stores.lock().unwrap().insert(id.clone(), store);
+            clone.forget_conversation(&id);
+            clone.forget_conversation(&id);
+            assert!(released.upgrade().is_none());
+            assert_eq!(harness.agent_task_stores.lock().unwrap().len(), 1);
+        }
+        assert!(Arc::ptr_eq(harness.agent_task_stores.lock().unwrap().get("live").unwrap(), &live));
+    }
 
     fn decode(name: &str, input: serde_json::Value) -> ToolCall {
         decode_tool_call(name, &input)

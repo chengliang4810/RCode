@@ -447,6 +447,7 @@ impl SessionsEngine {
     }
 
     pub(crate) fn forget_deleted_chat(&self, chat_id: &str) {
+        self.inner.registry.forget_conversation(chat_id);
         lock(&self.inner.last_requests).remove(chat_id);
         lock(&self.inner.harness_sessions).remove(chat_id);
         lock(&self.inner.goal_stores).remove(chat_id);

@@ -316,6 +316,11 @@ pub trait Harness: Send + Sync {
     fn shutdown_command_processes(&self) {}
     fn stop_all_command_processes(&self) -> Result<(), String> { Ok(()) }
 
+    /// Release conversation-scoped caches after permanent deletion. The engine
+    /// calls this only after its runtime and background workers have settled;
+    /// stopping a turn or closing a viewport must retain resumable task state.
+    fn forget_conversation(&self, _chat_id: &str) {}
+
     fn cancel_subagent(&self, _tool_use_id: &str) -> bool {
         false
     }
