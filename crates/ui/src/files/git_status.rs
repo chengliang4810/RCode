@@ -275,7 +275,7 @@ impl GitStatusSource {
 }
 
 impl FilesSurface {
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "linux"))]
     pub(crate) fn test_git_source(&self) -> Option<gpui::EntityId> {
         self.git_status.as_ref().map(Entity::entity_id)
     }
@@ -283,7 +283,7 @@ impl FilesSurface {
         Some(self.git_status.as_ref()?.read(cx).notice.clone()?)
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "linux"))]
     pub(crate) fn test_git_color(
         &self,
         path: &str,
