@@ -19,6 +19,7 @@ impl FilesSurface {
         };
         let client = WorkspaceFilesClient::new(engine, context);
         self.watch_task = Some(cx.spawn(async move |this, cx| {
+            let mut retry_delay = Duration::from_secs(2);
             loop {
                 match client.watch().await {
                     Ok(mut receiver) => {
@@ -27,6 +28,7 @@ impl FilesSurface {
                             cx.notify();
                         });
                         while let Some(value) = receiver.recv().await {
+                            retry_delay = Duration::from_secs(2);
                             let frame = serde_json::from_value::<WorkspaceFileChanges>(value);
                             if this
                                 .update(cx, |surface, cx| match frame {
@@ -74,7 +76,8 @@ impl FilesSurface {
                         }
                     }
                 }
-                cx.background_executor().timer(Duration::from_secs(2)).await;
+                cx.background_executor().timer(retry_delay).await;
+                retry_delay = (retry_delay * 2).min(Duration::from_secs(30));
             }
         }));
     }

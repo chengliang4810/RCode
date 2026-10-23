@@ -430,7 +430,11 @@ pub fn stage_clipboard_image(image: Image) -> StagedAttachment {
 /// Windows screenshots are BMP, but no agent harness inlines BMP and the
 /// agent's `Read` tool can't decode one — so they go out as PNG.
 fn bmp_to_png(bmp: &Image) -> Result<Image, String> {
-    let decoded = image::load_from_memory_with_format(&bmp.bytes, image::ImageFormat::Bmp)
+    let mut reader = image::ImageReader::with_format(
+        std::io::Cursor::new(bmp.bytes.as_slice()), image::ImageFormat::Bmp,
+    );
+    reader.limits(image_decode_limits());
+    let decoded = reader.decode()
         .map_err(|e| e.to_string())?;
     let mut png = std::io::Cursor::new(Vec::new());
     decoded
@@ -771,11 +775,7 @@ pub(crate) fn queue_thumbnail_image(source: &Image) -> Option<Arc<Image>> {
     let mut reader = image::ImageReader::new(std::io::Cursor::new(source.bytes.as_slice()))
         .with_guessed_format()
         .ok()?;
-    let mut limits = image::Limits::default();
-    limits.max_image_width = Some(16_384);
-    limits.max_image_height = Some(16_384);
-    limits.max_alloc = Some(128 * 1024 * 1024);
-    reader.limits(limits);
+    reader.limits(image_decode_limits());
     let thumb = reader.decode().ok()?.thumbnail(160, 112);
     let mut bytes = std::io::Cursor::new(Vec::new());
     thumb.write_to(&mut bytes, image::ImageFormat::Png).ok()?;
@@ -783,6 +783,14 @@ pub(crate) fn queue_thumbnail_image(source: &Image) -> Option<Arc<Image>> {
         ImageFormat::Png,
         bytes.into_inner(),
     )))
+}
+
+fn image_decode_limits() -> image::Limits {
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(16_384);
+    limits.max_image_height = Some(16_384);
+    limits.max_alloc = Some(128 * 1024 * 1024);
+    limits
 }
 
 // ---------------------------------------------------------------------------
@@ -889,6 +897,20 @@ fn image_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
 }
 
 impl ImageCache {
+    fn prune_errors(&mut self) {
+        const MAX_ERRORS: usize = 256;
+        let mut errors: Vec<_> = self.map.iter().filter_map(|(key, entry)| match entry {
+            CacheEntry::Error { at, .. } => Some((key.clone(), *at)),
+            _ => None,
+        }).collect();
+        if errors.len() > MAX_ERRORS {
+            errors.sort_unstable_by_key(|(_, at)| *at);
+            for (key, _) in errors.iter().take(errors.len() - MAX_ERRORS) {
+                self.map.remove(key);
+            }
+        }
+    }
+
     fn insert_loaded(&mut self, key: AttachmentKey, image: CachedAttachmentImage) {
         // Account for the decoded CPU/GPU copy as well as the encoded bytes.
         //
@@ -1112,6 +1134,7 @@ impl Drop for AttachmentLoadGuard {
                 attempts: attempts.saturating_add(1),
                 at: Instant::now(),
             };
+            cache.prune_errors();
         }
     }
 }
@@ -1145,6 +1168,7 @@ pub(crate) fn store_error_for(source: &AttachmentKey) {
             at: Instant::now(),
         },
     );
+    cache.prune_errors();
 }
 
 /// Seed the cache after a successful upload (composer send path) so the just-
@@ -1305,6 +1329,30 @@ pub(crate) fn lightbox_with_size(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn image_errors_are_bounded_without_evicting_active_loads() {
+        let mut cache = ImageCache::default();
+        for i in 0..300 {
+            cache.map.insert(key("device", &i.to_string()), CacheEntry::Error {
+                attempts: 1, at: Instant::now(),
+            });
+        }
+        let loading = key("device", "active");
+        cache.map.insert(loading.clone(), CacheEntry::Loading { attempts: 0 });
+        cache.prune_errors();
+        assert_eq!(cache.map.len(), 257);
+        assert!(matches!(cache.map.get(&loading), Some(CacheEntry::Loading { .. })));
+    }
+
+    #[test]
+    fn clipboard_bmp_rejects_dimensions_above_the_decode_limit() {
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::new_rgb8(16_385, 1).write_to(&mut bytes, image::ImageFormat::Bmp).unwrap();
+        let bytes = bytes.into_inner();
+        assert!(image::load_from_memory_with_format(&bytes, image::ImageFormat::Bmp).is_ok());
+        assert!(bmp_to_png(&Image::from_bytes(ImageFormat::Bmp, bytes)).is_err());
+    }
 
     #[test]
     fn appshot_cards_follow_their_exact_image_reference() {

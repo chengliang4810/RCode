@@ -299,7 +299,12 @@ impl BackgroundLuminance {
     }
 }
 
-type Source = Arc<Mutex<Option<Arc<BackgroundLuminance>>>>;
+#[derive(Default)]
+struct SourceState {
+    image: Option<Arc<BackgroundLuminance>>,
+    retry_at: Option<Instant>,
+}
+type Source = Arc<Mutex<SourceState>>;
 type Cache = Vec<(PathBuf, Source)>;
 static CACHE: OnceLock<Mutex<Cache>> = OnceLock::new();
 
@@ -355,7 +360,9 @@ impl PreloadedArtwork {
     pub fn install(self, path: &Path) {
         let mut cache = CACHE.get_or_init(|| Mutex::new(Vec::new())).lock().unwrap();
         cache.retain(|(key, _)| key != path);
-        cache.push((path.to_path_buf(), Arc::new(Mutex::new(Some(self.0)))));
+        cache.push((path.to_path_buf(), Arc::new(Mutex::new(SourceState {
+            image: Some(self.0), retry_at: None,
+        }))));
         if cache.len() > 4 {
             cache.remove(0);
         }
@@ -364,15 +371,20 @@ impl PreloadedArtwork {
 
 fn background_luminance(path: &Path, cx: &mut gpui::App) -> Option<Arc<BackgroundLuminance>> {
     let cache = CACHE.get_or_init(|| Mutex::new(Vec::new()));
+    cache.lock().ok()?.retain(|(key, source)| {
+        key != path || source.lock().ok().is_none_or(|state| {
+            state.retry_at.is_none_or(|at| Instant::now() < at)
+        })
+    });
     if let Some(source) = cache
         .lock()
         .ok()?
         .iter()
         .find_map(|(key, source)| (key == path).then(|| source.clone()))
     {
-        return source.lock().ok()?.clone();
+        return source.lock().ok()?.image.clone();
     }
-    let pending = Arc::new(Mutex::new(None));
+    let pending = Arc::new(Mutex::new(SourceState::default()));
     {
         let mut cache = cache.lock().ok()?;
         cache.push((path.to_path_buf(), pending.clone()));
@@ -390,7 +402,10 @@ fn background_luminance(path: &Path, cx: &mut gpui::App) -> Option<Arc<Backgroun
             })
             .await;
         cx.update(|cx| {
-            *pending.lock().unwrap() = source;
+            *pending.lock().unwrap() = SourceState {
+                retry_at: source.is_none().then(|| Instant::now() + std::time::Duration::from_secs(5)),
+                image: source,
+            };
             cx.refresh_windows();
         });
     })

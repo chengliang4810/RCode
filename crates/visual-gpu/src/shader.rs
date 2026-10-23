@@ -422,8 +422,9 @@ pub fn render_shader(
             crate::unavailable_reason().unwrap_or_default()
         )
     })?;
-    let width = width.clamp(1, 8192);
-    let height = height.clamp(1, 8192);
+    let limit = gpu.device.limits().max_texture_dimension_2d.clamp(1, 8192);
+    let width = width.clamp(1, limit);
+    let height = height.clamp(1, limit);
     let buffers = spec.buffers.len().min(MAX_BUFFERS);
     let device = &gpu.device;
     let pipelines = gpu
@@ -634,18 +635,20 @@ pub fn render_shader(
             &pipelines.bright,
             &post_bind(&state.image, &zero, &empty),
         );
+        let blur_x = post_bind(&state.bloom[0], &step_x, &empty);
+        let blur_y = post_bind(&state.bloom[1], &step_y, &empty);
         for _ in 0..3 {
             fullscreen(
                 &mut encoder,
                 &state.bloom[1],
                 &pipelines.blur,
-                &post_bind(&state.bloom[0], &step_x, &empty),
+                &blur_x,
             );
             fullscreen(
                 &mut encoder,
                 &state.bloom[0],
                 &pipelines.blur,
-                &post_bind(&state.bloom[1], &step_y, &empty),
+                &blur_y,
             );
         }
         view(&state.bloom[0])
@@ -664,7 +667,7 @@ pub fn render_shader(
         &pipelines.composite,
         &post_bind(&state.image, &composite, &glow),
     );
-    let frame = gpu.read_back(encoder, &state.output, &mut state.staging);
+    let frame = gpu.read_back(encoder, &state.output, &mut state.staging)?;
     state.latest = write;
     Ok(frame)
 }
@@ -810,6 +813,30 @@ mod tests {
             render_shader(&spec(code, &[], Blend::Light), &uniforms, 48, 48, &mut None).unwrap();
         assert_eq!(px(&frame, 2, 2)[3], 0, "black is see-through");
         assert_eq!(px(&frame, 24, 24)[3], 255, "light is solid");
+    }
+
+    #[test]
+    fn bloom_blur_bindings_preserve_glow_across_frames() {
+        if !crate::available() {
+            return;
+        }
+        let code = "void mainImage(out vec4 fragColor, in vec2 fragCoord) {\n\
+            float d = length(fragCoord - iResolution.xy * 0.5);\n\
+            fragColor = vec4(vec3(d < 4.0 ? 1.0 : 0.0), 1.0);\n\
+        }";
+        let uniforms = ShaderUniforms {
+            resolution: [64.0, 64.0, 1.0, 0.0],
+            ..Default::default()
+        };
+        let mut shader = spec(code, &[], Blend::Light);
+        let plain = render_shader(&shader, &uniforms, 64, 64, &mut None).unwrap();
+        shader.bloom = 1.0;
+        let mut state = None;
+        let first = render_shader(&shader, &uniforms, 64, 64, &mut state).unwrap();
+        let second = render_shader(&shader, &uniforms, 64, 64, &mut state).unwrap();
+        assert_eq!(px(&plain, 39, 32)[3], 0);
+        assert!(px(&first, 39, 32)[3] > 0, "blur spreads the disc's light");
+        assert_eq!(first.bgra, second.bgra, "reused state preserves the bloom result");
     }
 
     #[test]

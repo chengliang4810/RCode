@@ -62,10 +62,11 @@ fn post_impl(title: &str, body: &str, chat_id: Option<&str>) {
             .args(["-e", &script])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
-            .status();
+            .spawn()
+            .map_err(|error| error.to_string())
+            .and_then(|child| crate::sound::wait_for_process(child, "osascript", std::time::Duration::from_secs(10)));
         match result {
-            Ok(status) if status.success() => {}
-            Ok(status) => tracing::debug!(?status, "osascript notification failed"),
+            Ok(()) => {}
             Err(err) => tracing::debug!(error = %err, "osascript unavailable"),
         }
     });
@@ -321,10 +322,11 @@ fn post_impl(title: &str, body: &str, _chat_id: Option<&str>) {
             .args(["--app-name=RCode", "--", &title, &body])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
-            .status();
+            .spawn()
+            .map_err(|error| error.to_string())
+            .and_then(|child| crate::sound::wait_for_process(child, "notify-send", std::time::Duration::from_secs(10)));
         match result {
-            Ok(status) if status.success() => {}
-            Ok(status) => tracing::debug!(?status, "notify-send failed"),
+            Ok(()) => {}
             Err(err) => tracing::debug!(error = %err, "notify-send unavailable"),
         }
     });

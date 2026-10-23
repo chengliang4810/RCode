@@ -1070,6 +1070,7 @@ pub struct SceneState {
     bloom_b: wgpu::Texture,
     output: wgpu::Texture,
     dummy_depth: wgpu::Texture,
+    dummy_color: wgpu::Texture,
     staging: Option<wgpu::Buffer>,
 }
 
@@ -1112,6 +1113,7 @@ impl SceneState {
             bloom_b: texture("scene bloom", half, HDR, 1, sampled),
             output: gpu.target(w, h, "scene output"),
             dummy_depth: lit_dummy_depth(device),
+            dummy_color: lit_dummy(device),
             staging: None,
         }
     }
@@ -1133,8 +1135,8 @@ pub fn render_scene(
     let gpu = gpu()?;
     let frame = scene.camera_frame(camera, width, height)?;
     let (w, h) = (
-        (width * pixel_scale).round().max(1.0) as u32,
-        (height * pixel_scale).round().max(1.0) as u32,
+        crate::target_dimension(width * pixel_scale, gpu.device.limits().max_texture_dimension_2d),
+        crate::target_dimension(height * pixel_scale, gpu.device.limits().max_texture_dimension_2d),
     );
     let pipelines = gpu
         .scene
@@ -1248,6 +1250,7 @@ pub fn render_scene(
         bloom_b,
         output,
         dummy_depth,
+        dummy_color,
         staging,
         ..
     } = targets;
@@ -1559,18 +1562,20 @@ pub fn render_scene(
         &pipelines.bright,
         &post_bind(shaded, &zero, bloom_b),
     );
+    let blur_x = post_bind(bloom_a, &step_x, dummy_color);
+    let blur_y = post_bind(bloom_b, &step_y, dummy_color);
     for _ in 0..2 {
         fullscreen(
             &mut encoder,
             bloom_b,
             &pipelines.blur,
-            &post_bind(bloom_a, &step_x, &lit_dummy(device)),
+            &blur_x,
         );
         fullscreen(
             &mut encoder,
             bloom_a,
             &pipelines.blur,
-            &post_bind(bloom_b, &step_y, &lit_dummy(device)),
+            &blur_y,
         );
     }
     let strength = post_uniform([0.9, 0.0, 0.0, 0.0]);
@@ -1580,7 +1585,9 @@ pub fn render_scene(
         &pipelines.composite,
         &post_bind(shaded, &strength, bloom_a),
     );
-    Some(gpu.read_back(encoder, output, staging))
+    gpu.read_back(encoder, output, staging)
+        .inspect_err(|error| tracing::warn!(%error, "scene readback failed"))
+        .ok()
 }
 
 /// A 1×1 texture for bind slots a pass doesn't read (a texture can't be both
@@ -1781,8 +1788,10 @@ mod tests {
         };
         // The first frame also makes the device and compiles pipelines.
         render_scene(&scene, camera, 720.0, 360.0, 2.0, &palette, &mut state).unwrap();
+        let dummy = state.as_ref().unwrap().dummy_color.clone();
         let start = std::time::Instant::now();
         let frame = render_scene(&scene, camera, 720.0, 360.0, 2.0, &palette, &mut state).unwrap();
+        assert_eq!(state.as_ref().unwrap().dummy_color, dummy, "bloom reuses the same GPU dummy texture");
         eprintln!(
             "gpu scene {}x{} in {:?}",
             frame.width,

@@ -4,6 +4,7 @@
 
 use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Mutex, Weak};
+use std::time::{Duration, Instant};
 
 use rcode_visual::TextureData;
 use rcode_visual::image::{Image, Pixels};
@@ -38,6 +39,8 @@ struct Entry {
     /// GPU bytes (failures count a little, so they're evicted too).
     size: usize,
     used: u64,
+    /// Decode errors are stable; GPU upload errors may recover after pressure subsides.
+    retry_at: Option<Instant>,
 }
 
 /// An `Arc` already hashed, while it lives: hashing once per allocation, not
@@ -104,13 +107,23 @@ impl Textures {
                 });
             }
             state.clock += 1;
-            if let Some(entry) = state.entries.iter_mut().find(|e| e.key == key) {
-                entry.used = state.clock;
-                return entry.loaded.clone();
+            if let Some(index) = state.entries.iter().position(|e| e.key == key) {
+                let entry = &mut state.entries[index];
+                if entry.retry_at.is_none_or(|at| Instant::now() < at) {
+                    entry.used = state.clock;
+                    return entry.loaded.clone();
+                }
+                state.entries.swap_remove(index);
             }
         }
-        let loaded = rcode_visual::image::decode_texture(data)
-            .and_then(|image| upload(device, queue, &image, space));
+        let (loaded, retry_at) = match rcode_visual::image::decode_texture(data) {
+            Ok(image) => {
+                let loaded = upload(device, queue, &image, space);
+                let retry_at = loaded.as_ref().err().map(|_| Instant::now() + Duration::from_secs(5));
+                (loaded, retry_at)
+            }
+            Err(error) => (Err(error), None),
+        };
         if let Err(error) = &loaded {
             tracing::warn!(%error, "visual texture unusable");
         }
@@ -129,6 +142,7 @@ impl Textures {
             loaded: loaded.clone(),
             size,
             used: state.clock,
+            retry_at,
         });
         while state.entries.iter().map(|e| e.size).sum::<usize>() > BUDGET_BYTES
             && state.entries.len() > 1
@@ -347,6 +361,25 @@ pub(crate) fn solid(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn expired_gpu_failure_retries_upload() {
+        let Some(gpu) = crate::gpu() else { return };
+        let textures = Textures::default();
+        let pixels: Arc<[u8]> = vec![255; 4].into();
+        let data = TextureData::Rgba { width: 1, height: 1, pixels: pixels.clone() };
+        let key = (content_hash(&pixels), pixels.len(), Space::Color);
+        textures.state.lock().unwrap().entries.push(Entry {
+            key, loaded: Err("temporary upload failure".into()), size: 1024, used: 0,
+            retry_at: Some(Instant::now() + Duration::from_secs(5)),
+        });
+        assert!(textures.get(&gpu.device, &gpu.queue, &data, Space::Color).is_err());
+        textures.state.lock().unwrap().entries[0].retry_at = Some(Instant::now());
+        assert!(textures.get(&gpu.device, &gpu.queue, &data, Space::Color).is_ok());
+        let state = textures.state.lock().unwrap();
+        assert_eq!(state.entries.len(), 1);
+        assert!(state.entries[0].retry_at.is_none());
+    }
 
     #[test]
     fn halves_round_trip_light_values() {

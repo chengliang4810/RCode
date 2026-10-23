@@ -542,24 +542,35 @@ impl WindowsWindow {
         let hwnd = creation_result?;
         let this = this.unwrap();
 
-        register_drag_drop(&this)?;
-        set_non_rude_hwnd(hwnd, true);
-        configure_dwm_dark_mode(hwnd, appearance);
-        this.state.border_offset.update(hwnd)?;
-        let placement = retrieve_window_placement(
-            hwnd,
-            display,
-            params.bounds,
-            this.state.scale_factor.get(),
-            &this.state.border_offset,
-        )?;
-        if params.show {
-            unsafe { SetWindowPlacement(hwnd, &placement)? };
-        } else {
-            this.state.initial_placement.set(Some(WindowOpenStatus {
-                placement,
-                state: WindowOpenState::Windowed,
-            }));
+        let initialize = (|| -> anyhow::Result<()> {
+            register_drag_drop(&this)?;
+            set_non_rude_hwnd(hwnd, true);
+            configure_dwm_dark_mode(hwnd, appearance);
+            this.state.border_offset.update(hwnd)?;
+            let placement = retrieve_window_placement(
+                hwnd,
+                display,
+                params.bounds,
+                this.state.scale_factor.get(),
+                &this.state.border_offset,
+            )?;
+            if params.show {
+                unsafe { SetWindowPlacement(hwnd, &placement)? };
+            } else {
+                this.state.initial_placement.set(Some(WindowOpenStatus {
+                    placement,
+                    state: WindowOpenState::Windowed,
+                }));
+            }
+            Ok(())
+        })();
+        if let Err(error) = initialize {
+            // WM_NCDESTROY also frees the boxed Weak stored in GWLP_USERDATA.
+            unsafe {
+                let _ = RevokeDragDrop(hwnd);
+                DestroyWindow(hwnd).log_err();
+            }
+            return Err(error);
         }
 
         Ok(Self(this))

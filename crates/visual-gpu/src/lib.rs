@@ -80,6 +80,11 @@ pub fn available() -> bool {
 /// The target every visual renders into before readback.
 pub(crate) const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 
+/// Bound render targets by both our memory ceiling and the adapter's limit.
+pub(crate) fn target_dimension(pixels: f32, device_limit: u32) -> u32 {
+    pixels.round().max(1.0).min(device_limit.clamp(1, 8192) as f32) as u32
+}
+
 /// WGSL for the final passes: how much of a pixel survives near the frame's
 /// edges, so light running off a visual fades out instead of stopping at a
 /// hard line. The ramp is 15% of the shorter side, eased at both ends
@@ -146,7 +151,7 @@ impl Gpu {
         mut encoder: wgpu::CommandEncoder,
         texture: &wgpu::Texture,
         staging: &mut Option<wgpu::Buffer>,
-    ) -> Frame {
+    ) -> Result<Frame, String> {
         let (width, height) = (texture.width(), texture.height());
         let row = (width * 4).div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
             * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
@@ -179,9 +184,14 @@ impl Gpu {
             .map_async(wgpu::MapMode::Read, move |result| {
                 let _ = tx.send(result);
             });
-        let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
+        self.device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .map_err(|error| format!("GPU readback poll: {error}"))?;
+        rx.recv()
+            .map_err(|error| format!("GPU readback callback: {error}"))?
+            .map_err(|error| format!("GPU readback map: {error}"))?;
         let mut bgra = vec![0u8; (width * height * 4) as usize];
-        if let Ok(Ok(())) = rx.recv() {
+        {
             let mapped = buffer.slice(..).get_mapped_range();
             for y in 0..height as usize {
                 let src = &mapped[y * row as usize..][..width as usize * 4];
@@ -196,11 +206,11 @@ impl Gpu {
             drop(mapped);
             buffer.unmap();
         }
-        Frame {
+        Ok(Frame {
             width,
             height,
             bgra,
-        }
+        })
     }
 
     pub(crate) fn target(&self, width: u32, height: u32, label: &str) -> wgpu::Texture {
@@ -218,6 +228,18 @@ impl Gpu {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
             view_formats: &[],
         })
+    }
+}
+
+#[cfg(test)]
+mod target_tests {
+    #[test]
+    fn dimensions_fit_memory_and_adapter_limits() {
+        assert_eq!(super::target_dimension(1e20, 16384), 8192);
+        assert_eq!(super::target_dimension(8192.0, 2048), 2048);
+        assert_eq!(super::target_dimension(0.0, 8192), 1);
+        assert_eq!(super::target_dimension(f32::NAN, 8192), 1);
+        assert_eq!(super::target_dimension(f32::INFINITY, 8192), 8192);
     }
 }
 

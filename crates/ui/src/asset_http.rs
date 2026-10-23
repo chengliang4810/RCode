@@ -126,7 +126,7 @@ fn next_hop(public_only: bool, hops: usize, url: &url::Url) -> Hop {
 
 #[derive(Clone)]
 pub(crate) struct AssetHttpClient {
-    client: reqwest::Client,
+    client: Result<reqwest::Client, String>,
     runtime: tokio::runtime::Handle,
     public_only: bool,
 }
@@ -158,7 +158,7 @@ impl AssetHttpClient {
             client = client.dns_resolver(Arc::new(PublicDns)).no_proxy();
         }
         Arc::new(Self {
-            client: client.build().expect("image HTTP client"),
+            client: client.build().map_err(|error| error.to_string()),
             runtime,
             public_only,
         })
@@ -173,6 +173,7 @@ impl HttpClient for AssetHttpClient {
         let client = self.client.clone();
         let public_only = self.public_only;
         let task = self.runtime.spawn(async move {
+            let client = client.map_err(|error| anyhow::anyhow!("image HTTP client: {error}"))?;
             anyhow::ensure!(
                 request.method() == "GET",
                 "Asset transport only supports GET"
@@ -223,6 +224,17 @@ mod tests {
     use super::*;
     use futures::AsyncReadExt;
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt};
+
+    #[tokio::test]
+    async fn client_initialization_failure_is_an_asset_error() {
+        let client = AssetHttpClient {
+            client: Err("TLS unavailable".into()),
+            runtime: tokio::runtime::Handle::current(),
+            public_only: true,
+        };
+        let result = client.get("https://example.com/image.png", ().into(), true).await;
+        assert!(result.err().unwrap().to_string().contains("TLS unavailable"));
+    }
 
     #[test]
     fn public_ip_refuses_every_local_reserved_and_embedded_private_range() {

@@ -2641,8 +2641,37 @@ impl TranscriptPreparation {
                 remove,
                 ..
             } => {
-                if !upsert.is_empty() {
-                    self.tree_cache.clear();
+                let replaced: HashSet<_> = upsert.iter().map(|u| u.entry.id.as_str())
+                    .chain(remove.iter().map(String::as_str)).collect();
+                // An upsert may only reposition an entry after a removal.
+                // Its settled markdown stays valid unless the parts changed.
+                let previous: HashMap<_, _> = if upsert.is_empty() {
+                    HashMap::new()
+                } else {
+                    self.entries.iter().map(|entry| (entry.id.as_str(), entry)).collect()
+                };
+                let changed_parts: HashSet<_> = upsert.iter()
+                    .filter(|u| previous.get(u.entry.id.as_str())
+                        .is_none_or(|previous| previous.parts != u.entry.parts))
+                    .map(|u| u.entry.id.as_str())
+                    .chain(remove.iter().map(String::as_str)).collect();
+                if !changed_parts.is_empty() {
+                    self.tree_cache.retain(|key, _| {
+                        key.split_once('#').is_none_or(|(entry, _)| !changed_parts.contains(entry))
+                    });
+                }
+                let live_keys: HashSet<_> = upsert.iter().flat_map(|u| {
+                    u.entry.parts.iter().filter_map(move |part| match part {
+                        MessagePart::Text { id, .. } | MessagePart::Reasoning { id, .. } =>
+                            Some(format!("{}#{id}", u.entry.id)),
+                        _ => None,
+                    })
+                }).collect();
+                if !replaced.is_empty() {
+                    self.live_parsers.retain(|key, _| {
+                        key.split_once('#').is_none_or(|(entry, _)| !replaced.contains(entry))
+                            || live_keys.contains(key)
+                    });
                 }
                 for id in upsert
                     .iter()
@@ -5477,13 +5506,12 @@ impl Transcript {
             .await;
             let fetched = match reply {
                 Ok(value) => {
-                    let text = value
-                        .get("text")
-                        .and_then(|t| t.as_str())
-                        .unwrap_or_default();
-                    blob_detail(text, is_diff)
-                        .map(|d| BlobFetch::Ready(Arc::new(d)))
-                        .unwrap_or(BlobFetch::Failed)
+                    cx.background_executor().spawn(async move {
+                        let text = value.get("text").and_then(|t| t.as_str()).unwrap_or_default();
+                        blob_detail(text, is_diff)
+                            .map(|d| BlobFetch::Ready(Arc::new(d)))
+                            .unwrap_or(BlobFetch::Failed)
+                    }).await
                 }
                 Err(_) => BlobFetch::Failed,
             };
@@ -11054,6 +11082,38 @@ mod tests {
         assert!(Arc::ptr_eq(&first.rows["b"], &next.rows["b"]));
         assert!(!Arc::ptr_eq(&first.rows["a"], &next.rows["a"]));
         assert!(diff_rows(&first.rows["a"], &next.rows["a"]).is_some());
+    }
+
+    #[test]
+    fn background_preparation_keeps_unrelated_trees_and_prunes_removed_parsers() {
+        let mut worker = TranscriptPreparation::default();
+        let original = vec![
+            assistant("live", MessageStatus::Streaming, vec![text_part("p", "partial"), text_part("removed", "temporary")]),
+            assistant("settled", MessageStatus::Complete, vec![text_part("p", "finished")]),
+        ];
+        let update = |frame| rcode_doc::TranscriptUpdate {
+            frame, context_usage: None, goal: None, replay_baseline: None,
+        };
+        worker.prepare(&update(rcode_doc::TranscriptFrame::reset(&original))).unwrap();
+        let settled_tree = worker.tree_cache["settled#p"].1.clone();
+        assert!(worker.live_parsers.contains_key("live#p"));
+        assert!(worker.live_parsers.contains_key("live#removed"));
+        let mut pruned = original.clone();
+        pruned[0].parts.pop();
+        worker.prepare(&update(rcode_doc::diff_transcript(&original, &pruned))).unwrap();
+        assert!(worker.live_parsers.contains_key("live#p"));
+        assert!(!worker.live_parsers.contains_key("live#removed"));
+        assert!(Arc::ptr_eq(&settled_tree, &worker.tree_cache["settled#p"].1));
+        let changed = vec![original[1].clone()];
+        worker.prepare(&update(rcode_doc::diff_transcript(&pruned, &changed))).unwrap();
+        assert!(worker.live_parsers.is_empty());
+        assert!(Arc::ptr_eq(&settled_tree, &worker.tree_cache["settled#p"].1));
+
+        // An unrelated upsert must not discard an already parsed finished tree.
+        let mut appended = changed.clone();
+        appended.push(assistant("other", MessageStatus::Complete, vec![text_part("p", "new")]));
+        worker.prepare(&update(rcode_doc::diff_transcript(&changed, &appended))).unwrap();
+        assert!(Arc::ptr_eq(&settled_tree, &worker.tree_cache["settled#p"].1));
     }
 
     #[gpui::test]

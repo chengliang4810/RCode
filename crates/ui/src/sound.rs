@@ -232,7 +232,7 @@ fn run_player(path: &Path) -> Result<(), String> {
     // the chime's duration. Pass the path through the child environment rather
     // than interpolating it into PowerShell source (paths may contain quotes).
     let script = "(New-Object Media.SoundPlayer $env:RCODE_SOUND_PATH).PlaySync()";
-    let output = std::process::Command::new("powershell.exe")
+    let child = std::process::Command::new("powershell.exe")
         .args([
             "-NoLogo",
             "-NoProfile",
@@ -242,13 +242,12 @@ fn run_player(path: &Path) -> Result<(), String> {
         ])
         .env("RCODE_SOUND_PATH", path)
         .creation_flags(0x08000000)
-        .output()
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
         .map_err(|e| format!("powershell failed: {e}"))?;
-    if output.status.success() {
-        Ok(())
-    } else {
-        Err(format!("powershell exited with {}", output.status))
-    }
+    wait_for_process(child, "powershell", Duration::from_secs(10))
 }
 
 #[cfg(not(any(windows, target_os = "macos")))]
@@ -274,7 +273,7 @@ fn run_player(path: &Path) -> Result<(), String> {
 
 fn run_checked(program: &str, args: &[&str], path: &Path) -> Result<(), String> {
     // Bounded wait: a wedged audio daemon must not accumulate zombie threads.
-    let mut child = std::process::Command::new(program)
+    let child = std::process::Command::new(program)
         .args(args)
         .arg(path)
         .stdin(std::process::Stdio::null())
@@ -282,7 +281,15 @@ fn run_checked(program: &str, args: &[&str], path: &Path) -> Result<(), String> 
         .stderr(std::process::Stdio::null())
         .spawn()
         .map_err(|e| format!("{program}: {e}"))?;
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    wait_for_process(child, program, Duration::from_secs(10))
+}
+
+pub(crate) fn wait_for_process(
+    mut child: std::process::Child,
+    program: &str,
+    timeout: Duration,
+) -> Result<(), String> {
+    let deadline = Instant::now() + timeout;
     loop {
         match child.try_wait() {
             Ok(Some(status)) if status.success() => return Ok(()),
@@ -431,6 +438,23 @@ impl AttentionSoundGate {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn helper_process_timeout_terminates_and_reaps_the_child() {
+        use std::os::windows::process::CommandExt;
+        let child = std::process::Command::new("powershell.exe")
+            .args(["-NoProfile", "-NonInteractive", "-Command", "Start-Sleep -Seconds 30"])
+            .creation_flags(0x08000000)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn().unwrap();
+        let started = Instant::now();
+        assert!(wait_for_process(child, "test helper", Duration::from_millis(100))
+            .unwrap_err().contains("timed out"));
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
 
     fn baseline(indicator: Indicator, turn: Option<&str>) -> SessionNotificationState {
         SessionNotificationState {

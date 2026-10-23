@@ -84,13 +84,20 @@ pub fn valid_hostname(host: &str) -> bool {
 }
 
 fn allocate(base: &str, used: &HashSet<String>) -> String {
-    let base = &base[..base.len().min(58)];
+    fn prefix(text: &str, limit: usize) -> &str {
+        let mut end = text.len().min(limit);
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        &text[..end]
+    }
+    let base = prefix(base, 58);
     let base = base.trim_end_matches('-');
     if !used.contains(base) {
         return base.to_owned();
     }
     for index in 2.. {
-        let label = format!("{}-{index}", &base[..base.len().min(48)]);
+        let label = format!("{}-{index}", prefix(base, 48));
         if !used.contains(&label) {
             return label;
         }
@@ -389,6 +396,15 @@ fn service_role(listener: &Listener, framework_name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn persisted_unicode_labels_do_not_panic_at_byte_limits() {
+        let label = "a项目".repeat(20);
+        let first = allocate(&label, &HashSet::new());
+        assert!(first.len() <= 58);
+        let second = allocate(&label, &HashSet::from([first.clone()]));
+        assert!(second.len() <= 50);
+        assert_ne!(first, second);
+    }
     fn server(port: u16, pid: u32, command: &str) -> Listener {
         Listener {
             pid,

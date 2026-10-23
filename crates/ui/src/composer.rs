@@ -6528,6 +6528,7 @@ impl Composer {
     /// Drop a deleted chat's per-chat composer state — staged attachments hold
     /// raw image bytes, and a deleted chat's stage could never be sent again.
     pub fn purge_chat(&mut self, chat_id: &str, cx: &mut Context<Self>) {
+        self.drafts.remove(chat_id);
         self.attachments.remove(chat_id);
         self.attachment_drafts.remove(chat_id);
         self.appshots.remove(chat_id);
@@ -8220,8 +8221,8 @@ impl Composer {
                     // assistant entry took over). Never on run death: the
                     // question stays answerable until answered — the engine
                     // delivers a dead run's answer as a resumed turn.
-                    let transcript = self.state.read(cx).transcript.clone();
-                    let released = input_request_resolved(&transcript, &wizard.request_id)
+                    let transcript = &self.state.read(cx).transcript;
+                    let released = input_request_resolved(transcript, &wizard.request_id)
                         || (!transcript.is_empty()
                             && !self.answered_requests.contains(&wizard.request_id));
                     if released {
