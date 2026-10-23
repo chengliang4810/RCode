@@ -2,7 +2,9 @@
 
 use std::sync::OnceLock;
 
-use rcode_presentation::{LanguagePreference, Localizer, TextKey};
+#[cfg(test)]
+use rcode_presentation::TextKey;
+use rcode_presentation::{LanguagePreference, Localizer};
 
 pub(crate) fn localizer() -> &'static Localizer {
     static LOCALIZER: OnceLock<Localizer> = OnceLock::new();
@@ -19,6 +21,7 @@ pub(crate) fn localizer() -> &'static Localizer {
     })
 }
 
+#[cfg(test)]
 pub(crate) fn reasoning_label(localizer: &Localizer, level: &str) -> String {
     let key = match level {
         "minimal" => TextKey::PickersReasoningMinimal,
@@ -35,6 +38,7 @@ pub(crate) fn reasoning_label(localizer: &Localizer, level: &str) -> String {
     localizer.text(key)
 }
 
+#[cfg(test)]
 pub(crate) fn relative_time(localizer: &Localizer, at_ms: i64, now_ms: i64) -> String {
     let seconds = now_ms.saturating_sub(at_ms).max(0) / 1_000;
     let (key, count) = if seconds < 60 {
@@ -50,17 +54,9 @@ pub(crate) fn relative_time(localizer: &Localizer, at_ms: i64, now_ms: i64) -> S
     localizer.format_count(key, "count", count)
 }
 
-pub(crate) fn relative_time_now(at_ms: i64) -> String {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis()
-        .min(i64::MAX as u128) as i64;
-    relative_time(localizer(), at_ms, now)
-}
-
 /// Decode application failures at the native display boundary. Relay errors
 /// carry an RPC method prefix; unrecognized and legacy diagnostics stay intact.
+#[cfg(test)]
 pub(crate) fn host_failure(localizer: &Localizer, message: &str) -> String {
     use rcode_proto::terminal_errors::TerminalOpenFailure;
     use rcode_proto::workspace_errors::WorkspaceFailure;
