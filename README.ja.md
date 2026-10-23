@@ -10,9 +10,9 @@
 
 [GitHub Releases](https://github.com/chengliang4810/RCode/releases/latest) から、お使いのプラットフォーム向けの最新版をダウンロードしてください。
 
-- **macOS** — `rcode-macos-arm64.dmg`
-- **Windows** — `rcode-windows-x86_64-setup.exe`
-- **Linux** — `rcode-linux-<arch>.tar.gz` を展開し、中の `install.sh` を実行
+- **macOS** — `rcode-<version>-macos-arm64.dmg`
+- **Windows** — `rcode-<version>-windows-x86_64-setup.exe`
+- **Linux** — `rcode-<version>-linux-<arch>.tar.gz` を展開し、中の `install.sh` を実行
 
 RCode アカウントは不要です。モデルへのアクセスと更新にはネットワークを使用し、セッションはデバイスに保存されます。アプリは自動でアップデートされます。
 

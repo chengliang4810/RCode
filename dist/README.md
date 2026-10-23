@@ -3,7 +3,7 @@
 ## Linux (implemented)
 
 ```sh
-scripts/package-linux.sh            # release build (thin LTO, stripped)
+scripts/package-linux.sh            # release build (fat LTO, stripped)
 PROFILE=debug scripts/package-linux.sh   # fast smoke package
 ```
 
@@ -22,7 +22,7 @@ Produces `target/package/rcode-<version>-linux-<arch>.tar.gz` containing:
   `$XDG_DATA_HOME` (default `~/.local/share`). The curl installer does the same
   from the extracted tarball; `scripts/test-linux-desktop-entry.sh` checks both
 
-The release profile in the root `Cargo.toml` sets `lto = "thin"` and
+The release profile in the root `Cargo.toml` sets `lto = "fat"` and
 `strip = "symbols"` for distribution builds.
 
 ### Headless service configuration
@@ -127,4 +127,5 @@ part (`0.0.1`); artifact names, RCode's version and update metadata retain
 Manually running `.github/workflows/release.yml` builds and verifies all
 platform artifacts without publishing a release. Tag runs publish only after
 every platform succeeds and the complete artifact set, architecture, bundle
-versions and checksums have been verified. Beta releases are marked prerelease.
+versions and checksums have been verified. The workflow publishes ordinary releases; a `beta` version suffix does not
+set GitHub's prerelease flag.

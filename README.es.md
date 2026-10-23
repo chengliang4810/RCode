@@ -10,9 +10,9 @@ Un agente de programación local: el agente se ejecuta dentro de este proceso y 
 
 Descarga la última versión para tu plataforma desde [GitHub Releases](https://github.com/chengliang4810/RCode/releases/latest):
 
-- **macOS** — `rcode-macos-arm64.dmg`
-- **Windows** — `rcode-windows-x86_64-setup.exe`
-- **Linux** — `rcode-linux-<arch>.tar.gz` y luego ejecuta el `install.sh` que incluye
+- **macOS** — `rcode-<version>-macos-arm64.dmg`
+- **Windows** — `rcode-<version>-windows-x86_64-setup.exe`
+- **Linux** — `rcode-<version>-linux-<arch>.tar.gz` y luego ejecuta el `install.sh` que incluye
 
 No necesitas una cuenta de RCode. El acceso al modelo y las actualizaciones usan la red; las sesiones se guardan localmente. La app se actualiza sola.
 

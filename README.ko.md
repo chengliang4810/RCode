@@ -10,9 +10,9 @@
 
 [GitHub Releases](https://github.com/chengliang4810/RCode/releases/latest)에서 플랫폼에 맞는 최신 버전을 내려받으세요.
 
-- **macOS** — `rcode-macos-arm64.dmg`
-- **Windows** — `rcode-windows-x86_64-setup.exe`
-- **Linux** — `rcode-linux-<arch>.tar.gz`의 압축을 풀고 안에 있는 `install.sh` 실행
+- **macOS** — `rcode-<version>-macos-arm64.dmg`
+- **Windows** — `rcode-<version>-windows-x86_64-setup.exe`
+- **Linux** — `rcode-<version>-linux-<arch>.tar.gz`의 압축을 풀고 안에 있는 `install.sh` 실행
 
 RCode 계정은 필요하지 않습니다. 모델 접근과 업데이트에는 네트워크를 사용하고, 세션은 기기에 저장됩니다. 앱은 자동으로 업데이트됩니다.
 

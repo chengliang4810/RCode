@@ -38,9 +38,9 @@
 
 从 [GitHub Releases](https://github.com/chengliang4810/RCode/releases/latest) 下载对应平台的最新版本：
 
-- **macOS** — `rcode-macos-arm64.dmg`
-- **Windows** — `rcode-windows-x86_64-setup.exe`
-- **Linux** — `rcode-linux-<arch>.tar.gz`，解压后运行里面的 `install.sh`
+- **macOS** — `rcode-<version>-macos-arm64.dmg`
+- **Windows** — `rcode-<version>-windows-x86_64-setup.exe`
+- **Linux** — `rcode-<version>-linux-<arch>.tar.gz`，解压后运行里面的 `install.sh`
 
 无需 RCode 账号。模型访问和应用更新需要联网，会话保存在本机。应用支持自动更新。
 

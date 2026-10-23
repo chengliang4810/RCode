@@ -38,9 +38,9 @@ Access the source, customize the application, and build RCode for your own needs
 
 Download the latest release for your platform from [GitHub Releases](https://github.com/chengliang4810/RCode/releases/latest):
 
-- **macOS** — `rcode-macos-arm64.dmg`
-- **Windows** — `rcode-windows-x86_64-setup.exe`
-- **Linux** — `rcode-linux-<arch>.tar.gz`, then run its `install.sh`
+- **macOS** — `rcode-<version>-macos-arm64.dmg`
+- **Windows** — `rcode-<version>-windows-x86_64-setup.exe`
+- **Linux** — `rcode-<version>-linux-<arch>.tar.gz`, then run its `install.sh`
 
 No RCode account is required. Model access and updates use the network; sessions are stored locally. The app updates itself.
 
