@@ -21,6 +21,9 @@ const BACKUP: &str = "rcode.exe.old";
 /// Deterministic name for the copy that becomes the next installation; a
 /// crash between the two renames leaves at most this file behind.
 const INCOMING: &str = ".rcode-update-incoming.exe";
+const STAGE_PREFIX: &str = ".rcode-update-";
+const STALE_LEGACY_STAGE_AGE: std::time::Duration =
+    std::time::Duration::from_secs(7 * 24 * 60 * 60);
 /// The installer's uninstall entry (`AppId` in `dist/windows/rcode.iss`, plus
 /// Inno Setup's `_is1` suffix). Settings → Apps reads `DisplayVersion` here.
 const UNINSTALL_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\{AD5DEC34-E254-467B-8F24-8127EBAF4DA6}_is1";
@@ -72,8 +75,9 @@ pub async fn stage(
         expected.len() == 64 && expected.bytes().all(|b| b.is_ascii_hexdigit()),
         "invalid SHA-256 checksum"
     );
+    prune_stale_stages(directory);
     let temporary = tempfile::Builder::new()
-        .prefix(".rcode-update-")
+        .prefix(STAGE_PREFIX)
         .tempdir_in(directory)?;
     let staged = temporary.path().join("rcode.exe");
     super::download_release_file(release_base, manifest, &file, &staged).await?;
@@ -96,6 +100,10 @@ pub async fn stage(
                 == format!("rcode {}", manifest.version),
         "staged executable has the wrong version or cannot run"
     );
+    std::fs::write(
+        temporary.path().join("owner"),
+        std::process::id().to_string(),
+    )?;
     let _ = temporary.keep();
     Ok(staged)
 }
@@ -158,6 +166,7 @@ pub fn apply(staged: &Path, directory: &Path, relaunch: bool) -> anyhow::Result<
     let _ = std::fs::remove_file(staged);
     let _ = std::fs::remove_file(staged.with_file_name("sha256"));
     let _ = std::fs::remove_file(staged.with_file_name("version"));
+    let _ = std::fs::remove_file(staged.with_file_name("owner"));
     if let Some(parent) = staged.parent() {
         let _ = std::fs::remove_dir(parent);
     }
@@ -255,6 +264,61 @@ pub fn cleanup_previous_image() {
     };
     if is_managed(&exe) {
         let _ = remove_own_backup();
+        if let Some(directory) = exe.parent() {
+            prune_stale_stages(directory);
+        }
+    }
+}
+
+fn process_is_alive(pid: u32) -> bool {
+    let raw = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, pid) };
+    if raw.is_null() {
+        // Access denied is not evidence that another instance has exited.
+        return std::io::Error::last_os_error().raw_os_error()
+            != Some(ERROR_INVALID_PARAMETER as i32);
+    }
+    let process = unsafe { OwnedHandle::from_raw_handle(raw) };
+    unsafe { WaitForSingleObject(process.as_raw_handle(), 0) != WAIT_OBJECT_0 }
+}
+
+fn prune_stale_stages(directory: &Path) {
+    prune_stale_stages_with(directory, process_is_alive, std::time::SystemTime::now());
+}
+
+fn prune_stale_stages_with(
+    directory: &Path,
+    owner_is_alive: impl Fn(u32) -> bool,
+    now: std::time::SystemTime,
+) {
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if !entry
+            .file_name()
+            .to_string_lossy()
+            .starts_with(STAGE_PREFIX)
+            || !entry.file_type().is_ok_and(|kind| kind.is_dir())
+        {
+            continue;
+        }
+        let owner = std::fs::read_to_string(entry.path().join("owner"))
+            .ok()
+            .and_then(|pid| pid.parse::<u32>().ok());
+        let stale = match owner {
+            Some(pid) => !owner_is_alive(pid),
+            // Older versions did not record the owner. Give concurrent legacy
+            // instances a grace period, then reclaim abandoned copies too.
+            None => entry
+                .metadata()
+                .and_then(|meta| meta.modified())
+                .ok()
+                .and_then(|modified| now.duration_since(modified).ok())
+                .is_some_and(|age| age > STALE_LEGACY_STAGE_AGE),
+        };
+        if stale {
+            let _ = std::fs::remove_dir_all(entry.path());
+        }
     }
 }
 
@@ -304,6 +368,39 @@ fn remove_own_backup() -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn abandoned_stages_are_reclaimed_without_removing_live_or_unrelated_directories() {
+        let directory = tempfile::tempdir().unwrap();
+        for (name, owner) in [
+            (".rcode-update-dead", Some(42)),
+            (".rcode-update-live", Some(43)),
+            (".rcode-update-legacy", None),
+            ("user-directory", Some(42)),
+        ] {
+            let path = directory.path().join(name);
+            std::fs::create_dir(&path).unwrap();
+            std::fs::write(path.join("rcode.exe"), b"staged executable").unwrap();
+            if let Some(owner) = owner {
+                std::fs::write(path.join("owner"), owner.to_string()).unwrap();
+            }
+        }
+        let now = std::time::SystemTime::now();
+        prune_stale_stages_with(directory.path(), |pid| pid == 43, now);
+        assert!(!directory.path().join(".rcode-update-dead").exists());
+        assert!(directory.path().join(".rcode-update-live").exists());
+        assert!(directory.path().join(".rcode-update-legacy").exists());
+        assert!(directory.path().join("user-directory").exists());
+        prune_stale_stages_with(
+            directory.path(),
+            |pid| pid == 43,
+            now + STALE_LEGACY_STAGE_AGE + std::time::Duration::from_secs(10),
+        );
+        assert!(!directory.path().join(".rcode-update-legacy").exists());
+        assert!(directory.path().join(".rcode-update-live").exists());
+        assert!(directory.path().join("user-directory").exists());
+        assert!(process_is_alive(std::process::id()));
+    }
 
     /// An open handle sharing read/write but NOT delete: `std::fs::copy` can
     /// still write through it, while the final rename (which needs delete

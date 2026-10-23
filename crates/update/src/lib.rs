@@ -86,7 +86,7 @@ const RELEASE_METADATA_TIMEOUT: Duration = Duration::from_secs(60);
 pub struct Manifest {
     pub version: String,
     /// Artifact file name → metadata. Empty for pre-manifest releases resolved
-    /// via `latest.txt` — downloads then skip checksum verification (with a log).
+    /// via `latest.txt`; such releases can be discovered but cannot be installed.
     #[serde(default)]
     pub files: BTreeMap<String, FileMeta>,
 }
@@ -253,22 +253,35 @@ async fn fetch_release_metadata_with_limits(
     timeout: Duration,
     max_bytes: usize,
 ) -> anyhow::Result<ReleaseMetadataResponse> {
-    rcode_github::with_fallback(url, |route| async move {
-        let deadline = if route == url { timeout } else { timeout.min(Duration::from_secs(20)) };
-        let response = fetch_release_metadata_attempt(client, &route, deadline, max_bytes).await?;
-        anyhow::ensure!(response.status.is_success(), "release metadata HTTP {}", response.status);
-        if url.ends_with("/manifest.json") {
-            let manifest: Manifest = serde_json::from_slice(&response.body).context("parsing manifest.json")?;
-            anyhow::ensure!(parse_version(&manifest.version).is_some(), "manifest.json has an invalid version");
-        } else if url.ends_with("/latest.txt") {
-            anyhow::ensure!(parse_version(std::str::from_utf8(&response.body)?).is_some(), "latest.txt has an invalid version");
-        }
-        Ok(response)
-    }).await
+    // This response defines the trusted artifact digests. A mirror must not
+    // be allowed to replace both the artifact and its expected checksum.
+    let response = fetch_release_metadata_attempt(client, url, timeout, max_bytes).await?;
+    anyhow::ensure!(
+        response.status.is_success(),
+        "release metadata HTTP {}",
+        response.status
+    );
+    if url.ends_with("/manifest.json") {
+        let manifest: Manifest =
+            serde_json::from_slice(&response.body).context("parsing manifest.json")?;
+        anyhow::ensure!(
+            parse_version(&manifest.version).is_some(),
+            "manifest.json has an invalid version"
+        );
+    } else if url.ends_with("/latest.txt") {
+        anyhow::ensure!(
+            parse_version(std::str::from_utf8(&response.body)?).is_some(),
+            "latest.txt has an invalid version"
+        );
+    }
+    Ok(response)
 }
 
 async fn fetch_release_metadata_attempt(
-    client: &reqwest::Client, url: &str, timeout: Duration, max_bytes: usize,
+    client: &reqwest::Client,
+    url: &str,
+    timeout: Duration,
+    max_bytes: usize,
 ) -> anyhow::Result<ReleaseMetadataResponse> {
     let request = async {
         let response = client
@@ -650,8 +663,8 @@ fn bundle_short_version(plist: &str) -> Option<String> {
 // Download + verify
 // ---------------------------------------------------------------------------
 
-/// Stream `{edge}/releases/<file>` to `dest`, verifying the manifest sha256 when
-/// present. Writes through a `.partial` sidecar so an interrupted download never
+/// Stream `{edge}/releases/<file>` to `dest`, requiring the manifest SHA-256.
+/// Writes through a `.partial` sidecar so an interrupted download never
 /// leaves a plausible-looking artifact behind.
 pub async fn download_release_file(
     release_base: &str,
@@ -659,16 +672,67 @@ pub async fn download_release_file(
     file: &str,
     dest: &Path,
 ) -> anyhow::Result<()> {
+    let expected = release_checksum(manifest, file)?;
     let url = format!("{}/{file}", resolve_release_base(release_base)?);
-    let expected = manifest.files.get(file).and_then(|m| m.sha256.as_deref());
-    if expected.is_none() {
-        tracing::warn!(
-            file,
-            "no checksum in release metadata; skipping verification"
-        );
-    }
-    rcode_github::download(&http_client()?, &url, dest, expected, 4 * 1024 * 1024 * 1024).await
+    rcode_github::download(
+        &http_client()?,
+        &url,
+        dest,
+        Some(expected),
+        4 * 1024 * 1024 * 1024,
+    )
+    .await
+}
 
+fn release_checksum<'a>(manifest: &'a Manifest, file: &str) -> anyhow::Result<&'a str> {
+    let expected = manifest
+        .files
+        .get(file)
+        .and_then(|m| m.sha256.as_deref())
+        .with_context(|| format!("updates require a SHA-256 checksum for {file}"))?;
+    anyhow::ensure!(
+        expected.len() == 64 && expected.bytes().all(|b| b.is_ascii_hexdigit()),
+        "invalid SHA-256 checksum for {file}"
+    );
+    Ok(expected)
+}
+
+#[derive(Serialize, Deserialize)]
+struct StageVerification {
+    artifact_sha256: String,
+    executable_sha256: String,
+}
+
+fn executable_digest(binary: &Path) -> anyhow::Result<String> {
+    use sha2::{Digest as _, Sha256};
+    let mut source = std::fs::File::open(binary)?;
+    let mut hash = Sha256::new();
+    std::io::copy(&mut source, &mut hash)?;
+    Ok(format!("{:x}", hash.finalize()))
+}
+
+fn record_verified_stage(root: &Path, binary: &Path, expected: &str) -> anyhow::Result<()> {
+    let verification = StageVerification {
+        artifact_sha256: expected.to_owned(),
+        executable_sha256: executable_digest(binary)?,
+    };
+    std::fs::write(
+        root.join(".rcode-verified.json"),
+        serde_json::to_vec(&verification)?,
+    )?;
+    Ok(())
+}
+
+/// Old, incomplete or modified caches must never be executed as a version
+/// probe. The marker is written only after a checksum-verified extraction.
+fn cached_stage_verified(root: &Path, binary: &Path, expected: &str) -> bool {
+    let verify = || -> anyhow::Result<bool> {
+        let record: StageVerification =
+            serde_json::from_slice(&std::fs::read(root.join(".rcode-verified.json"))?)?;
+        Ok(record.artifact_sha256.eq_ignore_ascii_case(expected)
+            && record.executable_sha256 == executable_digest(binary)?)
+    };
+    verify().unwrap_or(false)
 }
 
 fn run(program: &str, args: &[&str]) -> anyhow::Result<()> {
@@ -729,11 +793,12 @@ pub async fn stage_headless(
         parse_version(version).is_some(),
         "invalid release version {version:?}"
     );
+    let file = headless_artifact(version);
+    let expected = release_checksum(manifest, &file)?;
     let dest = app_root.join(version);
-    if dest.join("rcode").exists() {
+    if cached_stage_verified(&dest, &dest.join("rcode"), expected) {
         return Ok(dest);
     }
-    let file = headless_artifact(version);
     let stage = app_root.join(format!(".stage-{version}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&stage);
     std::fs::create_dir_all(&stage).with_context(|| format!("creating {}", stage.display()))?;
@@ -758,10 +823,14 @@ pub async fn stage_headless(
             bail!("tarball {file} did not contain a rcode binary");
         }
         verify_staged_binary(&unpacked.join("rcode"), version).await?;
+        record_verified_stage(&unpacked, &unpacked.join("rcode"), expected)?;
+        if dest.exists() && !cached_stage_verified(&dest, &dest.join("rcode"), expected) {
+            std::fs::remove_dir_all(&dest).context("removing an unverified cached stage")?;
+        }
         match std::fs::rename(&unpacked, &dest) {
             Ok(()) => {}
             // Lost a race with another stager — the staged copy is equivalent.
-            Err(_) if dest.join("rcode").exists() => {}
+            Err(_) if cached_stage_verified(&dest, &dest.join("rcode"), expected) => {}
             Err(err) => {
                 return Err(err).with_context(|| format!("moving {} into place", dest.display()));
             }
@@ -858,17 +927,18 @@ pub async fn stage_mac_app(
         parse_version(version).is_some(),
         "invalid release version {version:?}"
     );
+    let file = mac_app_artifact(version);
+    let expected = release_checksum(manifest, &file)?;
     let updates = data_dir.join("updates");
     let dir = updates.join(version);
     let staged = dir.join("RCode.app");
     let staged_binary = staged.join("Contents/MacOS/rcode");
-    if staged_binary.exists() && verify_staged_binary(&staged_binary, version).await.is_ok() {
+    if cached_stage_verified(&dir, &staged_binary, expected) {
         return Ok(staged);
     }
     prune_stale_stages(&updates, version);
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
-    let file = mac_app_artifact(version);
     let tarball = dir.join(&file);
     download_release_file(release_base, manifest, &file, &tarball).await?;
     let unpack = dir.join(".unpack");
@@ -896,6 +966,7 @@ pub async fn stage_mac_app(
     }
     std::fs::rename(&unpacked, &staged)
         .with_context(|| format!("moving {} into place", staged.display()))?;
+    record_verified_stage(&dir, &staged_binary, expected)?;
     let _ = std::fs::remove_dir_all(&unpack);
     Ok(staged)
 }
@@ -1190,6 +1261,7 @@ impl Updater {
                 }
                 let mut schedule = Schedule::default();
                 let mut superseded = SupersededRestart::default();
+                let mut auto_apply: AutoApply<'_> = None;
                 loop {
                     let forced = self.forced.swap(false, Ordering::SeqCst);
                     if forced || schedule.due(SystemTime::now()) {
@@ -1200,18 +1272,16 @@ impl Updater {
                             && matches!(*self.role, Role::Engine { .. })
                             && auto_update_enabled()
                             && let InstallKind::Managed { .. } = detect_install()
+                            && auto_apply.is_none()
                         {
-                            self.auto_apply_when_idle().await;
+                            auto_apply = Some(Box::pin(self.auto_apply_when_idle()));
                         }
                     }
                     if self.service.load(Ordering::SeqCst) {
                         superseded.poll(|| self.quiescent_now());
                     }
                     let wait = schedule.wait(SystemTime::now());
-                    tokio::select! {
-                        _ = tokio::time::sleep(wait) => {}
-                        _ = wakes.changed() => {}
-                    }
+                    wait_for_check_or_apply(&mut wakes, wait, &mut auto_apply).await;
                 }
             } => {}
         }
@@ -1344,6 +1414,27 @@ impl Updater {
     }
 }
 
+type AutoApply<'a> = Option<std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>>>;
+
+/// Keep a deferred update alive while the service continues to process manual
+/// checks, wake notifications, scheduled polls and superseded-version restarts.
+async fn wait_for_check_or_apply(
+    wakes: &mut watch::Receiver<u64>,
+    wait: Duration,
+    auto_apply: &mut AutoApply<'_>,
+) {
+    tokio::select! {
+        _ = tokio::time::sleep(wait) => {}
+        _ = wakes.changed() => {}
+        _ = async {
+            match auto_apply.as_mut() {
+                Some(apply) => apply.await,
+                None => std::future::pending().await,
+            }
+        } => { *auto_apply = None; }
+    }
+}
+
 /// Wall-clock check deadlines with failure backoff.
 #[derive(Debug, Default)]
 struct Schedule {
@@ -1447,6 +1538,83 @@ fn now_ms() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn every_update_requires_a_valid_checksum_before_download() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dest = tmp.path().join("payload.tar.gz");
+        let file = "rcode-1.2.3-linux-x86_64.tar.gz";
+        for digest in [
+            None,
+            Some(""),
+            Some("1234"),
+            Some("gggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg"),
+        ] {
+            let manifest = Manifest {
+                version: "1.2.3".into(),
+                files: [(
+                    file.into(),
+                    FileMeta {
+                        sha256: digest.map(str::to_owned),
+                    },
+                )]
+                .into(),
+            };
+            let error = download_release_file("http://127.0.0.1:1", &manifest, file, &dest)
+                .await
+                .unwrap_err();
+            assert!(error.to_string().contains("SHA-256 checksum"), "{error:#}");
+            assert!(!dest.exists());
+            assert!(!dest.with_extension("partial").exists());
+        }
+    }
+
+    #[test]
+    fn cached_stages_require_the_current_artifact_and_unchanged_executable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let binary = tmp.path().join("rcode");
+        std::fs::write(&binary, b"verified executable").unwrap();
+        let digest = "a".repeat(64);
+        assert!(!cached_stage_verified(tmp.path(), &binary, &digest));
+        record_verified_stage(tmp.path(), &binary, &digest).unwrap();
+        assert!(cached_stage_verified(tmp.path(), &binary, &digest));
+        assert!(!cached_stage_verified(tmp.path(), &binary, &"b".repeat(64)));
+        std::fs::write(&binary, b"modified executable").unwrap();
+        assert!(!cached_stage_verified(tmp.path(), &binary, &digest));
+    }
+
+    #[tokio::test]
+    async fn deferred_auto_apply_does_not_block_checks_or_get_cancelled_by_wakes() {
+        let (wake_tx, mut wakes) = watch::channel(0);
+        let (complete_tx, complete_rx) = tokio::sync::oneshot::channel();
+        let finished = Arc::new(AtomicBool::new(false));
+        let applied = finished.clone();
+        let mut auto_apply: AutoApply<'_> = Some(Box::pin(async move {
+            complete_rx.await.unwrap();
+            applied.store(true, Ordering::SeqCst);
+        }));
+        wake_tx.send(1).unwrap();
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            wait_for_check_or_apply(&mut wakes, Duration::from_secs(3600), &mut auto_apply),
+        )
+        .await
+        .expect("manual checks remain responsive while the update is deferred");
+        assert!(auto_apply.is_some());
+        assert!(!finished.load(Ordering::SeqCst));
+        // A scheduled poll is responsive too, without dropping the staged job.
+        wait_for_check_or_apply(&mut wakes, Duration::ZERO, &mut auto_apply).await;
+        assert!(auto_apply.is_some());
+        complete_tx.send(()).unwrap();
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            wait_for_check_or_apply(&mut wakes, Duration::from_secs(3600), &mut auto_apply),
+        )
+        .await
+        .unwrap();
+        assert!(auto_apply.is_none());
+        assert!(finished.load(Ordering::SeqCst));
+    }
 
     #[tokio::test]
     async fn stalled_update_headers_and_body_time_out_but_progressing_body_survives() {
@@ -2073,5 +2241,25 @@ mod tests {
         server.abort();
         assert_eq!(staged, app_root.join("9.9.9"));
         assert!(staged.join("rcode").is_file());
+
+        // A verified cache is reusable without a network request. A modified
+        // executable must instead be replaced from the trusted artifact.
+        assert_eq!(
+            stage_headless("http://127.0.0.1:1", &manifest(&right), &app_root)
+                .await
+                .unwrap(),
+            staged
+        );
+        std::fs::write(staged.join("rcode"), b"unverified cached executable").unwrap();
+        let (base, server) = serve_forever(right.clone()).await;
+        stage_headless(&base, &manifest(&right), &app_root)
+            .await
+            .unwrap();
+        server.abort();
+        assert!(cached_stage_verified(
+            &staged,
+            &staged.join("rcode"),
+            release_checksum(&manifest(&right), &headless_artifact("9.9.9")).unwrap()
+        ));
     }
 }

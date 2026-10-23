@@ -53,6 +53,62 @@ fn resolves_all_builtin_markets_and_source_shapes() {
     }
 }
 
+#[tokio::test]
+async fn immutable_revisions_are_preserved_and_commit_responses_are_validated() {
+    let sha = "0123456789abcdef0123456789abcdef01234567";
+    let source = Source {
+        repo: "owner/repo".into(),
+        revision: sha.into(),
+        path: PathBuf::new(),
+    };
+    // An already pinned commit needs no mutable-ref API lookup.
+    assert_eq!(
+        resolve_revision(&rcode_github::client().unwrap(), &source)
+            .await
+            .unwrap(),
+        sha
+    );
+    assert_eq!(
+        parse_commit_sha(json!({"sha":sha}).to_string().as_bytes()).unwrap(),
+        sha
+    );
+    for response in [
+        br#"{"sha":"main"}"#.as_slice(),
+        br#"{"message":"not found"}"#.as_slice(),
+        b"<html>mirror error</html>",
+    ] {
+        assert!(parse_commit_sha(response).is_err());
+    }
+    assert!(
+        cache_path(Path::new("config"), &SOURCES[0])
+            .to_string_lossy()
+            .contains("marketplace-origin-official")
+    );
+}
+
+#[tokio::test]
+async fn branch_and_short_revisions_resolve_to_immutable_commits() {
+    let sha = "0123456789abcdef0123456789abcdef01234567";
+    for revision in ["main", "HEAD", "feature/kit", "abc123"] {
+        let source = Source {
+            repo: "owner/repo".into(),
+            revision: revision.into(),
+            path: PathBuf::new(),
+        };
+        let resolved = resolve_revision_with_fetch(&source, |url| async move {
+            let expected_ref = revision.replace('/', "%2F");
+            assert_eq!(
+                url,
+                format!("https://api.github.com/repos/owner/repo/commits/{expected_ref}")
+            );
+            parse_commit_sha(json!({"sha":sha}).to_string().as_bytes())
+        })
+        .await
+        .unwrap();
+        assert_eq!(resolved, sha);
+    }
+}
+
 #[test]
 fn cache_identity_and_duplicate_names_are_checked() {
     let valid =

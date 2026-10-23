@@ -132,7 +132,8 @@ fn parse_catalog(bytes: &[u8], market: &MarketSource) -> anyhow::Result<Catalog>
 fn cache_path(config: &Path, market: &MarketSource) -> PathBuf {
     config
         .join("cache")
-        .join(format!("marketplace-{}.json", market.id))
+        // Do not reuse catalogs previously obtained from unauthenticated mirrors.
+        .join(format!("marketplace-origin-{}.json", market.id))
 }
 
 async fn catalog(
@@ -145,7 +146,7 @@ async fn catalog(
             "https://raw.githubusercontent.com/{}/main/.claude-plugin/marketplace.json",
             market.repository
         );
-        rcode_github::fetch(
+        rcode_github::fetch_origin(
             &rcode_github::client()?,
             &url,
             CATALOG_LIMIT,
@@ -337,16 +338,18 @@ pub async fn install(config: &Path, source_id: &str, name: &str) -> anyhow::Resu
         .find(|p| p.name == name)
         .context("plugin is no longer in the marketplace")?;
     let source = source(&entry, market)?;
+    let client = rcode_github::client()?;
+    let revision = resolve_revision(&client, &source).await?;
     let url = format!(
         "https://github.com/{}/archive/{}.zip",
-        source.repo, source.revision
+        source.repo, revision
     );
     tokio::fs::create_dir_all(config).await?;
     let temporary = tempfile::tempdir_in(config)?;
     let archive = temporary.path().join("source.zip");
-    // ZIP validation belongs inside the route attempt, including HTTP 200 error pages.
-    let client = rcode_github::client()?;
-    let bytes = rcode_github::fetch(
+    // A Git commit ID is not a SHA-256 digest of its ZIP archive. Fetch from
+    // GitHub itself: a syntactically valid mirror ZIP cannot prove its identity.
+    let bytes = rcode_github::fetch_origin(
         &client,
         &url,
         ARCHIVE_LIMIT as usize,
@@ -364,6 +367,55 @@ pub async fn install(config: &Path, source_id: &str, name: &str) -> anyhow::Resu
         publish_archive(&config, &entry, &archive, &source.path)
     })
     .await?
+}
+
+fn is_commit_sha(revision: &str) -> bool {
+    revision.len() == 40 && revision.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn parse_commit_sha(bytes: &[u8]) -> anyhow::Result<String> {
+    #[derive(Deserialize)]
+    struct Commit {
+        sha: String,
+    }
+    let commit: Commit = serde_json::from_slice(bytes).context("invalid GitHub commit response")?;
+    ensure!(is_commit_sha(&commit.sha), "invalid GitHub commit SHA");
+    Ok(commit.sha)
+}
+
+/// Branches, tags, HEAD and abbreviated SHAs remain supported, but the archive
+/// request uses the immutable commit resolved by the official GitHub API.
+async fn resolve_revision(client: &reqwest::Client, source: &Source) -> anyhow::Result<String> {
+    resolve_revision_with_fetch(source, |url| async move {
+        rcode_github::fetch_origin(
+            client,
+            &url,
+            1024 * 1024,
+            Duration::from_secs(30),
+            parse_commit_sha,
+        )
+        .await
+    })
+    .await
+}
+
+async fn resolve_revision_with_fetch<F, Fut>(source: &Source, fetch: F) -> anyhow::Result<String>
+where
+    F: FnOnce(String) -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<String>>,
+{
+    if is_commit_sha(&source.revision) {
+        return Ok(source.revision.clone());
+    }
+    let mut url = reqwest::Url::parse(&format!(
+        "https://api.github.com/repos/{}/commits/",
+        source.repo
+    ))?;
+    url.path_segments_mut()
+        .expect("GitHub URL has path segments")
+        .pop_if_empty()
+        .push(&source.revision);
+    fetch(url.to_string()).await
 }
 
 fn publish_archive(

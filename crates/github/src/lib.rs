@@ -81,7 +81,30 @@ pub async fn fetch<T>(
     timeout: Duration,
     validate: impl Fn(&[u8]) -> anyhow::Result<T>,
 ) -> anyhow::Result<T> {
-    with_fallback(url, |route| {
+    fetch_routes(client, routes(url), max_bytes, timeout, validate).await
+}
+
+/// Fetch trust-bearing metadata or executable content from its HTTPS origin.
+/// Mirrors are appropriate only when a separately trusted digest authenticates
+/// the response; checking JSON or ZIP syntax alone does not authenticate it.
+pub async fn fetch_origin<T>(
+    client: &reqwest::Client,
+    url: &str,
+    max_bytes: usize,
+    timeout: Duration,
+    validate: impl Fn(&[u8]) -> anyhow::Result<T>,
+) -> anyhow::Result<T> {
+    fetch_routes(client, vec![url.to_owned()], max_bytes, timeout, validate).await
+}
+
+async fn fetch_routes<T>(
+    client: &reqwest::Client,
+    routes: Vec<String>,
+    max_bytes: usize,
+    timeout: Duration,
+    validate: impl Fn(&[u8]) -> anyhow::Result<T>,
+) -> anyhow::Result<T> {
+    try_routes(routes, |route| {
         let validate = &validate;
         async move {
             tokio::time::timeout(timeout, async {
@@ -238,6 +261,48 @@ mod tests {
             socket.write_all(body).await.unwrap();
         });
         format!("http://{address}/resource")
+    }
+
+    #[tokio::test]
+    async fn origin_fetch_does_not_fall_back_to_mirrors_on_failure() {
+        use std::sync::{Arc, Mutex};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy = format!("http://{}", listener.local_addr().unwrap());
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let observed = requests.clone();
+        let server = tokio::spawn(async move {
+            loop {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = [0; 4096];
+                let length = socket.read(&mut request).await.unwrap();
+                let request = String::from_utf8_lossy(&request[..length]);
+                observed
+                    .lock()
+                    .unwrap()
+                    .push(request.lines().next().unwrap().to_owned());
+                socket.write_all(b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await.unwrap();
+            }
+        });
+        let client = reqwest::Client::builder()
+            .proxy(reqwest::Proxy::all(proxy).unwrap())
+            .build()
+            .unwrap();
+        let error = fetch_origin(
+            &client,
+            "https://github.com/owner/repo/manifest.json",
+            100,
+            Duration::from_secs(1),
+            |bytes| Ok(bytes.to_vec()),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("GitHub resource unavailable"));
+        assert_eq!(
+            *requests.lock().unwrap(),
+            ["CONNECT github.com:443 HTTP/1.1"]
+        );
+        server.abort();
     }
 
     #[tokio::test]
