@@ -1224,11 +1224,14 @@ impl AppearancePage {
             let Some(path) = path else {
                 return;
             };
+            let Ok(task) = this.update(cx, |_, cx| {
+                crate::settings::install_new_thread_composer_background_async(&path, cx)
+            }) else {
+                return;
+            };
+            let result = task.await;
             let _ = this.update(cx, |page, cx| {
-                page.background_error =
-                    crate::settings::install_new_thread_composer_background(&path, cx)
-                        .err()
-                        .map(SharedString::from);
+                page.background_error = result.err().map(SharedString::from);
                 cx.notify();
             });
         })

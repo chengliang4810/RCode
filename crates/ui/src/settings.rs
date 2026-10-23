@@ -551,6 +551,7 @@ pub fn effort_theme(cx: &App) -> crate::effort_theme::EffortTheme {
 /// Copy a selected image into RCode's device-local data directory and make it
 /// the new-thread canvas background. A unique file name avoids stale image
 /// caches when the background is replaced.
+#[cfg(test)]
 pub fn install_new_thread_composer_background(source: &Path, cx: &mut App) -> Result<(), String> {
     let staged = crate::attachments::stage_file_verbatim(source)?;
     // Do not persist the candidate or retire the old managed file until the
@@ -562,6 +563,59 @@ pub fn install_new_thread_composer_background(source: &Path, cx: &mut App) -> Re
     install_staged_background(source, staged, color, cx)
 }
 
+#[derive(Default)]
+struct BackgroundInstallGeneration(u64);
+impl Global for BackgroundInstallGeneration {}
+
+fn invalidate_background_install(cx: &mut App) -> u64 {
+    let generation = cx.default_global::<BackgroundInstallGeneration>();
+    generation.0 = generation.0.wrapping_add(1);
+    generation.0
+}
+
+/// Decode, prepare the selected effect and write the managed image off-thread.
+/// A later selection, removal or committed rotation supersedes this request.
+pub fn install_new_thread_composer_background_async(
+    source: &Path,
+    cx: &mut App,
+) -> Task<Result<(), String>> {
+    let Some(data_dir) = cx.try_global::<SettingsStore>().map(|store| store.data_dir.clone()) else {
+        return Task::ready(Err(crate::l10n::localizer().text(TextKey::AuditSettingsBackgroundSaveUnavailable)));
+    };
+    let generation = invalidate_background_install(cx);
+    let effect = current(cx).new_thread_background_effect;
+    let light = cx.try_global::<crate::theme::Theme>()
+        .is_some_and(|theme| matches!(theme.appearance, crate::theme::Appearance::Light));
+    let source = source.to_path_buf();
+    let worker_source = source.clone();
+    let worker_data_dir = data_dir.clone();
+    let worker = cx.background_executor().spawn(async move {
+        let staged = crate::attachments::stage_file_verbatim(&worker_source)?;
+        let image = crate::new_thread_background_image::decode(staged.bytes())
+            .map_err(|_| crate::l10n::localizer().text(TextKey::AuditSettingsBackgroundInvalid))?;
+        let artwork = crate::new_thread_background_effects::PreloadedArtwork::load(&image, effect, light);
+        drop(image);
+        let file = prepare_background_file(staged, &worker_data_dir)?;
+        Ok::<_, String>((file, artwork))
+    });
+    cx.spawn(async move |cx| {
+        let result = worker.await;
+        cx.update(|cx| {
+            if cx.default_global::<BackgroundInstallGeneration>().0 != generation
+                || cx.try_global::<SettingsStore>().is_none_or(|store| store.data_dir.as_path() != data_dir.as_path())
+            {
+                return Ok(());
+            }
+            let (file, artwork) = result?;
+            let path = file.path().to_path_buf();
+            commit_background(&source, file, artwork.color(), cx)?;
+            artwork.install(&path);
+            Ok(())
+        })
+    })
+}
+
+#[cfg(test)]
 fn install_staged_background(
     source: &Path,
     staged: crate::attachments::StagedAttachment,
@@ -660,6 +714,7 @@ fn commit_background(
     if next.save(&data_dir).is_err() {
         return Err(crate::l10n::localizer().text(TextKey::AuditSettingsBackgroundSaveFailed));
     }
+    invalidate_background_install(cx);
     prepared.0.take();
     replace(next, SavePolicy::Immediate, cx);
     remove_managed_new_thread_background(previous.as_ref(), &backgrounds_dir);
@@ -671,6 +726,7 @@ fn commit_background(
 }
 
 pub fn remove_new_thread_composer_background(cx: &mut App) -> Result<(), String> {
+    invalidate_background_install(cx);
     let data_dir = cx
         .try_global::<SettingsStore>()
         .map(|store| store.data_dir.clone())
@@ -2828,6 +2884,58 @@ mod tests {
                 expected
             );
         });
+    }
+
+    #[gpui::test]
+    fn manual_background_import_prepares_off_thread_and_seeds_the_effect_cache(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("selected.png");
+        image::RgbaImage::from_pixel(32, 24, image::Rgba([20, 100, 200, 255]))
+            .save(&source).unwrap();
+        let outcome = std::rc::Rc::new(std::cell::RefCell::new(None));
+        let completed = outcome.clone();
+        cx.update(|cx| {
+            init(UiSettings::default(), dir.path(), cx);
+            let task = install_new_thread_composer_background_async(&source, cx);
+            assert!(current(cx).new_thread_composer_background.is_none(), "starting an import must not decode or publish it synchronously");
+            cx.spawn(async move |_| *completed.borrow_mut() = Some(task.await)).detach();
+        });
+        cx.run_until_parked();
+        assert!(matches!(outcome.borrow().as_ref(), Some(Ok(()))));
+        cx.update(|cx| {
+            let settings = current(cx);
+            let path = PathBuf::from(settings.new_thread_composer_background.unwrap().path);
+            assert_eq!(settings.wallpaper_source.as_ref(), Some(&source));
+            std::fs::remove_file(&path).unwrap();
+            assert!(crate::new_thread_background_effects::prepare(
+                settings.new_thread_background_effect,
+                &crate::theme::Theme::default(), &path, cx,
+            ).is_some(), "the first frame must reuse the prepared pixels without rereading the file");
+        });
+    }
+
+    #[gpui::test]
+    fn manual_background_import_does_not_restore_an_image_removed_while_loading(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("selected.png");
+        image::RgbaImage::new(16, 16).save(&source).unwrap();
+        let outcome = std::rc::Rc::new(std::cell::RefCell::new(None));
+        let completed = outcome.clone();
+        cx.update(|cx| {
+            init(UiSettings::default(), dir.path(), cx);
+            let task = install_new_thread_composer_background_async(&source, cx);
+            remove_new_thread_composer_background(cx).unwrap();
+            cx.spawn(async move |_| *completed.borrow_mut() = Some(task.await)).detach();
+        });
+        cx.run_until_parked();
+        assert!(matches!(outcome.borrow().as_ref(), Some(Ok(()))));
+        cx.update(|cx| assert!(current(cx).new_thread_composer_background.is_none()));
+        let managed = dir.path().join(NEW_THREAD_BACKGROUND_DIR);
+        assert!(!managed.exists() || std::fs::read_dir(managed).unwrap().next().is_none());
     }
 
     #[gpui::test]
