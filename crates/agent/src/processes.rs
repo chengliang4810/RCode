@@ -153,6 +153,25 @@ impl Control {
         }
     }
 }
+// Losing the last recognized Unix member does not prove the group is empty:
+// an unrecognized descendant may still own an inherited append handle. This
+// stricter observation is only for destructive output operations, never signals.
+#[cfg(any(unix, test))]
+fn observed_group_writers_finished(members: &[(u32, String)]) -> bool { members.is_empty() }
+
+fn writers_finished(record: &ProcessRecord, control: &Control, launcher_pending: bool) -> std::io::Result<bool> {
+    if launcher_pending { return Ok(false); }
+    #[cfg(unix)]
+    {
+        let _ = control;
+        Ok(observed_group_writers_finished(&group_members(record.pid)?))
+    }
+    #[cfg(windows)]
+    {
+        let _ = record;
+        Ok(!control.alive()?)
+    }
+}
 struct Entry {
     record: ProcessRecord,
     control: Control,
@@ -300,7 +319,8 @@ impl ProcessRegistry {
             .filter(|entry| entry.record.chat_id == chat)
             .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::NotFound))?;
         let previous_status = entry.record.status.clone();
-        if !entry.control.alive()? && !entry.launcher_pending {
+        let writers_finished = writers_finished(&entry.record, &entry.control, entry.launcher_pending)?;
+        if writers_finished {
             settle_record(&mut entry.record);
         }
         let path = entry
@@ -308,7 +328,7 @@ impl ProcessRegistry {
             .output_path
             .clone()
             .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::NotFound))?;
-        let rotated = crate::process_output::rotate(&path)?;
+        let rotated = crate::process_output::rotate(&path, writers_finished)?;
         entry.record.rotated |= rotated;
         if rotated || entry.record.status != previous_status {
             self.persist(&entry.record)?;
@@ -409,15 +429,16 @@ impl ProcessRegistry {
         let mut state = self.state.lock().unwrap();
         state.entries.retain(|id, entry| {
             let previous = entry.record.status.clone();
+            let writers_finished = matches!(writers_finished(&entry.record, &entry.control, entry.launcher_pending), Ok(true));
             if let Some(path) = &entry.record.output_path
-                && !matches!(entry.control, Control::Finished)
+                && writers_finished
             {
-                if let Ok(true) = crate::process_output::rotate(path) {
+                if let Ok(true) = crate::process_output::rotate(path, true) {
                     entry.record.rotated = true;
                     let _ = self.persist(&entry.record);
                 }
             }
-            if matches!(entry.control.alive(), Ok(false)) && !entry.launcher_pending {
+            if writers_finished {
                 settle_record(&mut entry.record);
                 entry.control = Control::Finished;
                 if entry.record.output_path.is_some() {
@@ -573,6 +594,16 @@ mod tests {
     use super::*;
     use crate::{Tool, ToolContext};
     use tokio_util::sync::CancellationToken;
+
+    #[test]
+    fn unknown_nonempty_groups_are_not_safe_for_destructive_output_operations() {
+        let previously_owned = [(41, "old creation time".to_owned())];
+        let current = [(42, "new descendant creation time".to_owned())];
+        assert!(!previously_owned.iter().any(|member| current.contains(member)));
+        assert!(!observed_group_writers_finished(&current));
+        assert!(!observed_group_writers_finished(&previously_owned));
+        assert!(observed_group_writers_finished(&[]));
+    }
 
     fn registration(registry: Arc<ProcessRegistry>, cwd: PathBuf) -> Registration {
         Registration {

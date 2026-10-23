@@ -41,23 +41,24 @@ pub(crate) fn preview(path: &Path) -> std::io::Result<(String, bool)> {
     }
 }
 
-pub(crate) fn rotate(path: &Path) -> std::io::Result<bool> {
-    if std::fs::metadata(path)?.len() <= ROTATE_BYTES {
+pub(crate) fn rotate(path: &Path, writers_finished: bool) -> std::io::Result<bool> {
+    // Children own independent append handles, including after a host crash.
+    // Copying and then truncating a live file loses every append between the
+    // size snapshot and truncate. Only a fully exited process tree is safe.
+    if !writers_finished || std::fs::metadata(path)?.len() <= ROTATE_BYTES {
         return Ok(false);
     }
     let mut input = std::fs::File::open(path)?;
     let size = input.metadata()?.len();
     input.seek(SeekFrom::Start(size.saturating_sub(ARCHIVE_BYTES as u64)))?;
-    let mut archive = OpenOptions::new()
-        .create(true)
-        .truncate(true)
-        .write(true)
-        .open(path.with_extension("previous.log"))?;
+    let mut archive = tempfile::NamedTempFile::new_in(path.parent().unwrap_or(Path::new(".")))?;
     std::io::copy(&mut input.take(ARCHIVE_BYTES as u64), &mut archive)?;
     archive.flush()?;
-    // Do not rename an active file: a surviving child must keep writing to the
-    // same inode/Windows file object through its existing append handle.
-    OpenOptions::new().write(true).open(path)?.set_len(0)?;
+    archive.as_file().sync_all()?;
+    archive.persist(path.with_extension("previous.log")).map_err(|error| error.error)?;
+    let current = OpenOptions::new().write(true).open(path)?;
+    current.set_len(0)?;
+    current.sync_all()?;
     Ok(true)
 }
 
@@ -75,7 +76,7 @@ mod tests {
         assert!(!text.contains('\u{fffd}'));
     }
     #[test]
-    fn rotation_keeps_append_handles_and_archives_recent_output() {
+    fn active_rotation_never_truncates_concurrent_appends_and_finished_rotation_archives_the_tail() {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("out.log");
         let mut writer = OpenOptions::new()
@@ -89,16 +90,24 @@ mod tests {
             .unwrap()
             .set_len(ROTATE_BYTES + 1)
             .unwrap();
-        writer.write_all(b"old tail").unwrap();
-        assert!(rotate(&path).unwrap());
-        writer.write_all(b"new output").unwrap();
-        assert_eq!(read(&path, 100, true).unwrap().0, "new output");
-        assert!(preview(&path).unwrap().0.ends_with("old tailnew output"));
-        assert!(
-            read(&path.with_extension("previous.log"), 100, true)
-                .unwrap()
-                .0
-                .ends_with("old tail")
-        );
+        let start = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let running = start.clone();
+        let child = std::thread::spawn(move || {
+            running.wait();
+            for index in 0..1024 { writeln!(writer, "append-{index:04}").unwrap(); }
+            writer.flush().unwrap();
+        });
+        start.wait();
+        for _ in 0..128 { assert!(!rotate(&path, false).unwrap()); }
+        child.join().unwrap();
+        let (tail, _) = read(&path, 32 * 1024, true).unwrap();
+        for index in 0..1024 { assert!(tail.contains(&format!("append-{index:04}\n"))); }
+        assert!(std::fs::metadata(&path).unwrap().len() > ROTATE_BYTES);
+        assert!(!path.with_extension("previous.log").exists());
+        assert!(preview(&path).unwrap().0.len() <= PREVIEW_BYTES);
+        assert!(rotate(&path, true).unwrap());
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), 0);
+        assert!(preview(&path).unwrap().0.ends_with("append-1023\n"));
+        assert_eq!(std::fs::metadata(path.with_extension("previous.log")).unwrap().len(), ARCHIVE_BYTES as u64);
     }
 }
