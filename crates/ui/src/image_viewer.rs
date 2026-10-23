@@ -189,7 +189,7 @@ impl ImageView {
         state.dragged = false;
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "linux"))]
     pub fn test_scale(&self) -> f32 {
         self.0.borrow().geometry.scale
     }
