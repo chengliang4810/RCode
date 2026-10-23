@@ -24,7 +24,7 @@ regex = "1"
 # `WebFetch` and `WebSearch` reach the network.
 reqwest.workspace = true
 # SKILL.md frontmatter is YAML.
-serde_yaml_ng = "0.10"
+yaml_serde = "0.10.7"
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

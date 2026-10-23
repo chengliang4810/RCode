@@ -52,13 +52,13 @@ fn read(path: &Path) -> Result<String, String> {
     String::from_utf8(bytes).map_err(|e| e.to_string())
 }
 
-fn parse_document(content: &str) -> Result<(serde_yaml_ng::Mapping, String), String> {
+fn parse_document(content: &str) -> Result<(yaml_serde::Mapping, String), String> {
     let normalized = content.trim_start_matches('\u{feff}').replace("\r\n", "\n");
     if let Some(rest) = normalized.strip_prefix("---\n") {
         let (header, body) = rest
             .split_once("\n---\n")
             .ok_or("Unclosed command frontmatter")?;
-        let header = serde_yaml_ng::from_str(header)
+        let header = yaml_serde::from_str(header)
             .map_err(|e| format!("Invalid command frontmatter: {e}"))?;
         Ok((header, body.to_owned()))
     } else {
@@ -70,7 +70,7 @@ fn parse(name: String, content: String, source: CommandSource) -> Result<CustomC
     if body.trim().is_empty() {
         return Err("Command prompt cannot be empty".into());
     }
-    let get = |key: &str| header.get(serde_yaml_ng::Value::String(key.into()));
+    let get = |key: &str| header.get(yaml_serde::Value::String(key.into()));
     for key in ["description", "argument-hint"] {
         if get(key).is_some_and(|v| !v.is_string()) {
             return Err(format!("{key} must be text"));
@@ -355,12 +355,12 @@ pub fn mutate(home: &Path, mutation: CommandMutation) -> Result<(), String> {
             let (mut header, body) =
                 parse_document(current.as_deref().ok_or("Command does not exist")?)?;
             header.insert(
-                serde_yaml_ng::Value::String("enabled".into()),
-                serde_yaml_ng::Value::Bool(enabled),
+                yaml_serde::Value::String("enabled".into()),
+                yaml_serde::Value::Bool(enabled),
             );
             format!(
                 "---\n{}---\n{body}",
-                serde_yaml_ng::to_string(&header).map_err(|e| e.to_string())?
+                yaml_serde::to_string(&header).map_err(|e| e.to_string())?
             )
         }
     };
@@ -528,6 +528,60 @@ mod tests {
                 .is_err(),
                 "{name}"
             );
+        }
+    }
+
+    #[test]
+    fn enabling_preserves_yaml_metadata_types_tags_and_alias_values() {
+        let home = tempfile::tempdir().unwrap();
+        let initial = r#"---
+description: &description !text Review
+argument-hint: *description
+enabled: true
+metadata:
+  quoted: 'true'
+  number: 42
+  items: [true, '012', !kind value]
+  ? [x, y]
+  : complex-key
+---
+Review $ARGUMENTS
+Keep this body.
+"#;
+        mutate(
+            home.path(),
+            CommandMutation::Save {
+                name: "review".into(),
+                content: initial.into(),
+                expected_revision: None,
+            },
+        )
+        .unwrap();
+        let command = list(None, Some(home.path()), &[]).remove(0);
+        assert_eq!(command.description, "Review");
+        assert_eq!(command.input_hint.as_deref(), Some("Review"));
+        mutate(
+            home.path(),
+            CommandMutation::SetEnabled {
+                name: command.name,
+                enabled: false,
+                expected_revision: command.revision,
+            },
+        )
+        .unwrap();
+        let disabled = list(None, Some(home.path()), &[]).remove(0);
+        assert!(!disabled.enabled);
+        let (mut expected_header, expected_body) = parse_document(initial).unwrap();
+        expected_header.insert("enabled".into(), false.into());
+        let (actual_header, actual_body) = parse_document(&disabled.content).unwrap();
+        assert_eq!(actual_header, expected_header);
+        assert_eq!(actual_body, expected_body);
+        assert!(disabled.content.contains("!kind"));
+        for content in [
+            "---\nenabled: 'false'\n---\nBody",
+            "---\ndescription: 123\n---\nBody",
+        ] {
+            assert!(parse("bad".into(), content.into(), CommandSource::User).is_err());
         }
     }
     #[test]

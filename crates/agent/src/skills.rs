@@ -343,8 +343,8 @@ fn read_skill(dir: &Path, root: &Path, source: SkillSource) -> Option<Skill> {
     let (name, description) = summary(&text).or_else(|| {
         if source != SkillSource::Plugin { return None; }
         let metadata = if let Some((frontmatter, _)) = split_frontmatter(&text) {
-            serde_yaml_ng::from_str::<serde_yaml_ng::Value>(frontmatter).ok()?
-        } else { serde_yaml_ng::Value::Null };
+            yaml_serde::from_str::<yaml_serde::Value>(frontmatter).ok()?
+        } else { yaml_serde::Value::Null };
         let name = metadata.get("name").and_then(|value| value.as_str()).unwrap_or(dir.file_name()?.to_str()?).to_owned();
         if name.is_empty() || name.contains(['/', '\\']) || name.chars().any(char::is_whitespace) { return None; }
         let description = metadata.get("description").and_then(|value| value.as_str()).unwrap_or_default().to_owned();
@@ -363,11 +363,11 @@ fn read_skill(dir: &Path, root: &Path, source: SkillSource) -> Option<Skill> {
 /// without them has nothing to tell the model about when it applies.
 fn summary(text: &str) -> Option<(String, String)> {
     let (frontmatter, _) = split_frontmatter(text)?;
-    let parsed: serde_yaml_ng::Value = serde_yaml_ng::from_str(frontmatter).ok()?;
+    let parsed: yaml_serde::Value = yaml_serde::from_str(frontmatter).ok()?;
     let map = parsed.as_mapping()?;
 
     let get = |key: &str| -> Option<String> {
-        map.get(serde_yaml_ng::Value::String(key.to_owned()))
+        map.get(yaml_serde::Value::String(key.to_owned()))
             .and_then(|value| value.as_str())
             .map(str::to_owned)
     };
@@ -412,7 +412,7 @@ pub fn split_frontmatter(content: &str) -> Option<(&str, &str)> {
 /// The frontmatter as JSON, for a caller that wants more than the summary.
 pub fn frontmatter_json(content: &str) -> Option<serde_json::Map<String, Value>> {
     let (frontmatter, _) = split_frontmatter(content)?;
-    let parsed: serde_yaml_ng::Value = serde_yaml_ng::from_str(frontmatter).ok()?;
+    let parsed: yaml_serde::Value = yaml_serde::from_str(frontmatter).ok()?;
     let json = serde_json::to_value(yaml_to_json(parsed)).ok()?;
     match json {
         Value::Object(map) => Some(map),
@@ -426,27 +426,27 @@ pub fn frontmatter_json(content: &str) -> Option<serde_json::Map<String, Value>>
 /// `serde_json::to_value` mangles them. Skills use string keys only, but a
 /// malformed file should degrade to "no frontmatter" rather than to a JSON
 /// array the caller then has to defend against.
-fn yaml_to_json(value: serde_yaml_ng::Value) -> Value {
+fn yaml_to_json(value: yaml_serde::Value) -> Value {
     match value {
-        serde_yaml_ng::Value::Null => Value::Null,
-        serde_yaml_ng::Value::Bool(value) => Value::Bool(value),
-        serde_yaml_ng::Value::Number(value) => serde_json::to_value(value).unwrap_or(Value::Null),
-        serde_yaml_ng::Value::String(value) => Value::String(value),
-        serde_yaml_ng::Value::Sequence(items) => {
+        yaml_serde::Value::Null => Value::Null,
+        yaml_serde::Value::Bool(value) => Value::Bool(value),
+        yaml_serde::Value::Number(value) => serde_json::to_value(value).unwrap_or(Value::Null),
+        yaml_serde::Value::String(value) => Value::String(value),
+        yaml_serde::Value::Sequence(items) => {
             Value::Array(items.into_iter().map(yaml_to_json).collect())
         }
-        serde_yaml_ng::Value::Mapping(map) => {
+        yaml_serde::Value::Mapping(map) => {
             let mut object = serde_json::Map::new();
             for (key, value) in map {
                 let key = match key {
-                    serde_yaml_ng::Value::String(key) => key,
+                    yaml_serde::Value::String(key) => key,
                     other => format!("{other:?}"),
                 };
                 object.insert(key, yaml_to_json(value));
             }
             Value::Object(object)
         }
-        serde_yaml_ng::Value::Tagged(tagged) => yaml_to_json(tagged.value),
+        yaml_serde::Value::Tagged(tagged) => yaml_to_json(tagged.value),
     }
 }
 
@@ -861,6 +861,41 @@ mod tests {
         assert_eq!(json.get("name").and_then(Value::as_str), Some("a"));
         assert_eq!(json.get("version").and_then(Value::as_u64), Some(2));
         assert_eq!(json.get("flag").and_then(Value::as_bool), Some(true));
+    }
+
+    #[test]
+    fn frontmatter_preserves_yaml_aliases_tags_and_scalar_types() {
+        let text = r#"---
+name: &name !skill yaml-example
+description: *name
+plain: [yes, on, 012, 0b11, 0o10, 0x10, true, null, .inf, .nan]
+quoted: ['true', "123"]
+tagged: !metadata {nested: !items [one, two]}
+large: 18446744073709551615
+? [x, y]
+: complex-key
+---
+Body
+"#;
+        assert_eq!(
+            summary(text),
+            Some(("yaml-example".into(), "yaml-example".into()))
+        );
+        let json = frontmatter_json(text).expect("valid YAML frontmatter");
+        assert_eq!(
+            json["plain"],
+            serde_json::json!(["yes", "on", "012", 3, 8, 16, true, null, null, null])
+        );
+        assert_eq!(json["quoted"], serde_json::json!(["true", "123"]));
+        assert_eq!(json["tagged"], serde_json::json!({"nested": ["one", "two"]}));
+        assert_eq!(json["large"].as_u64(), Some(u64::MAX));
+        assert_eq!(
+            json["Sequence [String(\"x\"), String(\"y\")]"],
+            "complex-key"
+        );
+        assert!(summary("---\nname: 123\ndescription: text\n---\nBody").is_none());
+        assert!(summary("---\nname: example\ndescription: true\n---\nBody").is_none());
+        assert!(frontmatter_json("---\nname: one\nname: two\n---\nBody").is_none());
     }
 
     #[test]

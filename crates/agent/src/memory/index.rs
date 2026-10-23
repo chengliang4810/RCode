@@ -59,7 +59,7 @@ fn fact_target(root: &Path, line: &str) -> Option<PathBuf> {
     if !closed {
         return None;
     }
-    let value: serde_yaml_ng::Value = serde_yaml_ng::from_str(&header).ok()?;
+    let value: yaml_serde::Value = yaml_serde::from_str(&header).ok()?;
     if !matches!(value.get("type")?.as_str()?, "project" | "reference") {
         return None;
     }

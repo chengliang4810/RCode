@@ -326,16 +326,16 @@ fn read_definition(path: &Path, source: DefinitionSource) -> Option<SubagentDefi
         return None;
     };
     let (frontmatter, body) = split_frontmatter(&text)?;
-    let parsed: serde_yaml_ng::Value = serde_yaml_ng::from_str(frontmatter).ok()?;
+    let parsed: yaml_serde::Value = yaml_serde::from_str(frontmatter).ok()?;
     let map = parsed.as_mapping()?;
 
     let string = |key: &str| -> Option<String> {
-        map.get(serde_yaml_ng::Value::String(key.to_owned()))
+        map.get(yaml_serde::Value::String(key.to_owned()))
             .and_then(|value| value.as_str())
             .map(str::to_owned)
     };
     let names = |key: &str| -> Vec<String> {
-        map.get(serde_yaml_ng::Value::String(key.to_owned()))
+        map.get(yaml_serde::Value::String(key.to_owned()))
             .and_then(|value| value.as_sequence())
             .map(|items| {
                 items
@@ -632,6 +632,26 @@ mod tests {
         assert_eq!(found[0].tools, ["Read".to_owned(), "Bash".to_owned()]);
         assert_eq!(found[0].disallowed_tools, ["Write".to_owned()]);
         assert_eq!(found[0].model, ModelAlias::Inherit);
+    }
+
+    #[test]
+    fn frontmatter_aliases_and_tags_keep_typed_subagent_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        write_definition(
+            dir.path(),
+            "reviewer.md",
+            "name: &name !agent reviewer\ndescription: *name\ntools: &tools [Read, 7, true, !tool Grep, '']\ndisallowedTools: *tools\nmodel: !model inherit\n",
+            "Review the changes.",
+        );
+        let found = discover_in(dir.path(), DefinitionSource::User);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].name, "reviewer");
+        assert_eq!(found[0].description, "reviewer");
+        assert_eq!(found[0].tools, ["Read", "Grep"]);
+        assert_eq!(found[0].disallowed_tools, ["Read", "Grep"]);
+        assert_eq!(found[0].model, ModelAlias::Inherit);
+        write_definition(dir.path(), "number.md", "name: 123\n", "Body.");
+        assert_eq!(discover_in(dir.path(), DefinitionSource::User).len(), 1);
     }
 
     #[test]
