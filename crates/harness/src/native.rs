@@ -705,6 +705,7 @@ impl Harness for NativeHarness {
             session_id: String::new(),
             assistant_message_id: String::new(),
             prompt_system: None,
+            request_diagnostics: None,
         };
         let client = host
             .client()
@@ -817,6 +818,7 @@ async fn one_shot_summary(
         session_id: String::new(),
         assistant_message_id: String::new(),
         prompt_system: None,
+        request_diagnostics: None,
     };
     let client = host
         .client()
@@ -1216,6 +1218,10 @@ impl NativeHarness {
                 None,
             ),
         };
+        let assistant_message_id = uuid::Uuid::new_v4().to_string();
+        let request_diagnostics = self.data_dir.as_deref().and_then(|root| {
+            crate::request_diagnostics::SessionTrace::open(root, &session_id, &assistant_message_id)
+        });
         let host = Arc::new(NativeHost {
             model: model.to_owned(),
             provider,
@@ -1224,8 +1230,9 @@ impl NativeHarness {
             cancellation: run_cancel.clone(),
             request_input,
             session_id,
-            assistant_message_id: uuid::Uuid::new_v4().to_string(),
+            assistant_message_id,
             prompt_system,
+            request_diagnostics,
         });
 
         let config = AgentConfig {
@@ -1303,6 +1310,9 @@ impl NativeHarness {
                         reason: rcode_agent::DoneReason::Failed(error.to_string()),
                     },
                 };
+                if let AgentLoopEvent::ModelCall { id, .. } = &event {
+                    if let Some(trace) = &host.request_diagnostics { trace.link_model_call(id); }
+                }
                 let mapped = map_run_event(
                     event,
                     harness,
@@ -1658,6 +1668,7 @@ fn thinking_budget_for(level: rcode_proto::ReasoningLevel, max_tokens: u32) -> O
 }
 
 pub(crate) struct NativeHost {
+    request_diagnostics: Option<Arc<crate::request_diagnostics::SessionTrace>>,
     prompt_system: Option<rcode_model::prompt_cache::SystemPrompt>,
     /// The model the run selected; the host's model client is built for it.
     model: String,
@@ -1724,6 +1735,7 @@ impl NativeHost {
             session_id: uuid::Uuid::new_v4().to_string(),
             assistant_message_id: uuid::Uuid::new_v4().to_string(),
             prompt_system: None,
+            request_diagnostics: None,
         }
     }
 
@@ -1837,8 +1849,11 @@ impl NativeHost {
         // One outer budget covers connection failures and mid-output recovery;
         // disable nested retries so eleven requests cannot multiply into 121.
         let retry = rcode_model::RetryConfig::default();
-        let runtime = rcode_model::ModelRuntimeConfig::default()
+        let mut runtime = rcode_model::ModelRuntimeConfig::default()
             .with_retry(retry.clone().with_max_attempts(1));
+        if let Some(trace) = &self.request_diagnostics {
+            runtime = runtime.with_diagnostics_observer(trace.begin(if coding { "conversation" } else { "goal_verification" }));
+        }
         let client = Arc::new(self.client_with_runtime(runtime)?);
         let open: crate::native_recovery::StreamFactory = Arc::new(move |request, cancellation| {
             let client = client.clone();
@@ -2377,6 +2392,7 @@ mod tests {
             session_id: "test-session".into(),
             assistant_message_id: "test-assistant".into(),
             prompt_system: None,
+            request_diagnostics: None,
         }
     }
 

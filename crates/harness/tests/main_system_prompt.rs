@@ -17,6 +17,9 @@ use tokio::net::TcpListener;
 #[path = "support/context_reminders.rs"]
 mod context_reminders;
 
+#[path = "support/request_diagnostics.rs"]
+mod request_diagnostics;
+
 fn config(protocol: Protocol, endpoint: &str) -> ProvidersConfig {
     serde_json::from_value(json!({
         "providers": [{
