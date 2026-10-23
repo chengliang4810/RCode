@@ -2545,12 +2545,12 @@ pub(crate) fn subagent_doc_id(chat_id: &str, tool_use_id: &str) -> String {
     format!("{chat_id}--sub--{hex}")
 }
 
-/// Test-only instrumentation: how often `drive_run`'s coalesced commit branch
-/// fires. The sink-dirty regression test proves the branch ticks once per
-/// commit window instead of spinning on a deadline left in the past.
-/// Thread-local so parallel tests' runs can't bleed into the count: the
-/// test's current-thread runtime runs its spawned `drive_run` on its own
-/// thread.
+// Test-only instrumentation: how often `drive_run`'s coalesced commit branch
+// fires. The sink-dirty regression test proves the branch ticks once per
+// commit window instead of spinning on a deadline left in the past.
+// Thread-local so parallel tests' runs can't bleed into the count: the
+// test's current-thread runtime runs its spawned `drive_run` on its own
+// thread.
 #[cfg(test)]
 thread_local! {
     static FLUSH_TICKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
