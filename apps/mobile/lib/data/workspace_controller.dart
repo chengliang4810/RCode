@@ -200,7 +200,25 @@ class WorkspaceController extends ChangeNotifier {
 
     watch('WatchDevices', (value) => devices = jsonMaps(value));
     watch('WatchSpaces', (value) => spaces = jsonMaps(value));
-    watch('WatchChats', (value) => chats = jsonMaps(value));
+    watch('WatchChats', (value) {
+      final next = jsonMaps(value);
+      final retained = next.map((row) => row['id']).toSet();
+      final removed = chats
+          .map((row) => row['id'])
+          .whereType<String>()
+          .where((id) => !retained.contains(id))
+          .toList();
+      chats = next;
+      for (final id in removed) {
+        unawaited(
+          _removeDeletedSession(
+            id,
+            cacheScope,
+            generation,
+          ).catchError((Object _) {}),
+        );
+      }
+    });
     watch('WatchSessions', (value) => sessions = jsonMaps(value));
     watch(
       'WatchSidebarPreferences',
@@ -395,8 +413,25 @@ class WorkspaceController extends ChangeNotifier {
       mutate({'op': 'renameChat', 'chatId': id, 'title': title});
   Future<void> archiveChat(String id, bool archived) =>
       mutate({'op': 'setChatArchived', 'chatId': id, 'archived': archived});
-  Future<void> deleteChat(String id) =>
-      mutate({'op': 'deleteChat', 'chatId': id});
+  Future<void> deleteChat(String id) async {
+    final scope = cacheScope;
+    final generation = _generation;
+    await mutate({'op': 'deleteChat', 'chatId': id});
+    await _removeDeletedSession(id, scope, generation);
+  }
+
+  Future<void> _removeDeletedSession(
+    String id,
+    String scope,
+    int generation,
+  ) async {
+    if (generation == _generation) {
+      final session = _sessionControllers[id];
+      if (session != null) _removeSession(session);
+    }
+    if (cacheEnabled) await sessionCache.remove(scope, id);
+  }
+
   Future<void> changeSidebar(JsonMap change) =>
       mutate({'op': 'changeSidebarPin', 'change': change});
   Future<void> markSeen(String id) =>

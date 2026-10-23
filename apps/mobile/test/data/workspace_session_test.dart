@@ -120,6 +120,9 @@ class EngineFixture {
               } else if (params['op'] == 'setChatConfig') {
                 chats.first['config'] = params['config'];
                 publish('WatchChats');
+              } else if (params['op'] == 'deleteChat') {
+                chats.removeWhere((row) => row['id'] == params['chatId']);
+                publish('WatchChats');
               }
             case 'RelayCommand':
               relayCalls++;

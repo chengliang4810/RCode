@@ -19,6 +19,79 @@ void main() {
     if (await directory.exists()) await directory.delete(recursive: true);
   });
 
+  test(
+    'global disk budget evicts least recently used snapshots across hosts',
+    () async {
+      var now = DateTime.utc(2026, 1, 1);
+      final cache = FileSessionCache(
+        directoryProvider: () async => directory,
+        maximumBytes: 512,
+        maximumEntries: 2,
+        now: () => now,
+      );
+      await cache.open('host-a', 'old').write({'text': 'a' * 100});
+      now = now.add(const Duration(minutes: 1));
+      await cache.open('host-b', 'other').write({'text': 'b' * 100});
+      now = now.add(const Duration(minutes: 1));
+      expect(await cache.open('host-a', 'old').read(), isNotNull);
+      now = now.add(const Duration(minutes: 1));
+      await cache.open('host-a', 'new').write({'text': 'c' * 100});
+      expect(await cache.open('host-b', 'other').read(), isNull);
+      expect(await cache.open('host-a', 'old').read(), isNotNull);
+      expect(await cache.open('host-a', 'new').read(), isNotNull);
+      var bytes = 0;
+      var files = 0;
+      await for (final entry in directory.list(recursive: true)) {
+        if (entry is File) {
+          bytes += await entry.length();
+          files++;
+        }
+      }
+      expect(bytes, lessThanOrEqualTo(512));
+      expect(files, lessThanOrEqualTo(2));
+      now = now.add(const Duration(days: 31));
+      expect(await cache.open('host-a', 'new').read(), isNull);
+      expect(
+        await directory
+            .list(recursive: true)
+            .where((entry) => entry is File)
+            .toList(),
+        isEmpty,
+      );
+    },
+  );
+
+  test('deleting one chat revokes in-flight and old writers but preserves its siblings', () async {
+    final began = Completer<void>();
+    final release = Completer<void>();
+    var encodings = 0;
+    final cache = FileSessionCache(
+      directoryProvider: () async => directory,
+      encoder: (state) async {
+        if (++encodings == 2) {
+          began.complete();
+          await release.future;
+        }
+        return jsonEncode(state);
+      },
+    );
+    await cache.open('host', 'sibling').write({'text': 'keep'});
+    final removed = cache.open('host', 'deleted');
+    final writing = removed.write({'text': 'private'});
+    await began.future;
+    final deleting = cache.remove('host', 'deleted');
+    release.complete();
+    await Future.wait([writing, deleting]);
+    await removed.write({'text': 'must not return'});
+    expect(await cache.open('host', 'deleted').read(), isNull);
+    expect((await cache.open('host', 'sibling').read())!['text'], 'keep');
+    await cache.open('host', 'deleted').write({'text': 'new generation'});
+    expect(
+      (await cache.open('host', 'deleted').read())!['text'],
+      'new generation',
+    );
+  });
+
   test('full private snapshots survive restart and separate host and chat identities', () async {
     FileSessionCache cache() =>
         FileSessionCache(directoryProvider: () async => directory);

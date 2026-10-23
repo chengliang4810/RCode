@@ -9,6 +9,7 @@ import 'rpc_client.dart' show JsonMap;
 
 abstract interface class SessionCache {
   SessionCacheEntry open(String scope, String chatId);
+  Future<void> remove(String scope, String chatId);
   Future<void> clearHost(String scope);
 }
 
@@ -29,12 +30,24 @@ class FileSessionCache implements SessionCache {
   FileSessionCache({
     Future<Directory> Function()? directoryProvider,
     Future<String> Function(JsonMap)? encoder,
+    this.maximumBytes = 128 * 1024 * 1024,
+    this.maximumEntries = 128,
+    this.maximumAge = const Duration(days: 30),
+    DateTime Function()? now,
   }) : _directoryProvider = directoryProvider ?? _defaultDirectory,
-       _encoder = encoder ?? ((state) => compute(_encode, state));
+       _encoder = encoder ?? ((state) => compute(_encode, state)),
+       _now = now ?? DateTime.now,
+       assert(maximumBytes >= 0),
+       assert(maximumEntries >= 0),
+       assert(!maximumAge.isNegative);
 
   final Future<Directory> Function() _directoryProvider;
   final Future<String> Function(JsonMap) _encoder;
+  final int maximumBytes, maximumEntries;
+  final Duration maximumAge;
+  final DateTime Function() _now;
   final Map<String, int> _epochs = {};
+  final Map<(String, String), int> _entryEpochs = {};
   Future<Directory>? _directory;
   Future<void> _operations = Future.value();
 
@@ -56,8 +69,59 @@ class FileSessionCache implements SessionCache {
   }
 
   @override
-  SessionCacheEntry open(String scope, String chatId) =>
-      _FileEntry(this, scope, chatId, _epochs[scope] ?? 0);
+  SessionCacheEntry open(String scope, String chatId) => _FileEntry(
+    this,
+    scope,
+    chatId,
+    _epochs[scope] ?? 0,
+    _entryEpochs[(scope, chatId)] ?? 0,
+  );
+
+  @override
+  Future<void> remove(String scope, String chatId) {
+    _entryEpochs.update(
+      (scope, chatId),
+      (epoch) => epoch + 1,
+      ifAbsent: () => 1,
+    );
+    return _serial(() async {
+      final directory = await _host(scope);
+      final file = File('${directory.path}/${_hash(chatId)}.json');
+      for (final candidate in [file, File('${file.path}.tmp')]) {
+        if (await candidate.exists()) await candidate.delete();
+      }
+    });
+  }
+
+  Future<void> _prune() async {
+    final root = await (_directory ??= _directoryProvider());
+    if (!await root.exists()) return;
+    final files = <({File file, FileStat stat})>[];
+    var bytes = 0;
+    final expiredBefore = _now().subtract(maximumAge);
+    await for (final entity in root.list(recursive: true, followLinks: false)) {
+      if (entity is! File || !entity.path.endsWith('.json')) continue;
+      final stat = await entity.stat();
+      if (stat.type != FileSystemEntityType.file) continue;
+      if (stat.modified.isBefore(expiredBefore)) {
+        await entity.delete();
+        continue;
+      }
+      files.add((file: entity, stat: stat));
+      bytes += stat.size;
+    }
+    files.sort((a, b) {
+      final age = a.stat.modified.compareTo(b.stat.modified);
+      return age == 0 ? a.file.path.compareTo(b.file.path) : age;
+    });
+    var count = files.length;
+    for (final entry in files) {
+      if (bytes <= maximumBytes && count <= maximumEntries) break;
+      await entry.file.delete();
+      bytes -= entry.stat.size;
+      count--;
+    }
+  }
 
   @override
   Future<void> clearHost(String scope) {
@@ -70,17 +134,20 @@ class FileSessionCache implements SessionCache {
 }
 
 class _FileEntry implements SessionCacheEntry {
-  _FileEntry(this.cache, this.scope, this.chatId, this.epoch);
+  _FileEntry(this.cache, this.scope, this.chatId, this.epoch, this.entryEpoch);
   final FileSessionCache cache;
   final String scope, chatId;
-  final int epoch;
-  bool get valid => epoch == (cache._epochs[scope] ?? 0);
+  final int epoch, entryEpoch;
+  bool get valid =>
+      epoch == (cache._epochs[scope] ?? 0) &&
+      entryEpoch == (cache._entryEpochs[(scope, chatId)] ?? 0);
   Future<File> _file() async =>
       File('${(await cache._host(scope)).path}/${cache._hash(chatId)}.json');
 
   @override
   Future<JsonMap?> read() => cache._serial(() async {
     if (!valid) return null;
+    await cache._prune();
     final file = await _file();
     if (!await file.exists()) return null;
     try {
@@ -92,6 +159,8 @@ class _FileEntry implements SessionCacheEntry {
         return null;
       }
       final state = envelope?['state'];
+      await file.setLastModified(cache._now());
+      if (!valid) return null;
       return state is Map ? Map<String, dynamic>.from(state) : null;
     } on FormatException {
       return null;
@@ -118,5 +187,7 @@ class _FileEntry implements SessionCacheEntry {
       return;
     }
     await temporary.rename(file.path);
+    await file.setLastModified(cache._now());
+    await cache._prune();
   });
 }

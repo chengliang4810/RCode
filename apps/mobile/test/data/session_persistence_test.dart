@@ -19,6 +19,8 @@ class _DelayedCache implements SessionCache, SessionCacheEntry {
   Future<void> write(JsonMap state) async => writes.add(state);
   @override
   Future<void> clearHost(String scope) async {}
+  @override
+  Future<void> remove(String scope, String chatId) async {}
 }
 
 WorkspaceController _workspace(fixture.MemoryStore store, SessionCache cache) =>
@@ -30,6 +32,40 @@ WorkspaceController _workspace(fixture.MemoryStore store, SessionCache cache) =>
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
+
+  test('local and remote chat deletion retire controllers and their disk snapshots', () async {
+    SharedPreferences.setMockInitialValues({});
+    final directory = await Directory.systemTemp.createTemp(
+      'rcode-deleted-session-',
+    );
+    final cache = FileSessionCache(directoryProvider: () async => directory);
+    final server = fixture.EngineFixture('delete-server');
+    await server.start();
+    final model = _workspace(fixture.MemoryStore(), cache);
+    addTearDown(() async {
+      model.dispose();
+      await server.close();
+      await cache.open('barrier', 'barrier').read();
+      await directory.delete(recursive: true);
+    });
+    await model.connect(server.url, 'FixtureKey12');
+    await model.call('Mutate', {'op': 'createChat', 'chatId': 'local-delete'});
+    await model.call('Mutate', {'op': 'createChat', 'chatId': 'remote-delete'});
+    final local = model.retainSession('local-delete');
+    final remote = model.retainSession('remote-delete');
+    await fixture.until(() => local.hydrated && remote.hydrated);
+    await model.flushCaches();
+    final scope = model.cacheScope;
+    expect(await cache.open(scope, 'local-delete').read(), isNotNull);
+    expect(await cache.open(scope, 'remote-delete').read(), isNotNull);
+    await model.deleteChat('local-delete');
+    expect(local.disposed, isTrue);
+    expect(await cache.open(scope, 'local-delete').read(), isNull);
+    server.chats.removeWhere((row) => row['id'] == 'remote-delete');
+    server.publish('WatchChats');
+    await fixture.until(() => remote.disposed);
+    expect(await cache.open(scope, 'remote-delete').read(), isNull);
+  });
 
   test('closing a running view keeps its final reply available after an offline restart', () async {
     SharedPreferences.setMockInitialValues({});
