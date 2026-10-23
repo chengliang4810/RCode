@@ -637,9 +637,11 @@ mod tests {
     use std::collections::BTreeSet;
     use std::path::{Path, PathBuf};
 
+    #[cfg(not(windows))]
+    use super::alternates_value;
     use super::{
         MAX_UNTRACKED_BYTES, MAX_UNTRACKED_FILE_BYTES, MAX_UNTRACKED_FILES, STORE_DIR,
-        TreeSnapshot, alternates_value, remove_other_runs, run_id, snapshot_tree,
+        TreeSnapshot, remove_other_runs, run_id, snapshot_tree,
     };
     use crate::repos::Repos;
 
