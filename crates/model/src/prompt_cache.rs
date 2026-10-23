@@ -3,6 +3,14 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Registration and MCP discovery order must not change the provider's tool prefix.
+/// Sort references so caller-owned registries and complete tool definitions stay intact.
+pub(crate) fn ordered_tools(tools: &[crate::ToolDefinition]) -> Vec<&crate::ToolDefinition> {
+    let mut ordered: Vec<_> = tools.iter().collect();
+    ordered.sort_by(|left, right| left.name.cmp(&right.name));
+    ordered
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum SystemPromptCacheMode {

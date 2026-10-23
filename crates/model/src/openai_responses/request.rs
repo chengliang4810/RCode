@@ -64,7 +64,12 @@ pub(super) fn build_request(
     }
 
     if !request.tools.is_empty() {
-        body["tools"] = Value::Array(request.tools.iter().map(tool_to_responses).collect());
+        body["tools"] = Value::Array(
+            crate::prompt_cache::ordered_tools(&request.tools)
+                .into_iter()
+                .map(tool_to_responses)
+                .collect(),
+        );
         body["tool_choice"] = json!("auto");
     }
     if let Some(effort) = &config.reasoning_effort {

@@ -134,11 +134,18 @@ pub(super) fn decode_usage(value: &Value) -> Option<TokenUsage> {
         .and_then(|details| details.get("cached_tokens"))
         .and_then(Value::as_u64)
         .or_else(|| value.get("prompt_cache_hit_tokens").and_then(Value::as_u64))
+        .or_else(|| value.get("cache_read_input_tokens").and_then(Value::as_u64))
+        .or_else(|| value.get("cached_tokens").and_then(Value::as_u64))
+        .and_then(|tokens| tokens.try_into().ok());
+    // Chat Completions prompt_tokens already includes these cache subsets.
+    let cache_creation_input_tokens = value
+        .get("cache_creation_input_tokens")
+        .and_then(Value::as_u64)
         .and_then(|tokens| tokens.try_into().ok());
     Some(TokenUsage {
         input_tokens,
         output_tokens,
-        cache_creation_input_tokens: None,
+        cache_creation_input_tokens,
         cache_read_input_tokens,
     })
 }
@@ -152,6 +159,43 @@ mod statistics_tests {
             "prompt_cache_hit_tokens": 800, "prompt_cache_miss_tokens": 200 })).unwrap();
         assert_eq!(usage.input_tokens, 1000);
         assert_eq!(usage.cache_read_input_tokens, Some(800));
+    }
+
+    #[test]
+    fn statistics_gateway_cache_buckets_preserve_totals_and_unknowns() {
+        for name in ["prompt_cache_hit_tokens", "cache_read_input_tokens", "cached_tokens"] {
+            let mut raw = serde_json::json!({
+                "prompt_tokens": 1000, "completion_tokens": 100,
+                "cache_creation_input_tokens": 100,
+            });
+            raw[name] = serde_json::json!(800);
+            let usage = decode_usage(&raw).unwrap();
+            assert_eq!(usage.input_tokens, 1000);
+            assert_eq!(usage.cache_read_input_tokens, Some(800));
+            assert_eq!(usage.cache_creation_input_tokens, Some(100));
+        }
+        let missing = decode_usage(&serde_json::json!({
+            "prompt_tokens": 1000, "completion_tokens": 100,
+        })).unwrap();
+        assert_eq!(missing.cache_read_input_tokens, None);
+        assert_eq!(missing.cache_creation_input_tokens, None);
+    }
+
+    #[test]
+    fn statistics_standard_cache_details_take_precedence_over_gateway_aliases() {
+        // This combination occurs in live gateway usage: aliases are zero placeholders.
+        let raw = serde_json::json!({
+            "prompt_tokens": 15685, "completion_tokens": 14,
+            "prompt_tokens_details": {"cached_tokens": 15488},
+            "prompt_cache_hit_tokens": 15488, "cache_read_input_tokens": 0,
+            "cached_tokens": 0, "cache_creation_input_tokens": 0,
+        });
+        let usage = decode_usage(&raw).unwrap();
+        assert_eq!(usage.input_tokens, 15685);
+        assert_eq!(usage.cache_read_input_tokens, Some(15488));
+        let mut zero = raw;
+        zero["prompt_tokens_details"]["cached_tokens"] = serde_json::json!(0);
+        assert_eq!(decode_usage(&zero).unwrap().cache_read_input_tokens, Some(0));
     }
 }
 

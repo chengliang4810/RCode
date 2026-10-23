@@ -97,7 +97,12 @@ pub(super) fn build_request(
         }
     }
     if !request.tools.is_empty() {
-        body["tools"] = Value::Array(request.tools.iter().map(tool_to_anthropic).collect());
+        body["tools"] = Value::Array(
+            crate::prompt_cache::ordered_tools(&request.tools)
+                .into_iter()
+                .map(tool_to_anthropic)
+                .collect(),
+        );
     }
     if let Some(temperature) = request.temperature {
         body["temperature"] = json!(temperature);

@@ -58,7 +58,12 @@ pub(super) fn build_request(
         body["stream_options"] = json!({ "include_usage": true });
     }
     if !request.tools.is_empty() {
-        body["tools"] = Value::Array(request.tools.iter().map(tool_to_openai).collect());
+        body["tools"] = Value::Array(
+            crate::prompt_cache::ordered_tools(&request.tools)
+                .into_iter()
+                .map(tool_to_openai)
+                .collect(),
+        );
         body["tool_choice"] = json!("auto");
     }
     if let Some(reasoning_effort) = &config.reasoning_effort {
