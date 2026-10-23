@@ -54,6 +54,9 @@ struct AgentTask {
     tool_use_id: String,
     live_output: Arc<Mutex<String>>,
     output_file: Option<std::path::PathBuf>,
+    /// Temporary agent output belongs to the task; process logs belong to the
+    /// registry and must survive task eviction and desktop shutdown.
+    remove_output_on_drop: bool,
     cwd: std::path::PathBuf,
     status: &'static str,
     output: String,
@@ -68,7 +71,7 @@ struct AgentTask {
 
 impl Drop for AgentTask {
     fn drop(&mut self) {
-        if let Some(path) = &self.output_file {
+        if self.remove_output_on_drop && let Some(path) = &self.output_file {
             let _ = std::fs::remove_file(path);
         }
     }
@@ -692,6 +695,7 @@ impl Tool for AgentManagementTool {
                                 .unwrap_or_default(),
                             live_output: Arc::default(),
                             output_file: Some(output_file),
+                            remove_output_on_drop: true,
                             cwd: ctx.cwd.clone(),
                             status: "running",
                             output: String::new(),
@@ -958,6 +962,7 @@ impl Tool for ManagedShell {
                         .unwrap_or_default(),
                     live_output: live_output.clone(),
                     output_file: Some(path.clone()),
+                    remove_output_on_drop: !persistent,
                     cwd: ctx.cwd.clone(),
                     status: "running",
                     output: String::new(),
@@ -1094,7 +1099,7 @@ mod cancellation_tests {
         store.tasks.lock().unwrap().insert("held".into(), AgentTask {
             id: "held".into(), description: "stalled cleanup".into(), definition: None,
             background: false, tool_use_id: String::new(), live_output: Arc::default(),
-            output_file: None, cwd: std::env::temp_dir(), status: "running", output: String::new(),
+            output_file: None, remove_output_on_drop: true, cwd: std::env::temp_dir(), status: "running", output: String::new(),
             error: None, history: Vec::new(), inbox: Arc::default(), cancel: task_cancel.clone(),
             started_at: std::time::Instant::now(), generation: 1, notified: 0,
         });

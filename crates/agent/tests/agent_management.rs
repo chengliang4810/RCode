@@ -82,6 +82,37 @@ async fn start(tools: &ToolRegistry, ctx: &ToolContext, background: bool) -> Val
 }
 
 #[tokio::test]
+async fn persistent_command_output_survives_task_store_drop_and_registry_reopen() {
+    let dir = tempfile::tempdir().unwrap();
+    let registry = Arc::new(rcode_agent::processes::ProcessRegistry::open(Some(dir.path())));
+    let store = Arc::new(AgentTaskStore::with_processes("chat".into(), registry.clone()));
+    let released = Arc::downgrade(&store);
+    let manager = Arc::new(AgentTasks::new(store.clone(), Arc::new(Runtime::default())));
+    let mut tools = ToolRegistry::new();
+    tools.register(Arc::new(rcode_agent::tools::BashTool));
+    tools.set_managed_agents(manager.clone());
+    let ctx = ToolContext { cwd: dir.path().into(), cancel: CancellationToken::new(), nested: None };
+    let result = tools.call("Bash", json!({"command":"echo persistent-marker","auto_background":false}), &ctx).await.unwrap();
+    assert!(!result.is_error, "{}", result.output);
+    let tasks = call(&tools, "TaskList", json!({}), &ctx).await;
+    let id = tasks["tasks"][0]["task_id"].as_str().unwrap().to_owned();
+    let path = std::path::PathBuf::from(tasks["tasks"][0]["output_file"].as_str().unwrap());
+    drop(tools);
+    drop(manager);
+    drop(store);
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while released.upgrade().is_some() { tokio::task::yield_now().await; }
+    }).await.expect("finished task retained its store");
+    assert!(path.exists());
+    assert!(registry.read_output("chat", &id).unwrap()["output"].as_str().unwrap().contains("persistent-marker"));
+    drop(registry);
+    let reopened = rcode_agent::processes::ProcessRegistry::open(Some(dir.path()));
+    let output = reopened.read_output("chat", &id).unwrap();
+    assert_eq!(output["status"], "completed");
+    assert!(output["output"].as_str().unwrap().contains("persistent-marker"));
+}
+
+#[tokio::test]
 async fn sidebar_stop_suppresses_background_model_notifications() {
     let dir = tempfile::tempdir().unwrap();
     let processes = Arc::new(rcode_agent::processes::ProcessRegistry::open(Some(dir.path())));
