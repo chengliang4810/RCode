@@ -24,6 +24,11 @@ class TranscriptMarkdown extends StatelessWidget {
   Widget build(BuildContext context) {
     final c = context.colors;
     return MarkdownBody(
+      key: ValueKey((
+        preferences.renderMath,
+        preferences.mathFont,
+        preferences.mathSize,
+      )),
       data: text,
       selectable: true,
       imageBuilder: imageBuilder,
