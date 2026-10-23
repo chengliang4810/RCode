@@ -1,15 +1,13 @@
-//! Attachments (ARCHITECTURE.md/§1.8): the composer's staged images,
+//! Attachments: the composer's staged images,
 //! the chunked upload to the chat's host device, the plain-text attachment-ref
 //! transport that rides the prompt, the transcript read-back cache, and the
 //! full-size preview lightbox.
 //!
-//! Ports of the original app's `composer/use-attachments.ts` (staging/upload),
-//! `control/message-attachments.ts` (the `withAttachments` /
-//! `parseUserMessageImages` text transport — attachment refs are embedded in
-//! the user message's plain text, which is exactly what persists in the doc),
-//! and `lib/transcript-attachment-cache.ts` (decoded-image cache keyed by
-//! `(deviceId, path)`, seeded locally after a send so own bubbles never
-//! round-trip).
+//! Attachment refs are embedded in the user message's plain text, which is
+//! exactly what persists in the doc. The decoded-image cache is keyed by
+//! `(deviceId, path)` and seeded locally after a send so own bubbles never
+//! round-trip. See `with_attachments`, `parse_user_message_images` and
+//! `ImageCache` below for the current transport and cache contracts.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -453,7 +451,7 @@ pub fn stage_png_bytes(name: String, bytes: Vec<u8>) -> StagedAttachment {
 }
 
 // ---------------------------------------------------------------------------
-// Upload (state.ts uploadAttachment) + read-back (state.ts readAttachmentImage)
+// Chunked upload and attachment read-back
 // ---------------------------------------------------------------------------
 
 fn with_target(mut params: serde_json::Value, target_device_id: Option<&str>) -> serde_json::Value {
@@ -794,7 +792,7 @@ fn image_decode_limits() -> image::Limits {
 }
 
 // ---------------------------------------------------------------------------
-// Transcript image cache (transcript-attachment-cache.ts)
+// Transcript image cache
 // ---------------------------------------------------------------------------
 
 /// A decoded transcript image, ready for `img(...)`.
