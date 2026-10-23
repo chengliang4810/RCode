@@ -17,7 +17,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StateMutex};
 
 use rmcp::ServiceExt;
 use rmcp::model::{CallToolRequestParams, CallToolResult, ContentBlock};
@@ -61,9 +61,8 @@ impl McpToolInfo {
 /// A live connection, or why there is none.
 enum Connection {
     Live(Arc<RunningService<RoleClient, ()>>),
-    /// The last attempt failed. The reason travels on the server's `problem`
-    /// so the settings page can show it; the next call retries.
-    Failed,
+    /// The current failure, cleared only when a fresh connection succeeds.
+    Failed(String),
 }
 
 /// Every configured server, and the tools each one advertises.
@@ -79,14 +78,16 @@ pub struct McpClient {
 struct ServerState {
     config: McpServer,
     cwd: Option<PathBuf>,
-    connection: Mutex<Connection>,
+    /// Held only for in-memory state access, never during I/O or an await.
+    /// Synchronous reports therefore do not wait for a call or reconnect.
+    connection: StateMutex<Connection>,
     /// Single-flight reconnects without holding the connection state lock.
     reconnect: Mutex<()>,
     /// The tools listed at startup, so a call can be routed without asking the
     /// server which endpoint it belongs to.
     tools: Vec<McpToolInfo>,
-    /// Why the server did not start (or listed no tools).
-    problem: Option<String>,
+    /// A startup failure needs a new catalog snapshot before tools can appear.
+    startup_failed: bool,
 }
 
 impl McpClient {
@@ -112,7 +113,7 @@ impl McpClient {
         for config in servers {
             if let Some(state) = previous.as_ref().and_then(|client| {
                 client.servers.iter().find(|state| {
-                    state.config == config && state.cwd == cwd && state.problem.is_none()
+                    state.config == config && state.cwd == cwd && !state.startup_failed
                 })
             }) {
                 states.push(state.clone());
@@ -122,31 +123,31 @@ impl McpClient {
                 states.push(Arc::new(ServerState {
                     config,
                     cwd: cwd.clone(),
-                    connection: Mutex::new(Connection::Failed),
+                    connection: StateMutex::new(Connection::Failed("switched off".to_owned())),
                     reconnect: Mutex::new(()),
                     tools: Vec::new(),
-                    problem: Some("switched off".to_owned()),
+                    startup_failed: true,
                 }));
                 continue;
             }
-            let (connection, listed, problem) = match open(&config, cwd.as_deref()).await {
-                Ok((service, listed)) => (Connection::Live(Arc::new(service)), listed, None),
+            let (connection, listed, startup_failed) = match open(&config, cwd.as_deref()).await {
+                Ok((service, listed)) => (Connection::Live(Arc::new(service)), listed, false),
                 Err(error) => {
                     tracing::warn!(
                         server = %config.name,
                         %error,
                         "an MCP server did not start; its tools are unavailable"
                     );
-                    (Connection::Failed, Vec::new(), Some(error))
+                    (Connection::Failed(error), Vec::new(), true)
                 }
             };
             states.push(Arc::new(ServerState {
                 config,
                 cwd: cwd.clone(),
-                connection: Mutex::new(connection),
+                connection: StateMutex::new(connection),
                 reconnect: Mutex::new(()),
                 tools: listed,
-                problem,
+                startup_failed,
             }));
         }
 
@@ -210,7 +211,9 @@ impl McpClient {
     }
 
     pub(crate) fn has_startup_failures(&self) -> bool {
-        self.servers.iter().any(|state| state.config.enabled && state.problem.is_some())
+        self.servers
+            .iter()
+            .any(|state| state.config.enabled && state.startup_failed)
     }
 
     /// Initialize instructions from currently connected servers. Read per run
@@ -218,9 +221,11 @@ impl McpClient {
     pub async fn instructions(&self) -> Option<String> {
         let mut sections = Vec::new();
         for state in &self.servers {
-            let connection = state.connection.lock().await;
-            if let Connection::Live(service) = &*connection {
-                if let Some(text) = service.peer_info().and_then(|info| info.instructions.clone()) {
+            if let Some(service) = state.live_service() {
+                if let Some(text) = service
+                    .peer_info()
+                    .and_then(|info| info.instructions.clone())
+                {
                     let text: String = text.chars().take(16_384).collect();
                     if !text.trim().is_empty() {
                         sections.push(format!("## {}\n\n{text}", state.config.name));
@@ -236,22 +241,25 @@ impl McpClient {
         self.servers
             .iter()
             .enumerate()
-            .map(|(index, state)| ServerReport {
-                name: state.config.name.clone(),
-                source: state.config.source,
-                transport: state.config.transport.describe(),
-                enabled: state.config.enabled,
-                connected: state.problem.is_none(),
-                problem: state.problem.clone().or_else(|| {
-                    self.catalog_problems
-                        .get(&index)
-                        .map(|problems| problems.join("\n"))
-                }),
-                tool_count: self
-                    .routes
-                    .values()
-                    .filter(|(owner, _)| *owner == index)
-                    .count(),
+            .map(|(index, state)| {
+                let (connected, problem) = state.health();
+                let mut problems: Vec<String> = problem.into_iter().collect();
+                if let Some(catalog_problems) = self.catalog_problems.get(&index) {
+                    problems.extend(catalog_problems.iter().cloned());
+                }
+                ServerReport {
+                    name: state.config.name.clone(),
+                    source: state.config.source,
+                    transport: state.config.transport.describe(),
+                    enabled: state.config.enabled,
+                    connected,
+                    problem: (!problems.is_empty()).then(|| problems.join("\n")),
+                    tool_count: self
+                        .routes
+                        .values()
+                        .filter(|(owner, _)| *owner == index)
+                        .count(),
+                }
             })
             .collect()
     }
@@ -295,9 +303,20 @@ impl McpClient {
         let state = &self.servers[server_index];
         let service = tokio::select! {
             biased;
-            _ = cancel.cancelled() => return Err("cancelled before the MCP call was sent".into()),
+            _ = cancel.cancelled() => {
+                let error = "cancelled before the MCP call was sent".to_owned();
+                state.record_reconnect_problem(&error);
+                return Err(error);
+            },
             result = tokio::time::timeout(CONNECT_TIMEOUT, state.service()) => {
-                result.map_err(|_| "MCP reconnection timed out after 30 seconds".to_owned())??
+                match result {
+                    Ok(result) => result?,
+                    Err(_) => {
+                        let error = "MCP reconnection timed out after 30 seconds".to_owned();
+                        state.record_reconnect_problem(&error);
+                        return Err(error);
+                    }
+                }
             }
         };
         // A slow tool must not block other calls or a new run's instructions.
@@ -314,11 +333,14 @@ impl McpClient {
         match result {
             Ok(result) => Ok(result),
             Err(error) => {
-                let mut connection = state.connection.lock().await;
+                let mut connection = state
+                    .connection
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner());
                 if matches!(&*connection, Connection::Live(current) if Arc::ptr_eq(current, &service))
                 {
                     service.cancellation_token().cancel();
-                    *connection = Connection::Failed;
+                    *connection = Connection::Failed(error.clone());
                 }
                 Err(format!(
                     "MCP tool `{wire_name}` failed; its outcome may be unknown and the call was not retried: {error}"
@@ -336,18 +358,62 @@ impl McpClient {
 }
 
 impl ServerState {
+    fn health(&self) -> (bool, Option<String>) {
+        let connection = self
+            .connection
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        match &*connection {
+            Connection::Live(service) if !service.is_closed() => (true, None),
+            Connection::Live(_) => (false, Some("MCP connection is closed".to_owned())),
+            Connection::Failed(error) => (false, Some(error.clone())),
+        }
+    }
+
+    fn live_service(&self) -> Option<Arc<RunningService<RoleClient, ()>>> {
+        let connection = self
+            .connection
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        match &*connection {
+            Connection::Live(service) if !service.is_closed() => Some(service.clone()),
+            _ => None,
+        }
+    }
+
+    fn record_reconnect_problem(&self, error: &str) {
+        let mut connection = self
+            .connection
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        // A caller cancelled while waiting for another reconnect must not
+        // retire the healthy connection that the other caller just created.
+        if !matches!(&*connection, Connection::Live(service) if !service.is_closed()) {
+            *connection = Connection::Failed(error.to_owned());
+        }
+    }
+
     async fn service(&self) -> Result<Arc<RunningService<RoleClient, ()>>, String> {
-        if let Connection::Live(service) = &*self.connection.lock().await {
-            return Ok(service.clone());
+        if let Some(service) = self.live_service() {
+            return Ok(service);
         }
         let _reconnect = self.reconnect.lock().await;
         // Another caller may have reconnected while this one was waiting.
-        if let Connection::Live(service) = &*self.connection.lock().await {
-            return Ok(service.clone());
+        if let Some(service) = self.live_service() {
+            return Ok(service);
         }
-        let (service, _) = open(&self.config, self.cwd.as_deref()).await?;
+        let (service, _) = match open(&self.config, self.cwd.as_deref()).await {
+            Ok(result) => result,
+            Err(error) => {
+                self.record_reconnect_problem(&error);
+                return Err(error);
+            }
+        };
         let service = Arc::new(service);
-        *self.connection.lock().await = Connection::Live(service.clone());
+        *self
+            .connection
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Connection::Live(service.clone());
         Ok(service)
     }
 }
@@ -627,6 +693,14 @@ mod tests {
                 "{error}"
             );
             assert!(error.contains("not retried"));
+            let report = &client.servers()[0];
+            assert!(!report.connected, "{report:?}");
+            assert!(
+                report.problem.as_deref().is_some_and(|problem| {
+                    problem.contains(if cancelled { "cancelled" } else { "timed out" })
+                }),
+                "{report:?}"
+            );
             assert_eq!(std::fs::read_to_string(&marker).unwrap().lines().count(), 1);
             // A new explicit call reconnects, rather than keeping a hung peer.
             let second = tokio::time::timeout(
@@ -637,6 +711,9 @@ mod tests {
             .unwrap()
             .unwrap();
             assert!(result_text(&second).contains("\"count\": 2"));
+            let report = &client.servers()[0];
+            assert!(report.connected, "{report:?}");
+            assert!(report.problem.is_none(), "{report:?}");
             assert_eq!(std::fs::read_to_string(&marker).unwrap().lines().count(), 2);
         }
     }

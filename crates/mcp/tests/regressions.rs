@@ -375,6 +375,17 @@ async fn a_slow_tool_does_not_block_another_runs_instructions() {
         .expect("tool call held the connection lock")
         .unwrap();
     assert!(instructions.contains("slow"));
+    let report = {
+        let client = client.clone();
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            tokio::task::spawn_blocking(move || client.servers()),
+        )
+        .await
+        .expect("a slow call blocked server reports")
+        .unwrap()
+    };
+    assert!(report[0].connected, "{report:?}");
     std::fs::write(release, "release").unwrap();
     assert!(pending.await.unwrap().is_ok());
 }
@@ -390,8 +401,12 @@ async fn no_replay(mode: &str) {
     );
     let pool = McpClientPool::default();
     let client = acquire(&pool, project.path(), root.path()).await;
+    assert!(client.servers()[0].connected);
     let error = call(&client).await.unwrap_err();
     assert!(error.contains("not retried"), "{error}");
+    let report = &client.servers()[0];
+    assert!(!report.connected, "{report:?}");
+    assert!(report.problem.is_some(), "{report:?}");
     assert_eq!(
         lines(&marker),
         1,
@@ -405,6 +420,9 @@ async fn no_replay(mode: &str) {
     // This is a new explicit public call. It may reconnect and execute once.
     let result = call(&client).await.unwrap();
     assert_eq!(result["count"], 2);
+    let report = &client.servers()[0];
+    assert!(report.connected, "{report:?}");
+    assert!(report.problem.is_none(), "{report:?}");
     assert_eq!(lines(&marker), 2);
     assert_eq!(lines(&starts), 2);
 }
@@ -417,4 +435,128 @@ async fn an_rpc_error_after_commit_is_not_automatically_replayed() {
 #[tokio::test]
 async fn a_disconnect_after_commit_is_not_automatically_replayed() {
     no_replay("disconnect_once").await;
+}
+
+#[tokio::test]
+async fn failed_reconnect_updates_health_and_successful_reconnect_clears_the_error() {
+    let root = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let script = root.path().join("server.py");
+    let marker = root.path().join("effects");
+    let source = include_str!("snapshot_server.py");
+    std::fs::write(&script, source).unwrap();
+    write_config(
+        root.path(),
+        &configuration(&script, "health", Some(&marker), "error_once", None),
+    );
+    let client = acquire(&McpClientPool::default(), project.path(), root.path()).await;
+    assert!(
+        call(&client)
+            .await
+            .unwrap_err()
+            .contains("Action committed")
+    );
+    let first_problem = client.servers()[0].problem.clone().unwrap();
+    std::fs::write(
+        &script,
+        "raise SystemExit('reconnect fixture unavailable')\n",
+    )
+    .unwrap();
+    assert!(call(&client).await.is_err());
+    let report = &client.servers()[0];
+    assert!(!report.connected, "{report:?}");
+    assert!(report.problem.is_some(), "{report:?}");
+    assert_ne!(
+        report.problem.as_ref().unwrap(),
+        &first_problem,
+        "report must show the latest failure"
+    );
+    std::fs::write(&script, source).unwrap();
+    assert_eq!(call(&client).await.unwrap()["count"], 2);
+    let report = &client.servers()[0];
+    assert!(report.connected, "{report:?}");
+    assert!(report.problem.is_none(), "{report:?}");
+    assert_eq!(
+        lines(&marker),
+        2,
+        "a reconnect failure must not execute the tool"
+    );
+}
+
+#[tokio::test]
+async fn reports_remain_responsive_during_reconnect_and_show_its_cancellation() {
+    let root = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let script = root.path().join("server.py");
+    let marker = root.path().join("effects");
+    let starts = root.path().join("starts");
+    let source = include_str!("snapshot_server.py");
+    std::fs::write(&script, source).unwrap();
+    write_config(
+        root.path(),
+        &configuration(
+            &script,
+            "health",
+            Some(&marker),
+            "error_once",
+            Some(&starts),
+        ),
+    );
+    let client = acquire(&McpClientPool::default(), project.path(), root.path()).await;
+    assert!(call(&client).await.is_err());
+    std::fs::write(
+        &script,
+        source.replace("if mode == \"held_initialize\":", "if True:"),
+    )
+    .unwrap();
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let pending = {
+        let client = client.clone();
+        let cancel = cancel.clone();
+        tokio::spawn(async move {
+            client
+                .call_with_cancel("mcp__fixture__record", None, &cancel)
+                .await
+        })
+    };
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while lines(&starts) < 2 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("reconnect did not start");
+    let report = {
+        let client = client.clone();
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            tokio::task::spawn_blocking(move || client.servers()),
+        )
+        .await
+        .expect("reconnect blocked server reports")
+        .unwrap()
+    };
+    assert!(!report[0].connected, "{report:?}");
+    cancel.cancel();
+    assert!(
+        tokio::time::timeout(Duration::from_secs(3), pending)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap_err()
+            .contains("cancelled before")
+    );
+    let report = &client.servers()[0];
+    assert!(!report.connected, "{report:?}");
+    assert!(
+        report
+            .problem
+            .as_deref()
+            .unwrap()
+            .contains("cancelled before")
+    );
+    std::fs::write(&script, source).unwrap();
+    assert_eq!(call(&client).await.unwrap()["count"], 2);
+    assert!(client.servers()[0].connected);
+    assert!(client.servers()[0].problem.is_none());
 }
