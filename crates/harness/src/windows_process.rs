@@ -8,9 +8,7 @@ use windows_sys::Win32::System::JobObjects::{
 };
 use windows_sys::Win32::System::Threading::{
     DeleteProcThreadAttributeList, InitializeProcThreadAttributeList, LPPROC_THREAD_ATTRIBUTE_LIST,
-    PROC_THREAD_ATTRIBUTE_HANDLE_LIST, PROC_THREAD_ATTRIBUTE_JOB_LIST,
-    PROC_THREAD_ATTRIBUTE_PARENT_PROCESS, PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE,
-    UpdateProcThreadAttribute,
+    PROC_THREAD_ATTRIBUTE_JOB_LIST, PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, UpdateProcThreadAttribute,
 };
 
 /// Owns a session's entire process tree, including descendants of exited parents.
@@ -26,33 +24,6 @@ pub struct Attributes<'a> {
     _values: std::marker::PhantomData<&'a [std::os::windows::io::RawHandle]>,
 }
 impl<'a> Attributes<'a> {
-    pub(crate) fn for_job(jobs: &'a [std::os::windows::io::RawHandle]) -> io::Result<Self> {
-        let mut attrs = Self::new(1)?;
-        attrs.add(
-            PROC_THREAD_ATTRIBUTE_JOB_LIST,
-            jobs.as_ptr().cast(),
-            std::mem::size_of_val(jobs),
-        )?;
-        Ok(attrs)
-    }
-    pub(crate) fn for_parent(
-        parent: &'a [std::os::windows::io::RawHandle; 1],
-        handles: &'a [std::os::windows::io::RawHandle],
-    ) -> io::Result<Self> {
-        let mut attrs = Self::new(2)?;
-        attrs.add(
-            PROC_THREAD_ATTRIBUTE_PARENT_PROCESS,
-            parent.as_ptr().cast(),
-            std::mem::size_of_val(parent),
-        )?;
-        attrs.add(
-            PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
-            handles.as_ptr().cast(),
-            std::mem::size_of_val(handles),
-        )?;
-        Ok(attrs)
-    }
-
     /// Borrow a live pseudoconsole and job list through process creation.
     pub fn for_console(
         console: &'a HPCON,
