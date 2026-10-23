@@ -150,7 +150,7 @@ chrono = { version = "0.4", features = ["serde"] }
 sha2 = "0.10"
 zip = { version = "9.0.5", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 notify = "7"
-portable-pty = "0.8"
+portable-pty = "0.9"
 alacritty_terminal = "0.26"
 pulldown-cmark = "0.12"
 unicode-segmentation = "1"

@@ -981,12 +981,17 @@ mod windows_tests {
         std::fs::create_dir(&cwd).expect("Unicode cwd");
         let terminals = Terminals::new();
         let shell = powershell();
+        let environment = std::collections::HashMap::from([(
+            "RCODE_PTY_UPGRADE".to_owned(),
+            "env-雪".to_owned(),
+        )]);
         let session = terminals
-            .open_with_shell(
+            .open_with_shell_and_environment(
                 &cwd.to_string_lossy(),
                 80,
                 24,
                 Some(&shell.to_string_lossy()),
+                &environment,
             )
             .expect("open PowerShell in ConPTY");
         assert_eq!(session.cwd, cwd.to_string_lossy());
@@ -997,12 +1002,14 @@ mod windows_tests {
         write_line(
             &terminals,
             &session.id,
-            "[Console]::OutputEncoding = [Text.UTF8Encoding]::new(); [Console]::WriteLine(('UNICODE:{0}{1}' -f [char]0x96EA,[char]0x2603)); [Console]::WriteLine(('CWD:{0}' -f (Split-Path -Leaf (Get-Location))))",
+            "[Console]::OutputEncoding = [Text.UTF8Encoding]::new(); [Console]::WriteLine(('UNICODE:{0}{1}' -f [char]0x96EA,[char]0x2603)); [Console]::WriteLine(('CWD:{0}' -f (Split-Path -Leaf (Get-Location)))); [Console]::WriteLine(('ENV:{0}' -f $env:RCODE_PTY_UPGRADE))",
         );
         let mut first_events = Vec::new();
         collect_until(&mut live, &mut first_events, |events| {
             let output = decoded(events);
-            output.contains("UNICODE:雪☃") && output.contains("CWD:conpty-cwd-雪")
+            output.contains("UNICODE:雪☃")
+                && output.contains("CWD:conpty-cwd-雪")
+                && output.contains("ENV:env-雪")
         })
         .await;
 
@@ -1033,6 +1040,7 @@ mod windows_tests {
             let output = decoded(events);
             output.contains("UNICODE:雪☃")
                 && output.contains("CWD:conpty-cwd-雪")
+                && output.contains("ENV:env-雪")
                 && output.contains("SIZE:111x37")
         })
         .await;
@@ -1194,6 +1202,68 @@ mod windows_tests {
 mod initial_command_tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+
+    #[tokio::test]
+    async fn bare_shell_uses_path_and_explicit_relative_shell_uses_cwd() {
+        let root = tempfile::tempdir().unwrap();
+        let bin = root.path().join("bin");
+        let cwd = root.path().join("cwd");
+        std::fs::create_dir(&bin).unwrap();
+        std::fs::create_dir(&cwd).unwrap();
+        for (directory, marker) in [(&bin, "PATH_SHELL"), (&cwd, "CWD_SHELL")] {
+            let shell = directory.join("rcode-test-shell");
+            std::fs::write(
+                &shell,
+                format!("#!/bin/sh\nprintf '{marker}\\n'\nexit 17\n"),
+            )
+            .unwrap();
+            std::fs::set_permissions(&shell, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let environment = HashMap::from([("PATH".to_owned(), bin.to_string_lossy().into_owned())]);
+        let terminals = Terminals::new();
+        for (shell, expected, unexpected) in [
+            ("rcode-test-shell", "PATH_SHELL", "CWD_SHELL"),
+            ("./rcode-test-shell", "CWD_SHELL", "PATH_SHELL"),
+        ] {
+            let session = terminals
+                .open_with_shell_and_environment(
+                    cwd.to_str().unwrap(),
+                    80,
+                    24,
+                    Some(shell),
+                    &environment,
+                )
+                .unwrap();
+            let mut rx = terminals.subscribe(&session.id, None).unwrap();
+            let (output, exit_code) = tokio::time::timeout(Duration::from_secs(10), async {
+                let mut output = Vec::new();
+                let mut exit_code = None;
+                while let Some(event) = rx.recv().await {
+                    match event {
+                        TerminalEvent::Data { data, .. } => {
+                            output.extend(BASE64.decode(data).unwrap())
+                        }
+                        TerminalEvent::Exit {
+                            exit_code: code, ..
+                        } => exit_code = Some(code),
+                    }
+                }
+                (String::from_utf8(output).unwrap(), exit_code)
+            })
+            .await
+            .expect("resolved shell exited");
+            assert!(
+                output.contains(expected),
+                "wrong shell for {shell}: {output:?}"
+            );
+            assert!(
+                !output.contains(unexpected),
+                "wrong shell for {shell}: {output:?}"
+            );
+            assert_eq!(exit_code, Some(17));
+            terminals.close(&session.id).unwrap();
+        }
+    }
 
     #[tokio::test]
     async fn long_command_survives_delayed_shell_startup_and_script_is_cleaned_up() {
