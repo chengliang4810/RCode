@@ -63,6 +63,45 @@ def verify_mac(path, arch, version):
             raise ValueError(f"App binary is not executable in {path.name}")
 
 
+def verify_linux(path, arch, version):
+    prefix = f"rcode-{version}-linux-{arch}"
+    try:
+        with tarfile.open(path, "r:gz") as archive:
+            seen = set()
+            for member in archive.getmembers():
+                parts = member.name.split("/")
+                if (member.name in seen or parts[0] != prefix
+                        or any(part in ("", ".", "..") for part in parts)
+                        or not (member.isfile() or member.isdir())):
+                    raise ValueError(f"Unsafe or duplicate Linux package entry: {member.name}")
+                seen.add(member.name)
+
+            def required(name, executable=False):
+                member = archive.getmember(f"{prefix}/{name}")
+                if not member.isfile() or member.size == 0 or (executable and not member.mode & 0o111):
+                    raise ValueError(f"Invalid Linux package file: {name}")
+                return archive.extractfile(member)
+
+            with required("rcode", executable=True) as binary:
+                header = binary.read(64)
+            expected_machine = {"x86_64": 62, "aarch64": 183}[arch]
+            if (len(header) < 64 or header[:7] != b"\x7fELF\x02\x01\x01"
+                    or struct.unpack_from("<H", header, 16)[0] not in (2, 3)
+                    or struct.unpack_from("<H", header, 18)[0] != expected_machine):
+                raise ValueError(f"Wrong ELF architecture in {path.name}: expected {arch}")
+            with required("rcode-version") as marker:
+                if marker.read(256).decode("utf-8").strip() != version:
+                    raise ValueError(f"Wrong Linux package version in {path.name}")
+            for name in ("rcode.desktop", "rcode.png", *ROOT_NOTICES):
+                required(name).close()
+            required("install.sh", executable=True).close()
+            for name in FONT_LICENSES:
+                required(f"licenses/fonts/{name}").close()
+            required("licenses/icons/LICENSE.symbols").close()
+    except (tarfile.TarError, KeyError, UnicodeError) as error:
+        raise ValueError(f"Invalid Linux package {path.name}: {error}") from error
+
+
 def verify_windows(directory, version):
     exe = directory / f"rcode-{version}-windows-x86_64.exe"
     with exe.open("rb") as binary:
@@ -96,6 +135,8 @@ def prepare_release(directory, version, tag=None):
                if not (directory / name).is_file() or (directory / name).stat().st_size == 0]
     if missing:
         raise ValueError("Missing release artifacts: " + ", ".join(missing))
+    for arch in ["x86_64", "aarch64"]:
+        verify_linux(directory / f"rcode-{version}-linux-{arch}.tar.gz", arch, version)
     for arch in ["x86_64", "arm64"]:
         verify_mac(directory / f"rcode-{version}-macos-{arch}-app.tar.gz", arch, version)
     verify_windows(directory, version)

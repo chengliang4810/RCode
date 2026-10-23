@@ -28,9 +28,12 @@ else
   BIN="$ROOT/target/debug/rcode"
 fi
 
+[[ "$("$BIN" --version)" == "rcode $VERSION" ]] || { echo "Incorrect executable version or missing runtime dependency" >&2; exit 1; }
+
 rm -rf "$STAGE" "$TARBALL"
 mkdir -p "$STAGE"
 install -m 755 "$BIN" "$STAGE/rcode"
+printf '%s\n' "$VERSION" >"$STAGE/rcode-version"
 install -m 644 "$ROOT/dist/rcode.desktop" "$STAGE/rcode.desktop"
 install -m 644 "$ROOT/dist/rcode.png" "$STAGE/rcode.png"
 install -m 644 "$ROOT/LICENSE" "$ROOT/LICENSE-APACHE" "$ROOT/THIRD_PARTY_NOTICES.md" "$STAGE/"

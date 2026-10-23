@@ -24,6 +24,8 @@ class ReleasePackagingTests(unittest.TestCase):
         self.root = Path(self.temp.name)
         for name in release.required_assets(VERSION):
             (self.root / name).write_bytes(b"fixture")
+        self.linux("x86_64")
+        self.linux("aarch64")
         self.mac("x86_64")
         self.mac("arm64")
         binary = bytearray(256)
@@ -42,6 +44,25 @@ class ReleasePackagingTests(unittest.TestCase):
 
     def asset(self, suffix):
         return self.root / f"rcode-{VERSION}-{suffix}"
+
+    def linux(self, arch, machine=None, version=VERSION, omit=None, mode=0o755):
+        prefix = f"rcode-{VERSION}-linux-{arch}"
+        header = bytearray(64)
+        header[:7] = b"\x7fELF\x02\x01\x01"
+        struct.pack_into("<HH", header, 16, 3, machine or {"x86_64": 62, "aarch64": 183}[arch])
+        files = [("rcode", bytes(header), mode), ("rcode-version", version.encode(), 0o644),
+                 ("install.sh", b"#!/bin/sh\n", 0o755), ("rcode.desktop", b"desktop", 0o644),
+                 ("rcode.png", b"icon", 0o644)]
+        files += [(name, b"license", 0o644) for name in release.ROOT_NOTICES]
+        files += [(f"licenses/fonts/{name}", b"license", 0o644) for name in release.FONT_LICENSES]
+        files += [("licenses/icons/LICENSE.symbols", b"license", 0o644)]
+        with tarfile.open(self.asset(f"linux-{arch}.tar.gz"), "w:gz") as archive:
+            for name, data, permissions in files:
+                if name == omit:
+                    continue
+                info = tarfile.TarInfo(f"{prefix}/{name}")
+                info.size, info.mode = len(data), permissions
+                archive.addfile(info, io.BytesIO(data))
 
     def mac(self, arch, cpu=None, version=VERSION):
         cpu = cpu or {"x86_64": 0x01000007, "arm64": 0x0100000C}[arch]
@@ -90,6 +111,32 @@ class ReleasePackagingTests(unittest.TestCase):
         for tag in ["beta-0.0.1", "v0.0.2-beta"]:
             with self.subTest(tag=tag), self.assertRaisesRegex(ValueError, "must match Cargo.toml"):
                 release.prepare_release(self.root, VERSION, tag)
+
+    def test_linux_invalid_archive_is_rejected_without_manifest(self):
+        self.asset("linux-x86_64.tar.gz").write_bytes(b"not a valid archive")
+        with self.assertRaisesRegex(ValueError, "Invalid Linux package"):
+            release.prepare_release(self.root, VERSION)
+        self.assertFalse((self.root / "manifest.json").exists())
+
+    def test_linux_wrong_architecture_is_rejected(self):
+        self.linux("x86_64", machine=183)
+        with self.assertRaisesRegex(ValueError, "Wrong ELF architecture"):
+            release.prepare_release(self.root, VERSION)
+
+    def test_linux_wrong_version_is_rejected(self):
+        self.linux("aarch64", version="0.0.2-beta")
+        with self.assertRaisesRegex(ValueError, "Wrong Linux package version"):
+            release.prepare_release(self.root, VERSION)
+
+    def test_linux_required_layout_and_permissions(self):
+        for missing in ["install.sh", "licenses/fonts/OFL-FiraMath.txt", "rcode.desktop"]:
+            with self.subTest(missing=missing):
+                self.linux("x86_64", omit=missing)
+                with self.assertRaisesRegex(ValueError, "Invalid Linux package"):
+                    release.prepare_release(self.root, VERSION)
+        self.linux("x86_64", mode=0o644)
+        with self.assertRaisesRegex(ValueError, "Invalid Linux package file: rcode"):
+            release.prepare_release(self.root, VERSION)
 
     def test_wrong_mac_architecture_is_rejected(self):
         self.mac("x86_64", cpu=0x0100000C)
