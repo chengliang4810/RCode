@@ -111,6 +111,43 @@ class _NewSessionPageState extends State<NewSessionPage> {
     WidgetsBinding.instance.addPostFrameCallback((_) => _restoreImages());
   }
 
+  final _inputFocus = FocusNode();
+  Animation<double>? _routeAnimation;
+  bool _autofocused = false;
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final animation = ModalRoute.of(context)?.animation;
+    if (_routeAnimation != animation) {
+      _routeAnimation?.removeStatusListener(_focusAfterTransition);
+      _routeAnimation = animation;
+      animation?.addStatusListener(_focusAfterTransition);
+    }
+    if (animation == null || animation.status == AnimationStatus.completed) {
+      _focusAfterTransition(AnimationStatus.completed);
+    }
+  }
+
+  void _focusAfterTransition(AnimationStatus status) {
+    if (!widget.autofocus ||
+        _autofocused ||
+        status != AnimationStatus.completed) {
+      return;
+    }
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted ||
+          _autofocused ||
+          ModalRoute.of(context)?.isCurrent == false ||
+          (_routeAnimation != null &&
+              _routeAnimation!.status != AnimationStatus.completed)) {
+        return;
+      }
+      _autofocused = true;
+      (widget.focusNode ?? _inputFocus).requestFocus();
+    });
+  }
+
   void _workspaceChanged() {
     if (!mounted) return;
     final reconnected = widget.workspace.connected && !_wasConnected;
@@ -162,6 +199,8 @@ class _NewSessionPageState extends State<NewSessionPage> {
 
   @override
   void dispose() {
+    _routeAnimation?.removeStatusListener(_focusAfterTransition);
+    _inputFocus.dispose();
     _modelGeneration++;
     _draftTimer?.cancel();
     _persistDraft();
@@ -692,11 +731,12 @@ class _NewSessionPageState extends State<NewSessionPage> {
                     double.infinity,
                   ),
                 ),
-                child: IntrinsicHeight(
+                child: Align(
+                  alignment: const Alignment(0, -1 / 7),
                   child: Column(
+                    mainAxisSize: MainAxisSize.min,
                     crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
-                      const Spacer(flex: 3),
                       Icon(
                         Icons.auto_awesome_outlined,
                         color: colors.text,
@@ -780,8 +820,7 @@ class _NewSessionPageState extends State<NewSessionPage> {
                             TextField(
                               key: const Key('new-message'),
                               controller: _text,
-                              focusNode: widget.focusNode,
-                              autofocus: widget.autofocus,
+                              focusNode: widget.focusNode ?? _inputFocus,
                               readOnly: _locked,
                               minLines: 3,
                               maxLines: 9,
@@ -903,7 +942,6 @@ class _NewSessionPageState extends State<NewSessionPage> {
                             ],
                           ),
                         ),
-                      const Spacer(flex: 4),
                     ],
                   ),
                 ),
