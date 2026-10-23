@@ -32,6 +32,7 @@ pub fn faces(text: &str) -> Vec<(Range<usize>, Face)> {
     .collect()
 }
 
+#[cfg(test)]
 pub fn inline_code_ranges(text: &str) -> Vec<Range<usize>> {
     if text.len() > 128 * 1024 {
         return Vec::new();
