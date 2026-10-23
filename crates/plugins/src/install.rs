@@ -116,10 +116,35 @@ mod tests {
     fn uninstalling_an_absent_plugin_succeeds() {
         uninstall(tempfile::tempdir().unwrap().path(), "ghost").unwrap();
     }
+
+    #[test]
+    fn windows_path_aliases_cannot_remove_plugins_or_change_their_state() {
+        let config = tempfile::tempdir().unwrap();
+        let plugin = config.path().join(PLUGINS_DIR).join("kit");
+        std::fs::create_dir_all(&plugin).unwrap();
+        std::fs::write(plugin.join("keep"), b"plugin contents").unwrap();
+        set_enabled(config.path(), "kit", false).unwrap();
+        let before = std::fs::read(state_path(config.path())).unwrap();
+        for name in ["...", ".. ", "kit.", "kit ", ".", ".."] {
+            assert!(matches!(uninstall(config.path(), name), Err(InstallError::InvalidName)));
+            assert!(matches!(set_enabled(config.path(), name, true), Err(InstallError::InvalidName)));
+            assert_eq!(std::fs::read(plugin.join("keep")).unwrap(), b"plugin contents");
+            assert_eq!(std::fs::read(state_path(config.path())).unwrap(), before);
+        }
+    }
 }
 
 fn validate_name(name: &str) -> Result<(), InstallError> {
-    if name.is_empty() || name == "." || name == ".." || name.contains(['/', '\\', ':']) {
+    // Win32 trims trailing dots/spaces, so e.g. `...` aliases the plugins
+    // directory itself and `kit.` aliases a different plugin. Reject these on
+    // every platform so copied settings retain the same plugin identity.
+    if name.is_empty()
+        || name == "."
+        || name == ".."
+        || name.ends_with(['.', ' '])
+        || name.contains(['/', '\\', ':'])
+        || name.chars().any(char::is_control)
+    {
         return Err(InstallError::InvalidName);
     }
     Ok(())
