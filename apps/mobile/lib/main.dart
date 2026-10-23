@@ -36,6 +36,8 @@ class RCodeApp extends StatefulWidget {
 class _RCodeAppState extends State<RCodeApp> with WidgetsBindingObserver {
   final _shell = GlobalKey<WorkspaceShellState>();
   MobileNotifications? _notifications;
+  Object? _presentation;
+  Widget? _application;
   @override
   void initState() {
     super.initState();
@@ -72,35 +74,49 @@ class _RCodeAppState extends State<RCodeApp> with WidgetsBindingObserver {
   @override
   Widget build(BuildContext context) => ListenableBuilder(
     listenable: Listenable.merge([widget.preferences, widget.workspace]),
-    builder: (_, _) => MaterialApp(
-      key: ValueKey(
-        widget.workspace.authenticated
-            ? widget.workspace.cacheScope
-            : 'signedOut',
-      ),
-      title: 'RCode',
-      debugShowCheckedModeBanner: false,
-      theme: rcodeTheme(Brightness.light),
-      darkTheme: rcodeTheme(Brightness.dark),
-      themeMode: widget.preferences.themeMode,
-      locale: widget.preferences.language == 'system'
-          ? null
-          : Locale(widget.preferences.language),
-      supportedLocales: const [Locale('en'), Locale('zh')],
-      localizationsDelegates: GlobalMaterialLocalizations.delegates,
-      home: widget.workspace.authenticated
-          ? WorkspaceShell(
-              key: _shell,
-              workspace: widget.workspace,
-              preferences: widget.preferences,
-              sessionBuilder: (id) => SessionPage(
-                key: ValueKey('${widget.workspace.cacheScope}:$id'),
+    builder: (_, _) {
+      final presentation = (
+        widget.workspace,
+        widget.preferences,
+        widget.workspace.authenticated,
+        widget.workspace.host,
+        widget.preferences.themeMode,
+        widget.preferences.language,
+      );
+      if (presentation == _presentation && _application != null) {
+        return _application!;
+      }
+      _presentation = presentation;
+      return _application = MaterialApp(
+        key: ValueKey(
+          widget.workspace.authenticated
+              ? widget.workspace.cacheScope
+              : 'signedOut',
+        ),
+        title: 'RCode',
+        debugShowCheckedModeBanner: false,
+        theme: rcodeTheme(Brightness.light),
+        darkTheme: rcodeTheme(Brightness.dark),
+        themeMode: widget.preferences.themeMode,
+        locale: widget.preferences.language == 'system'
+            ? null
+            : Locale(widget.preferences.language),
+        supportedLocales: const [Locale('en'), Locale('zh')],
+        localizationsDelegates: GlobalMaterialLocalizations.delegates,
+        home: widget.workspace.authenticated
+            ? WorkspaceShell(
+                key: _shell,
                 workspace: widget.workspace,
-                chatId: id,
                 preferences: widget.preferences,
-              ),
-            )
-          : ConnectionPage(workspace: widget.workspace),
-    ),
+                sessionBuilder: (id) => SessionPage(
+                  key: ValueKey('${widget.workspace.cacheScope}:$id'),
+                  workspace: widget.workspace,
+                  chatId: id,
+                  preferences: widget.preferences,
+                ),
+              )
+            : ConnectionPage(workspace: widget.workspace),
+      );
+    },
   );
 }

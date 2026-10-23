@@ -99,7 +99,13 @@ const rcodeFontFallbacks = [
   'Microsoft YaHei',
 ];
 
-ThemeData rcodeTheme(Brightness brightness) {
+final _lightTheme = _buildTheme(Brightness.light);
+final _darkTheme = _buildTheme(Brightness.dark);
+
+ThemeData rcodeTheme(Brightness brightness) =>
+    brightness == Brightness.dark ? _darkTheme : _lightTheme;
+
+ThemeData _buildTheme(Brightness brightness) {
   final c = brightness == Brightness.dark
       ? RCodeColors.dark
       : RCodeColors.light;
