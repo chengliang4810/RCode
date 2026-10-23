@@ -16,6 +16,37 @@ async fn internal_context_metadata_and_rendered_content_survive_native_history()
     assert!(rcode_agent::context::next_record(&restored, snapshot).is_none());
 }
 
+#[tokio::test]
+async fn manual_compaction_restores_only_todos_from_excluded_groups() {
+    let dir = tempfile::tempdir().unwrap();
+    let recorder = Recorder::new(dir.path(), "excluded", "model");
+    let call = Message::assistant(vec![ContentBlock::tool_use("todo", "TodoWrite", serde_json::json!({
+        "todos":[{"text":"Validate the change","status":"in_progress"}]
+    })), ContentBlock::tool_use("read", "Read", serde_json::json!({"file_path":"large.log"}))]);
+    recorder.record(&call).await.unwrap();
+    recorder.record(&Message::tool_result("todo", "todo result", false)).await.unwrap();
+    recorder.record(&Message::tool_result("read", "EXCLUDED-TOOL-BODY", false)).await.unwrap();
+    let state = rcode_agent::todo::State::from_history(&[
+        call, Message::tool_result("todo", "todo result", false),
+        Message::tool_result("read", "EXCLUDED-TOOL-BODY", false),
+    ]);
+    let reminder = state.record("reminder");
+    recorder.record(&reminder).await.unwrap();
+    Recorder::new(dir.path(), "later", "model").record(&Message::assistant("More work")).await.unwrap();
+    let messages = crate::native::conversation_history(vec![rcode_proto::ConversationTurn {
+        role: "user".into(), text: "Visible compacted summary".into(), native_history_id: None,
+        todo_history_ids: vec!["excluded".into(), "later".into()],
+    }], Some(dir.path()), "model").await.unwrap();
+    let restored = rcode_agent::todo::State::from_history(&messages);
+    assert!(restored.unfinished());
+    assert_eq!(restored.turns_since_reminder, 1);
+    assert_eq!(restored.current.as_ref().unwrap().todos[0].text, "Validate the change");
+    assert!(messages.iter().all(|m| m.content.tool_calls().is_empty()));
+    assert!(!messages.iter().any(|m| m.content.text_content().contains("EXCLUDED-TOOL-BODY")));
+    let checkpoint = messages.iter().find(|m| m.context.is_some()).unwrap();
+    assert!(!checkpoint.is_user_input());
+}
+
 fn assistant() -> Message {
     Message::assistant(vec![
         ContentBlock::Reasoning {
@@ -137,6 +168,7 @@ async fn restored_groups_replace_display_summaries_once_and_legacy_text_survives
         role: role.into(),
         text: text.into(),
         native_history_id: group.map(str::to_owned),
+        todo_history_ids: Vec::new(),
     };
     let messages = crate::native::conversation_history(
         vec![

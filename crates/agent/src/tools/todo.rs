@@ -1,12 +1,7 @@
 //! `TodoWrite` — the agent's own task list.
 //!
-//! The list is **stateless on this side**: the tool takes the whole list and
-//! returns a rendered view of it, and the agent carries the state in the
-//! conversation. That is deliberate rather than a shortcut — a list owned by
-//! the tool would need somewhere to live (a file? the session doc?), and every
-//! one of those choices makes the list outlive the task that created it. The
-//! conversation is already the agent's memory; putting the list there keeps one
-//! source of truth and lets the user see it in the transcript.
+//! Successful calls in execution history own the list. Internal checkpoints
+//! retain that state across compaction; the tool owns no separate mutable list.
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
@@ -15,7 +10,7 @@ use crate::tool::{Tool, ToolContext, ToolError, ToolResult};
 
 /// Tasks accepted in one call. A longer list is a sign the model is not
 /// actually tracking work, just dumping it.
-const MAX_ITEMS: usize = 100;
+use crate::todo::{TodoStatus, Update};
 
 pub struct TodoWriteTool;
 
@@ -28,13 +23,27 @@ impl Tool for TodoWriteTool {
     fn description(&self) -> &str {
         "Record or update your task list. Send the whole list every time — it \
          replaces the previous one, so include items you have not finished. \
-         Use it for work with several steps; skip it for a single action."
+         Use it for work with several steps; skip it for a single action. Update \
+         status as work progresses and immediately after completion. Before ending, \
+         complete the remaining work, or preserve unfinished statuses and provide \
+         resolution={kind:blocked|cancelled|scope_changed,reason:<specific reason>}. \
+         Explain that resolution to the user. Never mark unfinished work completed."
     }
 
     fn input_schema(&self) -> Value {
         json!({
             "type": "object",
             "properties": {
+                "resolution": {
+                    "type": "object",
+                    "description": "Explicitly explain why remaining work cannot continue. Applies to this full list only; omit on a later update to resume normal completion checks. Does not complete a session goal.",
+                    "properties": {
+                        "kind": {"type":"string", "enum":["blocked","cancelled","scope_changed"]},
+                        "reason": {"type":"string", "minLength":1}
+                    },
+                    "required": ["kind", "reason"],
+                    "additionalProperties": false
+                },
                 "todos": {
                     "type": "array",
                     "description": "The complete list, in the order you intend to work.",
@@ -60,44 +69,17 @@ impl Tool for TodoWriteTool {
     }
 
     async fn call(&self, input: Value, _ctx: &ToolContext) -> Result<ToolResult, ToolError> {
-        let items = input
-            .get("todos")
-            .and_then(Value::as_array)
-            .ok_or_else(|| {
-                ToolError::InvalidInput("`todos` is required and must be an array".to_owned())
-            })?;
-        if items.len() > MAX_ITEMS {
-            return Err(ToolError::InvalidInput(format!(
-                "{} items is more than the {MAX_ITEMS} this tool accepts; a list that long is \
-                 not tracking work",
-                items.len()
-            )));
-        }
+        let update = Update::parse(input)?;
+        let items = &update.todos;
 
         let mut rendered = String::new();
         let mut counts = (0usize, 0usize, 0usize);
         for item in items {
-            let text = item
-                .get("text")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|text| !text.is_empty())
-                .ok_or_else(|| {
-                    ToolError::InvalidInput("every item needs a non-empty `text`".to_owned())
-                })?;
-            let status = item
-                .get("status")
-                .and_then(Value::as_str)
-                .ok_or_else(|| ToolError::InvalidInput(format!("`{text}` needs a `status`")))?;
-            let (mark, slot) = match status {
-                "completed" => ("[x]", 0),
-                "in_progress" => ("[~]", 1),
-                "pending" => ("[ ]", 2),
-                other => {
-                    return Err(ToolError::InvalidInput(format!(
-                        "`{other}` is not a status; use pending, in_progress or completed"
-                    )));
-                }
+            let text = item.text.trim();
+            let (mark, slot) = match item.status {
+                TodoStatus::Completed => ("[x]", 0),
+                TodoStatus::InProgress => ("[~]", 1),
+                TodoStatus::Pending => ("[ ]", 2),
             };
             match slot {
                 0 => counts.0 += 1,
@@ -116,6 +98,10 @@ impl Tool for TodoWriteTool {
             // is the one shape that makes the list useless, so say so.
             rendered.push_str("\n(note: more than one item is in_progress)\n");
         }
+        if let Some(resolution) = &update.resolution {
+            use std::fmt::Write as _;
+            let _ = writeln!(rendered, "\nUnfinished work ({:?}): {}. Preserve its status and explain this to the user; it does not complete a session goal.", resolution.kind, resolution.reason);
+        }
         Ok(ToolResult::ok(format!(
             "{} done, {} in progress, {} pending:\n{rendered}",
             counts.0, counts.1, counts.2
@@ -126,6 +112,7 @@ impl Tool for TodoWriteTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::todo::MAX_ITEMS;
     use tokio_util::sync::CancellationToken;
 
     fn context() -> ToolContext {
@@ -174,7 +161,7 @@ mod tests {
             )
             .await
             .expect_err("bad status");
-        assert!(error.to_string().contains("not a status"));
+        assert!(error.to_string().contains("nearly"));
     }
 
     #[tokio::test]
@@ -195,7 +182,7 @@ mod tests {
             .call(json!({ "todos": items }), &context())
             .await
             .expect_err("too many");
-        assert!(error.to_string().contains("more than"));
+        assert!(error.to_string().contains("at most"));
     }
 
     #[tokio::test]

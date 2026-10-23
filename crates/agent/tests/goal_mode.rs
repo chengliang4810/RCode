@@ -106,6 +106,8 @@ impl AgentHost for Host {
         &self,
         messages: &[Message],
     ) -> Result<BoxStream<'static, Result<ReasoningChunk, AgentError>>, AgentError> {
+        let evidence: serde_json::Value = serde_json::from_str(&messages[1].content.text_content()).unwrap();
+        assert!(evidence.get("currentTodos").is_some(), "verifier must receive explicit current checklist state");
         assert!(
             messages[0]
                 .content
@@ -354,6 +356,64 @@ async fn unfinished_todos_prevent_goal_completion_even_if_verifier_passes() {
     ));
     assert_eq!(store.read().unwrap().unwrap().iteration, 2);
     assert_eq!(host.calls.load(Ordering::SeqCst), 4);
+}
+
+#[tokio::test]
+async fn unfinished_todo_with_explicit_blocker_pauses_instead_of_completing_goal() {
+    let store = Store::active();
+    let mut host = host(&[], &[]);
+    *Arc::get_mut(&mut host).unwrap().replies.lock().unwrap() = VecDeque::from([
+        Message::assistant(vec![rcode_agent::ContentBlock::tool_use("blocked", "TodoWrite", serde_json::json!({
+            "todos":[{"text":"Validate in staging", "status":"pending"}],
+            "resolution":{"kind":"blocked", "reason":"Staging credentials are unavailable"}
+        }))]),
+        Message::assistant("Validation is blocked because staging credentials are unavailable"),
+    ]);
+    let mut tools = ToolRegistry::new();
+    tools.register(Arc::new(rcode_agent::tools::TodoWriteTool));
+    let events: Vec<_> = Arc::new(AgentRunner::new(host.clone(), Arc::new(tools), AgentConfig::default())
+        .with_goal(Some(store.clone())))
+        .run("Implement and validate".into(), CancellationToken::new()).collect().await;
+    assert!(events.iter().all(Result::is_ok));
+    let goal = store.read().unwrap().unwrap();
+    assert_eq!(goal.status, GoalStatus::Paused);
+    assert!(goal.reason.unwrap().contains("Staging credentials are unavailable"));
+    assert_eq!(host.checks.load(Ordering::SeqCst), 0);
+    assert_eq!(host.calls.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn compacted_todos_still_block_a_false_goal_pass_without_duplicate_ordinary_steering() {
+    let store = Store::active();
+    let mut history = vec![Message::user("Implement and validate"),
+        Message::assistant(vec![rcode_agent::ContentBlock::tool_use("old", "TodoWrite", serde_json::json!({
+            "todos":[{"text":"Run validation", "status":"pending"}]
+        }))]), Message::tool_result("old", "ok", false)];
+    history.extend((0..6).map(|_| Message::assistant("Working")));
+    let compacted = rcode_agent::compact::full_compact(history, &rcode_agent::CompactConfig {
+        context_window: 100_000, keep_recent_turns: 2, ..Default::default()
+    }, |_| async { Ok("The assistant claimed everything was completed".into()) }).await.unwrap();
+    let mut host = host(&[], &[r#"{"passed":true,"reason":"claimed complete"}"#,
+        r#"{"passed":true,"reason":"validation recorded"}"#]);
+    *Arc::get_mut(&mut host).unwrap().replies.lock().unwrap() = VecDeque::from([
+        Message::assistant("Ready"),
+        Message::assistant(vec![rcode_agent::ContentBlock::tool_use("finish", "TodoWrite", serde_json::json!({
+            "todos":[{"text":"Run validation", "status":"completed"}]
+        }))]), Message::assistant("Validated"),
+    ]);
+    let mut tools = ToolRegistry::new();
+    tools.register(Arc::new(rcode_agent::tools::TodoWriteTool));
+    let sink = Arc::new(Mutex::new(Vec::new()));
+    let events: Vec<_> = Arc::new(AgentRunner::new(host.clone(), Arc::new(tools), AgentConfig {
+        history: compacted.messages, max_steps: Some(10), ..Default::default()
+    }).with_goal(Some(store.clone())).with_history_sink(sink.clone()))
+        .run("Continue".into(), CancellationToken::new()).collect().await;
+    assert!(events.iter().all(Result::is_ok));
+    assert_eq!(store.read().unwrap().unwrap().status, GoalStatus::Complete);
+    assert_eq!(host.checks.load(Ordering::SeqCst), 2);
+    assert_eq!(host.calls.load(Ordering::SeqCst), 3);
+    assert!(!sink.lock().unwrap().iter().any(|m| m.context.as_ref().is_some_and(|c|
+        c.domain == rcode_agent::context::Domain::Todo && c.upsert.get("kind").is_some_and(|kind| kind == "closure"))));
 }
 
 #[tokio::test]

@@ -396,6 +396,13 @@ impl AgentRunner {
                 self.refresh_context(&mut messages, cancel).await?;
             }
 
+            let todos = crate::todo::State::from_history(&messages);
+            if self.tools.get("TodoWrite").is_some() && todos.reminder_due() {
+                let reminder = todos.record("reminder");
+                self.record_message(&reminder).await?;
+                messages.push(reminder);
+                self.remember_history(&messages);
+            }
             let reasoned = self.reason(&messages, cancel, tx).await;
             // A cancelled provider may finish with EOF or an error rather than
             // a final message. Cancellation owns the terminal outcome either
@@ -439,6 +446,7 @@ impl AgentRunner {
                     let _ = tx.send(Ok(AgentEvent::Done { reason: DoneReason::Complete })).await;
                     return Ok(());
                 }
+                let todos = crate::todo::State::from_history(&messages);
                 if let Some(goal) = self.active_goal()? {
                     if self.goal.as_ref().expect("active goal has store").should_yield().map_err(AgentError::Host)? {
                         self.remember_history(&messages);
@@ -449,19 +457,32 @@ impl AgentRunner {
                     // An edit during the model/tool step is first sent to the next
                     // reasoning call. Do not verify its objective using an old answer.
                     if applied_goal_revision != Some(goal.revision) { continue; }
+                    // 明确记录阻塞并不意味着目标完成；暂停并保留原待办，避免无进展续跑。
+                    if let Some(resolution) = todos.resolution() {
+                        let changed = self.goal.as_ref().expect("active goal has store").change_if_current(
+                            &goal.id, Some(goal.revision), crate::goal::GoalChange::Pause {
+                                reason: format!("Unfinished todos ({:?}): {}", resolution.kind, resolution.reason),
+                            },
+                        ).map_err(AgentError::Host)?;
+                        if changed.is_none() && self.active_goal()?.is_some() { continue; }
+                        self.remember_history(&messages);
+                        self.fire_stop_hook(None).await;
+                        let _ = tx.send(Ok(AgentEvent::Done { reason: DoneReason::Complete })).await;
+                        return Ok(());
+                    }
                     let verification = self.verify_goal(&messages, &goal, cancel, tx).await;
                     if cancel.is_cancelled() { return Err(AgentError::Cancelled); }
                     // Stop, pause or replacement during the verification wins.
                     if self.active_goal()?.is_some() {
                         let store = self.goal.as_ref().expect("active goal has store");
                         match verification {
-                            Ok(verification) if verification.passed && !unfinished_todos(&messages) => {
+                            Ok(verification) if verification.passed && !todos.unfinished() => {
                                 let changed = store.change_if_current(&goal.id, Some(goal.revision), crate::goal::GoalChange::Complete { reason: verification.reason }).map_err(AgentError::Host)?;
                                 if changed.is_none() && self.active_goal()?.is_some() { continue; }
                             }
                             Ok(verification) => {
-                                let next = if unfinished_todos(&messages) {
-                                    "Complete or explicitly resolve the remaining todo items before concluding.".to_owned()
+                                let next = if todos.unfinished() {
+                                    format!("Complete the remaining todos before concluding. If genuinely blocked, cancelled, or out of scope, record a TodoWrite resolution with a specific reason and explain it; the goal will pause.\n{}", todos.render())
                                 } else { verification.next_action.unwrap_or_default() };
                                 let changed = store.change_if_current(&goal.id, Some(goal.revision), crate::goal::GoalChange::Advance { reason: verification.reason }).map_err(AgentError::Host)?;
                                 if changed.is_none() { continue; }
@@ -484,6 +505,13 @@ impl AgentRunner {
                             }
                         }
                     }
+                } else if todos.unfinished() && todos.resolution().is_none() && self.tools.get("TodoWrite").is_some() {
+                    // 普通结束与目标续跑互斥，不能分别注入提醒并启动两次执行。
+                    let reminder = todos.record("closure");
+                    self.record_message(&reminder).await?;
+                    messages.push(reminder);
+                    self.remember_history(&messages);
+                    continue;
                 }
                 if cancel.is_cancelled() { return Err(AgentError::Cancelled); }
                 self.remember_history(&messages);
@@ -530,7 +558,8 @@ impl AgentRunner {
         cancel: &CancellationToken,
         tx: &mpsc::Sender<Result<AgentEvent, AgentError>>,
     ) -> Result<crate::goal::GoalVerification, AgentError> {
-        let evidence = serde_json::to_string(&serde_json::json!({"goal":goal,"transcript":messages}))
+        let todos = crate::todo::State::from_history(messages);
+        let evidence = serde_json::to_string(&serde_json::json!({"goal":goal,"currentTodos":todos.current,"transcript":messages}))
             .map_err(|error| AgentError::Host(error.to_string()))?;
         let request = [Message::system(crate::goal::VERIFICATION_PROMPT), Message::user(evidence)];
         let started = std::time::Instant::now();
@@ -845,7 +874,7 @@ impl AgentRunner {
         let prompt = messages
             .iter()
             .rev()
-            .find(|message| message.role == crate::message::MessageRole::User)
+            .find(|message| message.is_user_input())
             .and_then(|message| {
                 let text = message.content.text_content();
                 (!text.is_empty()).then_some(text)
@@ -1060,18 +1089,6 @@ fn render_answers(questions: &serde_json::Value, answers: &serde_json::Value) ->
         return format!("The user answered, in a form this tool could not read: {answers}");
     }
     lines.join("\n")
-}
-
-fn unfinished_todos(messages: &[Message]) -> bool {
-    let succeeded: std::collections::HashSet<_> = messages.iter().flat_map(|message| message.content.content_blocks())
-        .filter_map(|block| match block {
-            ContentBlock::ToolResult { tool_use_id, is_error: false, .. } => Some(tool_use_id),
-            _ => None,
-        }).collect();
-    messages.iter().rev().flat_map(|message| message.content.tool_calls().into_iter().rev())
-        .find(|(id, name, _)| name == "TodoWrite" && succeeded.contains(id))
-        .and_then(|(_, _, input)| input["todos"].as_array().cloned())
-        .is_some_and(|items| items.iter().any(|item| item["status"].as_str() != Some("completed")))
 }
 
 fn receiver_stream<T: Send + 'static>(

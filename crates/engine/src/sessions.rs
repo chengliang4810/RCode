@@ -486,9 +486,17 @@ impl SessionsEngine {
         let excluded_groups: std::collections::HashSet<_> = entries.iter()
             .filter(|entry| entry.excluded)
             .map(|entry| entry.continuation_of.clone().unwrap_or_else(|| entry.id.clone())).collect();
+        // 手动压缩只恢复待办状态引用，不能因此把已排除的完整工具历史重新送给模型。
+        let mut todo_history_ids = Vec::new();
+        for entry in entries.iter().filter(|entry| entry.role == rcode_doc::MessageRole::Assistant) {
+            let root = entry.continuation_of.as_ref().unwrap_or(&entry.id);
+            if excluded_groups.contains(root) && !todo_history_ids.contains(root) {
+                todo_history_ids.push(root.clone());
+            }
+        }
         hydrate_history_outputs(self.inner.journal.clone(), chat_id.to_owned(), &mut entries).await;
 
-        let turns: Vec<rcode_proto::ConversationTurn> = entries
+        let mut turns: Vec<rcode_proto::ConversationTurn> = entries
             .into_iter()
             .filter(|entry| Some(entry.id.as_str()) != exclude)
             // Compacted-out entries stay in the document and on screen, but the
@@ -514,9 +522,12 @@ impl SessionsEngine {
                         (role == "assistant" && roots.contains(root) && !excluded_groups.contains(root))
                             .then(|| root.clone())
                     },
+                    todo_history_ids: Vec::new(),
                 })
             })
             .collect();
+
+        if let Some(first) = turns.first_mut() { first.todo_history_ids = todo_history_ids; }
 
         (!turns.is_empty()).then_some(turns)
     }

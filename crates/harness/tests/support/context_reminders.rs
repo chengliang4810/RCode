@@ -78,11 +78,13 @@ async fn round(
         role: "user".into(),
         text: PROMPT.into(),
         native_history_id: None,
+        todo_history_ids: Vec::new(),
     });
     history.push(rcode_proto::ConversationTurn {
         role: "assistant".into(),
         text: "ok".into(),
         native_history_id: Some(id),
+        todo_history_ids: Vec::new(),
     });
     (body, session, history)
 }
@@ -252,6 +254,7 @@ async fn lifecycle(protocol: Protocol, output: Option<&Path>) {
         role: "user".into(),
         text: "Earlier FACT-V1; old history compacted".into(),
         native_history_id: None,
+        todo_history_ids: Vec::new(),
     }];
     let (compacted, _, _) = round(
         &harness,

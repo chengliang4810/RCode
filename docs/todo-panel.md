@@ -1,5 +1,7 @@
 # Todo panel
 
+Agent 状态来源、周期提醒和结束检查见 [待办维护](todo-lifecycle.md)。
+
 The agent's checklist is a tray above the composer, not just a `Todo · 2/5 done`
 chip in the transcript. It follows the latest checklist of the selected chat and
 shows what is being worked on without scrolling.

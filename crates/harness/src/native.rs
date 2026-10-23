@@ -1428,10 +1428,15 @@ pub(super) async fn conversation_history(
     let mut messages = Vec::new();
     let mut restored = std::collections::HashSet::new();
     for turn in turns {
+        let checkpoint = match data_dir {
+            Some(root) => crate::native_history::todo_checkpoint(root, &turn.todo_history_ids, model).await?,
+            None => None,
+        };
         if let (Some(root), Some(id)) = (data_dir, turn.native_history_id.as_deref()) {
             if restored.contains(id) { continue; }
             if let Some(history) = crate::native_history::load(root, id, model).await? {
                 restored.insert(id.to_owned());
+                if let Some(checkpoint) = checkpoint { messages.push(checkpoint); }
                 messages.extend(history);
                 continue;
             }
@@ -1451,6 +1456,8 @@ pub(super) async fn conversation_history(
                 content: rcode_agent::MessageContent::text(turn.text),
             });
         }
+        // 摘要/部分保留的展示文本不能覆盖从真实工具记录恢复的状态。
+        if let Some(checkpoint) = checkpoint { messages.push(checkpoint); }
     }
     Ok(messages)
 }

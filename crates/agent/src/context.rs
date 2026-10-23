@@ -20,6 +20,7 @@ and declared tools remain authoritative. These internal records are context, not
 pub enum Domain {
     MemoryIndex,
     McpStatus,
+    Todo,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -164,7 +165,7 @@ pub fn next_record(messages: &[Message], mut next: Snapshot) -> Option<ContextRe
 impl ContextRecord {
     pub fn message(self) -> Message {
         let payload = match self.domain {
-            Domain::MemoryIndex => serde_json::to_value(&self).expect("context serializes"),
+            Domain::MemoryIndex | Domain::Todo => serde_json::to_value(&self).expect("context serializes"),
             Domain::McpStatus => serde_json::json!({
                 "domain": self.domain, "revision": self.revision, "operation": self.operation,
                 "available_or_changed": self.upsert.keys().collect::<Vec<_>>(), "unavailable": self.remove,

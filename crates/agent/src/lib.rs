@@ -14,6 +14,7 @@ pub mod commands;
 pub mod custom_commands;
 pub mod compact;
 pub mod context;
+pub mod todo;
 pub mod hook;
 pub mod memory;
 pub mod message;

@@ -111,6 +111,21 @@ pub(super) async fn load(
     complete_pairs(records).map(Some)
 }
 
+/// Restore only planning state from excluded groups, never their tool bodies.
+pub(super) async fn todo_checkpoint(root: &Path, ids: &[String], model: &str) -> Result<Option<Message>, String> {
+    let mut groups = Vec::new();
+    for id in ids.iter().rev() {
+        if let Some(history) = load(root, id, model).await? {
+            let has_list = rcode_agent::todo::State::from_history(&history).current.is_some();
+            groups.push(history);
+            if has_list { break; }
+        }
+    }
+    let history = groups.into_iter().rev().flatten().collect::<Vec<_>>();
+    let state = rcode_agent::todo::State::from_history(&history);
+    Ok(state.current.as_ref().map(|_| state.record("checkpoint")))
+}
+
 fn complete_pairs(records: Vec<Message>) -> Result<Vec<Message>, String> {
     let mut messages = Vec::new();
     let mut calls = Vec::new();

@@ -516,6 +516,8 @@ async fn compacted_turns_leave_the_models_view_but_stay_on_screen() {
             .any(|turn| turn.text.contains("SUMMARY-OF-EARLIER-TURNS")),
         "摘要没有进入模型视野: {after_compact:?}"
     );
+    assert!(!after_compact[0].todo_history_ids.is_empty(), "压缩后需要保留待办状态的本地历史引用");
+    assert!(after_compact.iter().skip(1).all(|turn| turn.todo_history_ids.is_empty()));
 }
 
 #[tokio::test]

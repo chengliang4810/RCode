@@ -321,6 +321,9 @@ where
         )),
     });
     if let Some(task) = task { compacted.push(task.clone()); }
+    // 摘要不能替代结构化待办；保留被压缩前缀的状态和提醒计数，再重放近期更新。
+    let todos = crate::todo::State::from_history(older);
+    if todos.current.is_some() { compacted.push(todos.record("checkpoint")); }
     compacted.extend_from_slice(recent);
 
     Ok(CompactOutcome {

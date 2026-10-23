@@ -410,6 +410,10 @@ pub struct ConversationTurn {
     /// Omitted for legacy drivers and partially excluded/compacted groups.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub native_history_id: Option<String>,
+    /// Compacted local entry groups, used only to restore the latest todo
+    /// checkpoint. Their full conversation must never be replayed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub todo_history_ids: Vec<String>,
 }
 
 /// A file modification carried inline on a tool result (ACP
