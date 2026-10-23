@@ -236,6 +236,7 @@ impl VisualSlot {
     }
 
     /// The measured height (at the latest width the worker laid out).
+    #[cfg(test)]
     pub fn height(&self) -> Option<f32> {
         self.snapshot().1
     }
