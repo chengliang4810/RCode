@@ -1,7 +1,7 @@
 # Browser profiles and login persistence
 
 The embedded browser keeps persistent website data on Linux and macOS 14 or
-later. Closing tabs or restarting the original app does not deliberately clear persistent
+later. Closing tabs or restarting RCode does not deliberately clear persistent
 cookies, localStorage, or IndexedDB. A website can still expire/revoke a login,
 and session-only cookies are not converted into persistent cookies.
 
@@ -9,15 +9,18 @@ and session-only cookies are not converted into persistent cookies.
 | --- | --- | --- |
 | Switch tabs or hide the panel | Keeps website data | Keeps website data |
 | Close all browser tabs, then reopen | Reuses the profile | Reuses its in-memory store while the profile context lives |
-| Restart the original app | Reopens persistent data | Loses temporary data |
-| Switch the original app profile | Opens a separate store; returning recovers saved data | Opens a separate temporary store |
+| Restart RCode | Reopens persistent data | Loses temporary data |
+| Switch RCode profile | Opens a separate store; returning recovers saved data | Opens a separate temporary store |
 
-Windows opens links in the default external browser. Its profile and cookie
-settings control persistence; the original app does not embed WebView2.
+Windows embeds Microsoft Edge WebView2. Tabs in one window/profile share an
+InPrivate context: cookies and website storage remain available while that
+context lives and are discarded when it closes. Restarting RCode creates a
+new context. Its temporary user-data folder retains runtime caches, not a
+persistent website login profile. See [Windows development](windows-development.md).
 
 ## Identity and storage
 
-Tabs and windows in one the original app process share the same browser context for the
+Tabs and windows in one RCode process share the same browser context for the
 same profile. Chat, project, repository, and navigation changes do not choose a
 new profile. Local workspace identity uses the local device ID. Signed-in
 identity uses workspace scope, user ID, and organization ID. Local, synced, and
@@ -25,7 +28,7 @@ development scopes stay separate. Signing out/unresolving the identity closes
 the old tabs without deleting their saved website data.
 
 Website data stays on the UI device, including when viewing a remote engine's
-chat. Browser data is not part of the original app's workspace synchronization.
+chat. Browser data is not part of RCode's workspace synchronization.
 
 On Linux, storage lives under:
 
@@ -54,14 +57,14 @@ address changes during startup, the latest address is loaded; closing the tab
 cancels delivery of its pending result. Startup/storage failures are shown on
 the browser page; they do not silently select temporary storage.
 
-On macOS 14+, WebKit manages storage in the app's website-data location. The original app
+On macOS 14+, WebKit manages storage in the app's website-data location. RCode
 uses a named `WKWebsiteDataStore` with a stable UUID derived from the canonical
-The original app data directory and profile identity. The app bundle identifier and data
+RCode data directory and profile identity. The app bundle identifier and data
 directory must stay stable to reuse the same store. Separate installations and
-test data directories select separate stores. Copying/removing the original app's data
+test data directories select separate stores. Copying/removing RCode's data
 directory does not copy/remove the WebKit-managed stores.
 
-macOS 12/13 only exposes one default persistent WebKit store. The original app keeps its
+macOS 12/13 only exposes one default persistent WebKit store. RCode keeps its
 isolated temporary stores on these versions and displays a notice explaining
 that keeping logins requires macOS 14+ or the default external browser. It does
 not put unrelated accounts in the single default store.
@@ -127,8 +130,8 @@ invalid storage paths, and cookie file permissions. It does not exercise the
 Rust shell. UI CI runs the native fixture on Linux and macOS.
 
 The tests use synthetic tokens, not personal accounts. A manual GitHub/mail
-check should sign in, close all tabs, restart the original app, revisit the site, switch
-The original app profile, and return. Website-specific OAuth, MFA, expiry, or embedded
+check should sign in, close all tabs, restart RCode, revisit the site, switch
+RCode profile, and return. Website-specific OAuth, MFA, expiry, or embedded
 browser restrictions remain separate from storage persistence.
 
 This change does not add password autofill, tab restoration, login import from

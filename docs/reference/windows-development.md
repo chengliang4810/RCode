@@ -74,10 +74,10 @@ swept in the background. Per-frame updates touch WebView2 only when geometry
 or visibility changed.
 
 Frosted window chrome uses native Acrylic and requires Windows **Settings >
-Personalization > Colors > Transparency effects**. Content cards and popovers
-remain opaque because in-app backdrop blur is not supported. The pinned
-[Zui DirectX fix](https://github.com/zeronsh/zui/pull/7) supplies the renderer
-layout and edge-fade corrections.
+Personalization > Colors > Transparency effects**. Frosted cards and popovers
+use scene-level Direct3D backdrop blur over the app's own content. This blur
+is separate from the native Acrylic applied to window chrome. The pinned Zui
+backend also supplies layout, rounded clipping and edge-fade rendering.
 
 When Windows disables **Animation effects**, RCode's **Reduce motion: System**
 setting skips transitions and gives activity grids a gentle 2.4-second brightness
