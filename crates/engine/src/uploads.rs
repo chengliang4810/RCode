@@ -703,7 +703,7 @@ mod tests {
             .join("..")
             .join(elsewhere.path().file_name().unwrap())
             .join("shot.png");
-        let mut paths = vec![
+        let paths = vec![
             r"\\host\share\x.png".to_string(),
             "//host/share/x.png".into(),
             r"\\?\UNC\host\share\x.png".into(),
@@ -718,11 +718,13 @@ mod tests {
         // jail; refusing it proves the lexical check runs before any
         // filesystem call on the requested path.
         #[cfg(unix)]
-        {
+        let paths = {
+            let mut paths = paths;
             let link = elsewhere.path().join("link");
             std::os::unix::fs::symlink(workspace.path(), &link).unwrap();
             paths.push(link.join("shot.png").to_string_lossy().into_owned());
-        }
+            paths
+        };
         for path in paths {
             let error = uploads
                 .read_chunk(&path, 0, &roots)
@@ -1106,7 +1108,7 @@ mod generated_image_tests {
         let big = root.path().join("big.png");
         let file = std::fs::File::create(&big).unwrap();
         file.set_len(MAX_GENERATED_IMAGE_BYTES + 1).unwrap();
-        let mut paths = vec![
+        let paths = vec![
             PathBuf::from("relative.png"),
             outside.path().into(),
             root.path().into(),
@@ -1114,11 +1116,13 @@ mod generated_image_tests {
             big,
         ];
         #[cfg(unix)]
-        {
+        let paths = {
+            let mut paths = paths;
             let link = root.path().join("escape.png");
             std::os::unix::fs::symlink(outside.path(), &link).unwrap();
             paths.push(link);
-        }
+            paths
+        };
         for source in paths {
             assert!(
                 uploads
