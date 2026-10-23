@@ -129,7 +129,8 @@ trait EngineBackend: Send + Sync {
 
 /// Embedded engine: owns the [`EngineCore`] and an in-memory RPC loop.
 struct InProcessEngine {
-    service: Arc<dyn RpcService>,
+    // Retain the service for the lifetime of the embedded engine.
+    _service: Arc<dyn RpcService>,
     runtime: Arc<tokio::sync::Mutex<Option<EngineRuntime>>>,
     boot_task: tokio::task::JoinHandle<()>,
     refresh_task: tokio::task::JoinHandle<()>,
@@ -393,7 +394,7 @@ impl EngineHandle {
         });
         let handle = EngineHandle {
             inner: Arc::new(InProcessEngine {
-                service,
+                _service: service,
                 runtime,
                 boot_task,
                 refresh_task,
