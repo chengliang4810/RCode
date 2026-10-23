@@ -365,8 +365,13 @@ class _RemoteImageState extends State<RemoteImage> {
           ),
           child: ClipRRect(
             borderRadius: BorderRadius.circular(12),
-            child: Image.memory(
-              snapshot.data!,
+            child: Image(
+              image: ResizeImage(
+                MemoryImage(snapshot.data!),
+                width: (180 * MediaQuery.devicePixelRatioOf(context)).ceil(),
+                height: (140 * MediaQuery.devicePixelRatioOf(context)).ceil(),
+                policy: ResizeImagePolicy.fit,
+              ),
               width: 180,
               height: 140,
               fit: BoxFit.cover,
