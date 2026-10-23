@@ -4064,6 +4064,7 @@ mod tests {
 
 #[cfg(test)]
 impl FilesSurface {
+    #[cfg(target_os = "linux")]
     pub(crate) fn test_document_text(&self, path: &str) -> Option<String> {
         self.preview
             .documents
@@ -4074,6 +4075,7 @@ impl FilesSurface {
             .clone()
     }
 
+    #[cfg(target_os = "linux")]
     pub(crate) fn test_document_phase(&self, path: &str) -> Option<String> {
         Some(format!("{:?}", self.preview.documents.get(path)?.phase))
     }
