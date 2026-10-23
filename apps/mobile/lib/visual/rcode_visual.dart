@@ -86,9 +86,11 @@ class RCodeVisual extends StatefulWidget {
     this.active = true,
     this.onHeightChanged,
     this.onOpenLink,
+    this.backendFactory = native.openVisual,
   });
 
   final String endpoint, apiKey, deviceId, path, title;
+  final Future<VisualBackend> Function(Map<String, dynamic>) backendFactory;
   final String? id, scope;
   final double textScale;
   final bool active;
@@ -114,6 +116,7 @@ class _RCodeVisualState extends State<RCodeVisual> with WidgetsBindingObserver {
   bool _error = false;
   bool _attached = false;
   bool _foreground = true;
+  bool _routeVisible = true;
   bool _dark = false;
   bool _reduceMotion = false;
   String _locale = 'en';
@@ -130,6 +133,10 @@ class _RCodeVisualState extends State<RCodeVisual> with WidgetsBindingObserver {
     _dark = Theme.of(context).brightness == Brightness.dark;
     _reduceMotion = MediaQuery.disableAnimationsOf(context);
     _locale = Localizations.localeOf(context).toLanguageTag();
+    _routeVisible =
+        TickerMode.valuesOf(context).enabled &&
+        ModalRoute.isCurrentOf(context) != false;
+    _attachment();
     _backend?.command({'op': 'locale', 'locale': _locale});
     _backend?.command({'op': 'appearance', 'dark': _dark});
     if (_attached) {
@@ -228,7 +235,7 @@ class _RCodeVisualState extends State<RCodeVisual> with WidgetsBindingObserver {
     try {
       var lease = scope == null ? null : _idleVisuals.remove((scope, key));
       final reused = lease != null;
-      lease ??= _VisualLease(await native.openVisual(config), scope, key);
+      lease ??= _VisualLease(await widget.backendFactory(config), scope, key);
       if (!mounted || generation != _generation || scope?.closed == true) {
         lease.close();
         return;
@@ -281,13 +288,18 @@ class _RCodeVisualState extends State<RCodeVisual> with WidgetsBindingObserver {
   void _attachment() {
     final backend = _backend;
     if (backend == null || !mounted) return;
-    final wanted = widget.active && _foreground && _onScreen;
+    final wanted = widget.active && _foreground && _routeVisible && _onScreen;
     if (wanted == _attached) return;
     _attached = wanted;
     backend.command(
       wanted
           ? {'op': 'attach', 'dark': _dark, 'reduceMotion': _reduceMotion}
           : {'op': 'detach'},
+    );
+    _timer?.cancel();
+    _timer = Timer.periodic(
+      Duration(milliseconds: wanted ? 16 : 250),
+      (_) => _pump(),
     );
   }
 
