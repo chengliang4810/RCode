@@ -4448,9 +4448,10 @@ mod tests {
             })
         });
         release.notify_one();
-        // The host may finish its bounded read after the UI task is cancelled;
-        // that old result must never replace the later selection.
-        rpc.settle(cx, &runtime, |_| rpc.completed() >= 3);
+        // The real transport now aborts a cancelled request. Its handler must
+        // be dropped rather than counted as a successful old response.
+        rpc.settle(cx, &runtime, |_| rpc.finished() >= 3);
+        assert!(rpc.cancelled() >= 1);
         page.read_with(cx, |page, _| {
             assert_eq!(page.repository.as_deref(), Some("owner/next"))
         });

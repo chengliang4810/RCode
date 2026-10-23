@@ -12,6 +12,7 @@ pub(super) struct ScriptedRpc {
     handler: Box<dyn Fn(String, Value) -> BoxFuture<'static, Reply> + Send + Sync>,
     changed: tokio::sync::Notify,
     completed: std::sync::atomic::AtomicUsize,
+    cancelled: std::sync::atomic::AtomicUsize,
 }
 
 impl ScriptedRpc {
@@ -24,11 +25,20 @@ impl ScriptedRpc {
             handler: Box::new(move |method, params| Box::pin(handler(method, params))),
             changed: tokio::sync::Notify::new(),
             completed: Default::default(),
+            cancelled: Default::default(),
         })
     }
 
     pub(super) fn completed(&self) -> usize {
         self.completed.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    pub(super) fn cancelled(&self) -> usize {
+        self.cancelled.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    pub(super) fn finished(&self) -> usize {
+        self.completed() + self.cancelled()
     }
 
     pub(super) fn client(self: &Arc<Self>) -> RpcClient {
@@ -58,11 +68,27 @@ impl ScriptedRpc {
     }
 }
 
+struct InFlightRpc<'a> {
+    rpc: &'a ScriptedRpc,
+    completed: bool,
+}
+
+impl Drop for InFlightRpc<'_> {
+    fn drop(&mut self) {
+        if !self.completed {
+            self.rpc.cancelled.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.rpc.changed.notify_one();
+        }
+    }
+}
+
 #[async_trait::async_trait]
 impl RpcService for ScriptedRpc {
     async fn handle(&self, method: &str, params: Value) -> Reply {
+        let mut progress = InFlightRpc { rpc: self, completed: false };
         self.changed.notify_one();
         let reply = (self.handler)(method.to_owned(), params).await;
+        progress.completed = true;
         self.completed
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         self.changed.notify_one();

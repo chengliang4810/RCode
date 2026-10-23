@@ -3272,24 +3272,26 @@ mod tests {
                 .update(cx, |page, _, cx| page.select_tab(Tab::Code, cx))
                 .unwrap();
             rpc.settle(cx, &runtime, |_| diff_calls.load(Ordering::SeqCst) == 1);
-            window.update(cx, |page, _, cx| page.refresh(cx)).unwrap();
             if old_finishes_first {
                 release_old.notify_one();
                 rpc.settle(cx, &runtime, |_| rpc.completed() == 1);
-                window
-                    .update(cx, |page, _, _| {
-                        assert!(page.loading && page.diff.is_none());
-                    })
-                    .unwrap();
             }
+            window.update(cx, |page, _, cx| page.refresh(cx)).unwrap();
+            if !old_finishes_first {
+                rpc.settle(cx, &runtime, |_| rpc.cancelled() == 1);
+            }
+            window.update(cx, |page, _, _| {
+                assert!(page.loading && page.diff.is_none());
+            }).unwrap();
             release_detail.notify_one();
             rpc.settle(cx, &runtime, |cx| {
                 window.update(cx, |page, _, _| page.diff.is_some()).unwrap()
             });
             if !old_finishes_first {
                 release_old.notify_one();
-                rpc.settle(cx, &runtime, |_| rpc.completed() == 3);
             }
+            rpc.settle(cx, &runtime, |_| rpc.finished() == 3);
+            assert_eq!(rpc.cancelled(), usize::from(!old_finishes_first));
             window
                 .update(cx, |page, window, _| {
                     assert_eq!(page.diff.as_ref().unwrap().patch, "current patch");
