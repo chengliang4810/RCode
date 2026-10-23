@@ -359,12 +359,12 @@ impl Pipelines {
 }
 
 fn texture(
-    device: &wgpu::Device,
+    gpu: &crate::Gpu,
     label: &str,
     size: (u32, u32),
     format: wgpu::TextureFormat,
 ) -> wgpu::Texture {
-    device.create_texture(&wgpu::TextureDescriptor {
+    gpu.device.create_texture(&wgpu::TextureDescriptor {
         label: Some(label),
         size: wgpu::Extent3d {
             width: size.0,
@@ -377,31 +377,32 @@ fn texture(
         format,
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT
             | wgpu::TextureUsages::TEXTURE_BINDING
-            | wgpu::TextureUsages::COPY_SRC,
+            | wgpu::TextureUsages::COPY_SRC
+            | gpu.sampled_target_extra_usage,
         view_formats: &[],
     })
 }
 
 impl ShaderState {
-    fn new(device: &wgpu::Device, size: (u32, u32), buffers: usize) -> Self {
+    fn new(gpu: &crate::Gpu, size: (u32, u32), buffers: usize) -> Self {
         let half = ((size.0 / 2).max(1), (size.1 / 2).max(1));
         Self {
             size,
             buffers: (0..buffers)
                 .map(|_| {
                     [
-                        texture(device, "shader buffer", size, HDR),
-                        texture(device, "shader buffer", size, HDR),
+                        texture(gpu, "shader buffer", size, HDR),
+                        texture(gpu, "shader buffer", size, HDR),
                     ]
                 })
                 .collect(),
             latest: 0,
-            image: texture(device, "shader image", size, HDR),
+            image: texture(gpu, "shader image", size, HDR),
             bloom: [
-                texture(device, "shader bloom", half, HDR),
-                texture(device, "shader bloom", half, HDR),
+                texture(gpu, "shader bloom", half, HDR),
+                texture(gpu, "shader bloom", half, HDR),
             ],
-            output: texture(device, "shader output", size, FORMAT),
+            output: texture(gpu, "shader output", size, FORMAT),
             staging: None,
         }
     }
@@ -446,7 +447,7 @@ pub fn render_shader(
         .as_ref()
         .is_none_or(|s| s.size != (width, height) || s.buffers.len() != buffers);
     if fresh {
-        *state = Some(ShaderState::new(device, (width, height), buffers));
+        *state = Some(ShaderState::new(gpu, (width, height), buffers));
     }
     let state = state.as_mut().expect("just made");
     let (read, write) = (state.latest, 1 - state.latest);
@@ -837,6 +838,71 @@ mod tests {
         assert_eq!(px(&plain, 39, 32)[3], 0);
         assert!(px(&first, 39, 32)[3] > 0, "blur spreads the disc's light");
         assert_eq!(first.bgra, second.bgra, "reused state preserves the bloom result");
+    }
+
+    #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn sampled_targets_render_from_a_cold_device() {
+        const CASE: &str = "RCODE_GPU_COLD_SAMPLED_TARGET_CASE";
+        let Ok(case) = std::env::var(CASE) else {
+            // Another GPU test can initialize the driver before this test.
+            // Each case must therefore execute alone in a new process.
+            for case in ["plain", "feedback-bloom"] {
+                let output = std::process::Command::new(std::env::current_exe().unwrap())
+                    .args([
+                        "--exact",
+                        "shader::tests::sampled_targets_render_from_a_cold_device",
+                        "--nocapture",
+                        "--test-threads=1",
+                    ])
+                    .env(CASE, case)
+                    .output()
+                    .expect("start cold GPU test process");
+                assert!(
+                    output.status.success(),
+                    "cold case {case}: {}\n{}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr),
+                );
+            }
+            return;
+        };
+        if case == "plain" {
+            light_fades_out_toward_the_edges_unless_opaque();
+            return;
+        }
+        assert_eq!(case, "feedback-bloom");
+        if !crate::available() {
+            return;
+        }
+        let buffers = vec![
+            "void mainImage(out vec4 color, in vec2 coord) {\n\
+                float value = texture(iChannel0, coord / iResolution.xy).r + 0.25;\n\
+                color = vec4(vec3(value), 1.0);\n\
+            }"
+            .to_owned(),
+        ];
+        let mut shader = spec(
+            "void mainImage(out vec4 color, in vec2 coord) {\n\
+                color = texture(iChannel0, coord / iResolution.xy);\n\
+            }",
+            &buffers,
+            Blend::Alpha,
+        );
+        shader.bloom = 1.0;
+        let uniforms = ShaderUniforms {
+            resolution: [200.0, 100.0, 1.0, 0.0],
+            ..Default::default()
+        };
+        let mut state = None;
+        let first = render_shader(&shader, &uniforms, 200, 100, &mut state).unwrap();
+        let second = render_shader(&shader, &uniforms, 200, 100, &mut state).unwrap();
+        let third = render_shader(&shader, &uniforms, 200, 100, &mut state).unwrap();
+        assert!((i32::from(px(&first, 100, 50)[0]) - 64).abs() < 3);
+        assert!((i32::from(px(&second, 100, 50)[0]) - 128).abs() < 3);
+        assert!(px(&third, 100, 50)[0] > 205, "bloom adds to the third feedback frame");
+        assert_eq!(px(&first, 100, 50)[3], 255);
+        assert!(px(&third, 0, 50)[3] < 3, "the output still fades at the edge");
     }
 
     #[test]

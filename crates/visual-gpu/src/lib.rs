@@ -27,6 +27,7 @@ pub struct Frame {
 pub(crate) struct Gpu {
     pub(crate) device: wgpu::Device,
     pub(crate) queue: wgpu::Queue,
+    pub(crate) sampled_target_extra_usage: wgpu::TextureUsages,
     pub(crate) shaders: OnceLock<shader::Pipelines>,
     pub(crate) scene: OnceLock<scene::Pipelines>,
     pub(crate) textures: textures::Textures,
@@ -119,6 +120,26 @@ impl Gpu {
             })
             .await
             .map_err(|e| e.to_string())?;
+        let info = adapter.get_info();
+        // On AMD's Windows Vulkan driver, a sampled color attachment can
+        // discard every fragment on its first use. Storage-capable allocation
+        // avoids that path without a warmup draw, extra target, or frame copy.
+        let sampled_target_extra_usage = if cfg!(target_os = "windows")
+            && info.backend == wgpu::Backend::Vulkan
+            && info.vendor == 0x1002
+            && [FORMAT, wgpu::TextureFormat::Rgba16Float]
+                .into_iter()
+                .all(|format| {
+                    adapter
+                        .get_texture_format_features(format)
+                        .allowed_usages
+                        .contains(wgpu::TextureUsages::STORAGE_BINDING)
+                })
+        {
+            wgpu::TextureUsages::STORAGE_BINDING
+        } else {
+            wgpu::TextureUsages::empty()
+        };
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("rcode visuals"),
@@ -138,6 +159,7 @@ impl Gpu {
         Ok(Self {
             device,
             queue,
+            sampled_target_extra_usage,
             shaders: OnceLock::new(),
             scene: OnceLock::new(),
             textures: Default::default(),
