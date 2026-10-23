@@ -83,6 +83,13 @@ exactly once. The SDK's test text input drives fields; native keyboard behavior
 and an OS process restart are outside this automated gate. The separate manual
 Android check below includes a real app force-stop.
 
+On a connected Android phone, build the integration APK with the Gradle
+property `-PrcodeQa=true`, then pass that APK to `flutter drive` with
+`--use-application-binary=<path-to-qa-apk>`. The opt-in debug package is
+`com.rcode.rcode_mobile.qa`, so the gate can replace its saved fixture host and
+the driver can uninstall it without changing the ordinary installed app.
+The default debug and release application identifiers are unchanged.
+
 On macOS, resolve the locked dependencies, then run from the repository root:
 
 ```sh

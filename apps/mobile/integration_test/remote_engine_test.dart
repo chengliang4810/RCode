@@ -11,10 +11,10 @@ import 'package:rcode_mobile/main.dart' as app;
 import 'package:rcode_mobile/visual/native_math.dart';
 import 'package:rcode_mobile/visual/rcode_visual.dart';
 
-// Run only on a dedicated simulator/emulator against the developer fixture in
-// crates/engine/examples/mobile_smoke.rs. All storage, plugins, RPC and native
-// rendering below use the shipping implementation; the fixture never calls a
-// model provider.
+// Run only on a dedicated simulator/emulator or the isolated Android QA package
+// against crates/engine/examples/mobile_smoke.rs. All storage, plugins, RPC and
+// native rendering below use the shipping implementation; the fixture never
+// calls a model provider.
 const _endpoint = String.fromEnvironment(
   'RCODE_MOBILE_QA_URL',
   defaultValue: 'ws://127.0.0.1:27657',
