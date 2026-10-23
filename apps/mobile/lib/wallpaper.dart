@@ -165,6 +165,8 @@ class _WallpaperPainter extends CustomPainter {
         : effect == 'halftone'
         ? 7.0
         : 4.0;
+    final glyphs = <String, TextPainter>{};
+    final pointPaint = Paint()..color = dark ? Colors.white : Colors.black;
     for (double y = 0; y < size.height; y += step) {
       for (double x = 0; x < size.width; x += step) {
         final ix = (src.left + x / size.width * src.width).floor().clamp(
@@ -185,25 +187,27 @@ class _WallpaperPainter extends CustomPainter {
         final color = dark ? Colors.white : Colors.black;
         if (effect == 'ascii') {
           final char = ' .:-=+*#%@'[(strength * 9).floor().clamp(0, 9)];
-          final painter = TextPainter(
-            text: TextSpan(
-              text: char,
-              style: TextStyle(
-                fontFamily: 'GeistMono',
-                fontSize: step,
-                height: 1,
-                color: color,
+          final painter = glyphs.putIfAbsent(
+            char,
+            () => TextPainter(
+              text: TextSpan(
+                text: char,
+                style: TextStyle(
+                  fontFamily: 'GeistMono',
+                  fontSize: step,
+                  height: 1,
+                  color: color,
+                ),
               ),
-            ),
-            textDirection: TextDirection.ltr,
-          )..layout();
+              textDirection: TextDirection.ltr,
+            )..layout(),
+          );
           painter.paint(canvas, Offset(x, y));
-          painter.dispose();
         } else if (effect == 'halftone') {
           canvas.drawCircle(
             Offset(x + step / 2, y + step / 2),
             math.sqrt(strength) * step * .47,
-            Paint()..color = color,
+            pointPaint,
           );
         } else {
           const matrix = [
@@ -216,11 +220,14 @@ class _WallpaperPainter extends CustomPainter {
               matrix[(y / step).floor() % 4][(x / step).floor() % 4] / 16) {
             canvas.drawRect(
               Rect.fromLTWH(x, y, step * .8, step * .8),
-              Paint()..color = color,
+              pointPaint,
             );
           }
         }
       }
+    }
+    for (final painter in glyphs.values) {
+      painter.dispose();
     }
   }
 
