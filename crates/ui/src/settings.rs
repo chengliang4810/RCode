@@ -1435,20 +1435,9 @@ impl Default for UiSettings {
 /// `THREAD_JUMP_KEYBINDING_COMMANDS`, nine slots).
 pub const JUMP_SLOTS: usize = 9;
 
-/// Default combo per jump slot, and the label the shortcuts table shows.
+/// Default combo per jump slot; labels are generated through localization.
 const JUMP_DEFAULTS: [&str; JUMP_SLOTS] = [
     "mod-1", "mod-2", "mod-3", "mod-4", "mod-5", "mod-6", "mod-7", "mod-8", "mod-9",
-];
-const JUMP_LABELS: [&str; JUMP_SLOTS] = [
-    "Jump to session 1",
-    "Jump to session 2",
-    "Jump to session 3",
-    "Jump to session 4",
-    "Jump to session 5",
-    "Jump to session 6",
-    "Jump to session 7",
-    "Jump to session 8",
-    "Jump to session 9",
 ];
 
 /// The rebindable app shortcuts. `JumpSession(slot)` is zero-based; a slot at
