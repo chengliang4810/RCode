@@ -24,6 +24,9 @@ export 'session_controller.dart' show SessionController, UploadAttachment;
 export 'session_cache.dart'
     show SessionCache, SessionCacheEntry, FileSessionCache;
 
+String _encodeWorkspace(JsonMap value) => jsonEncode(value);
+JsonMap _decodeWorkspace(String value) => jsonMap(jsonDecode(value));
+
 abstract interface class ConnectionStore {
   Future<String?> read(String key);
   Future<void> write(String key, String? value);
@@ -450,7 +453,8 @@ class WorkspaceController extends ChangeNotifier {
       final preferences = await SharedPreferences.getInstance();
       final raw = preferences.getString('workspace.$cacheScope');
       if (_disposed || generation != _generation || raw == null) return;
-      final saved = jsonMap(jsonDecode(raw));
+      final saved = await compute(_decodeWorkspace, raw);
+      if (_disposed || generation != _generation) return;
       devices = jsonMaps(saved['devices']);
       spaces = jsonMaps(saved['spaces']);
       chats = jsonMaps(saved['chats']);
@@ -480,13 +484,14 @@ class WorkspaceController extends ChangeNotifier {
       if (_disposed || generation != _generation) return;
       final preferences = await SharedPreferences.getInstance();
       if (_disposed || generation != _generation) return;
-      final content = jsonEncode({
+      final content = await compute(_encodeWorkspace, <String, dynamic>{
         'devices': devices,
         'spaces': spaces,
         'chats': chats,
         'sessions': sessions,
         'sidebarPreferences': sidebarPreferences,
       });
+      if (_disposed || generation != _generation) return;
       await preferences.setString('workspace.$scope', content);
     });
     _workspaceCacheWrites = task.catchError((Object _) {});
