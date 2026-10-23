@@ -61,21 +61,70 @@ fn get_dwm_interval() -> Result<Duration> {
         ..Default::default()
     };
     unsafe { DwmGetCompositionTimingInfo(HWND::default(), &mut timing_info) }?;
-    let interval = retrieve_duration(timing_info.qpcRefreshPeriod, *QPC_TICKS_PER_SECOND);
+    let interval = retrieve_duration(timing_info.qpcRefreshPeriod, *QPC_TICKS_PER_SECOND)
+        .context("Invalid QPC frequency")?;
     // Check for interval values that are impossibly low. A 29 microsecond
     // interval was seen (from a qpcRefreshPeriod of 60).
     if interval < VSYNC_INTERVAL_THRESHOLD {
-        Ok(retrieve_duration(
+        retrieve_duration(
             timing_info.rateRefresh.uiDenominator as u64,
             timing_info.rateRefresh.uiNumerator as u64,
-        ))
+        )
+        .filter(|interval| !interval.is_zero())
+        .context("Invalid DWM refresh rate")
     } else {
         Ok(interval)
     }
 }
 
 #[inline]
-fn retrieve_duration(counts: u64, ticks_per_second: u64) -> Duration {
-    let ticks_per_microsecond = ticks_per_second / 1_000_000;
-    Duration::from_micros(counts / ticks_per_microsecond)
+fn retrieve_duration(counts: u64, ticks_per_second: u64) -> Option<Duration> {
+    if ticks_per_second == 0 {
+        return None;
+    }
+    let nanos = u128::from(counts) * 1_000_000_000 / u128::from(ticks_per_second);
+    Some(Duration::new(
+        u64::try_from(nanos / 1_000_000_000).ok()?,
+        (nanos % 1_000_000_000) as u32,
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::retrieve_duration;
+    use std::time::Duration;
+
+    #[test]
+    fn rational_refresh_rates_preserve_sub_microsecond_precision() {
+        assert_eq!(
+            retrieve_duration(1, 60),
+            Some(Duration::from_nanos(16_666_666))
+        );
+        assert_eq!(
+            retrieve_duration(1, 144),
+            Some(Duration::from_nanos(6_944_444))
+        );
+        assert_eq!(
+            retrieve_duration(1001, 60_000),
+            Some(Duration::from_nanos(16_683_333))
+        );
+    }
+
+    #[test]
+    fn qpc_counts_and_large_intervals_do_not_truncate_or_overflow() {
+        assert_eq!(
+            retrieve_duration(166_666, 10_000_000),
+            Some(Duration::from_nanos(16_666_600))
+        );
+        assert_eq!(
+            retrieve_duration(u64::MAX, 1),
+            Some(Duration::from_secs(u64::MAX))
+        );
+    }
+
+    #[test]
+    fn invalid_frequency_is_rejected_without_panicking() {
+        assert_eq!(retrieve_duration(1, 0), None);
+        assert_eq!(retrieve_duration(0, 0), None);
+    }
 }
