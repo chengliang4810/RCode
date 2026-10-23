@@ -204,11 +204,16 @@ impl HarnessRegistry {
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = Some(path);
         self.migrate_legacy_prefs();
+        self.heal_empty_enablement();
     }
 
     /// Fold a legacy allow-list into the opt-out shape: a registered harness
     /// missing from it was a deliberate "no", so it stays off. Rewrites the
     /// file once, which is what lets later installs auto-enable.
+    ///
+    /// "Deliberate" only holds for agents that existed when the file was
+    /// written; one registered since has no entry in the old list to read.
+    /// [`Self::heal_empty_enablement`] catches that gap.
     fn migrate_legacy_prefs(&self) {
         let legacy = { self.prefs().enabled.take() };
         let Some(legacy) = legacy else { return };
@@ -219,6 +224,41 @@ impl HarnessRegistry {
             .collect();
         self.prefs().disabled = disabled;
         self.persist_prefs();
+    }
+
+    /// Keep the invariant `set_enabled` enforces ("cannot disable the last
+    /// enabled harness") true of the file too.
+    ///
+    /// A file can spell out what no interaction can build: a legacy allow-list
+    /// folded by a registry that registers one agent it never knew (the
+    /// built-in agent alone is the shipped case — the composer would then meet
+    /// an empty catalog and refuse every new send), or a hand-edited/foreign
+    /// file naming every runnable agent as disabled. Re-enabling the first
+    /// runnable one restores the state Settings would refuse to leave behind.
+    ///
+    /// A device with nothing runnable keeps its empty set: that is the truth,
+    /// and the composer says so instead of running something that cannot run.
+    /// Registered harnesses are what make a candidate runnable, so prefs must
+    /// be loaded after registration (the engine's order).
+    fn heal_empty_enablement(&self) {
+        if !self.enabled_set().is_empty() {
+            return;
+        }
+        // Collected before the probes run: `descriptors()` takes `slots` then
+        // `order`, so holding `order` across a probe would invert the locks.
+        let registered: Vec<HarnessId> = self.order().iter().copied().collect();
+        let Some(id) = registered
+            .into_iter()
+            .find(|id| auto_enabled(*id) && self.installed_for(*id))
+        else {
+            return;
+        };
+        self.prefs().disabled.retain(|harness| *harness != id);
+        self.persist_prefs();
+        tracing::warn!(
+            harness = ?id,
+            "harness-prefs disabled every runnable agent; re-enabled the first one"
+        );
     }
 
     /// What this device offers: every harness whose CLI is FOUND, minus the
@@ -779,6 +819,52 @@ mod tests {
             registry.enabled_set(),
             vec![HarnessId::ClaudeCode, HarnessId::Cursor]
         );
+    }
+
+    /// The upgrade path the allow-list test above cannot cover: a file written
+    /// before the built-in agent existed, loaded by a registry that registers
+    /// it alone. The old list could not name that agent, so its absence is not
+    /// the user's "no" — and honoring it as one would leave the composer with
+    /// nothing runnable at all.
+    #[test]
+    fn legacy_allow_list_keeps_the_builtin_agent_enabled() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("harness-prefs.json"),
+            r#"{ "enabled": ["claude-code"] }"#,
+        )
+        .unwrap();
+        let registry = HarnessRegistry::new();
+        registry.register(Arc::new(rcode_harness::native::NativeHarness::default()));
+        registry.load_prefs(dir.path());
+        assert_eq!(registry.enabled_set(), vec![HarnessId::Native]);
+
+        let text = std::fs::read_to_string(dir.path().join("harness-prefs.json")).unwrap();
+        let prefs: HarnessPrefsFile = serde_json::from_str(&text).unwrap();
+        assert!(prefs.disabled.is_empty(), "{:?}", prefs.disabled);
+    }
+
+    /// The same invariant on the new file shape: a prefs file naming every
+    /// runnable agent as disabled — hand-edited, or written by a build that
+    /// registered more of them — must not strand the composer either.
+    #[test]
+    fn prefs_disabling_every_runnable_agent_re_enables_one() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("harness-prefs.json"),
+            r#"{ "disabled": ["native"] }"#,
+        )
+        .unwrap();
+        let registry = HarnessRegistry::new();
+        registry.register(Arc::new(rcode_harness::native::NativeHarness::default()));
+        registry.load_prefs(dir.path());
+        assert_eq!(registry.enabled_set(), vec![HarnessId::Native]);
+
+        // The healed file agrees, so the next load has nothing to repair.
+        let reloaded = HarnessRegistry::new();
+        reloaded.register(Arc::new(rcode_harness::native::NativeHarness::default()));
+        reloaded.load_prefs(dir.path());
+        assert_eq!(reloaded.enabled_set(), vec![HarnessId::Native]);
     }
 
     /// The fresh-machine shape (#128): no CLIs installed at all. Under
