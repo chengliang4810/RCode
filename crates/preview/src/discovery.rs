@@ -1,16 +1,18 @@
 //! Observe only this user's listeners. HTTP probes run only after project
 //! ownership has been established from the process's actual working directory
 //! and commands performing authentication have been excluded.
+#[cfg(target_os = "linux")]
+use std::net::IpAddr;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::{
     collections::HashMap,
-    net::{Ipv4Addr, Ipv6Addr, SocketAddr},
+    net::{Ipv4Addr, Ipv6Addr},
+};
+use std::{
+    net::SocketAddr,
     path::{Path, PathBuf},
     time::Duration,
 };
-// Only the Linux /proc parser needs IpAddr; loopback probes use both address
-// families on every desktop platform.
-#[cfg(target_os = "linux")]
-use std::net::IpAddr;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 #[derive(Debug, Clone)]
@@ -142,6 +144,7 @@ pub async fn is_http(address: SocketAddr) -> bool {
     .is_some()
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn mark_descendants(listeners: &mut [Listener], parents: &HashMap<u32, u32>, owner: u32) {
     for listener in listeners {
         let mut pid = listener.pid;
