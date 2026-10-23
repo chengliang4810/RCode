@@ -235,10 +235,3 @@ fn block_to_openai_part(block: &ContentBlock, supports_thinking_content: bool) -
         | ContentBlock::RedactedReasoning { .. } => None,
     }
 }
-
-#[cfg(test)]
-pub(super) fn body_for_test(config: &OpenAiConfig, request: &ModelRequest) -> Value {
-    build_request(config, request)
-        .expect("test config is valid")
-        .body
-}
