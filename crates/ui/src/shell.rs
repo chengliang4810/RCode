@@ -17258,7 +17258,7 @@ mod settings_modal_regressions {
             Some(SettingsSection::Harnesses)
         );
         for (route, section) in [
-            ("settings/devices", SettingsSection::General),
+            ("settings/devices", SettingsSection::Devices),
             ("settings/providers", SettingsSection::Harnesses),
             ("settings/agents", SettingsSection::Harnesses),
             ("settings/harnesses", SettingsSection::Harnesses),
