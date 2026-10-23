@@ -1844,6 +1844,26 @@ mod tests {
     }
 
     impl FakeEngine {
+        /// Drain currently deliverable requests without changing virtual time.
+        /// Deadline assertions must not inherit `take`'s per-request debounce.
+        fn take_ready(&mut self, method: &str, cx: &mut TestAppContext) -> Vec<serde_json::Value> {
+            let mut found = Vec::new();
+            loop {
+                cx.run_until_parked();
+                let Ok(request) = self.requests.try_recv() else {
+                    return found;
+                };
+                let request: serde_json::Value = serde_json::from_str(&request).unwrap();
+                if request["method"] == method {
+                    found.push(request);
+                } else if request["method"] == methods::WARM_WORKSPACE_SEARCH {
+                    self.reply(&request, serde_json::json!({ "state": "ready" }));
+                } else {
+                    self.reply(&request, serde_json::json!({}));
+                }
+            }
+        }
+
         /// Every request sent so far for `method`; other methods are
         /// answered with an empty object (or a ready search index).
         fn take(&mut self, method: &str, cx: &mut TestAppContext) -> Vec<serde_json::Value> {
@@ -2557,17 +2577,17 @@ mod tests {
         for wait in [500, 1000, 2000, 2000].map(Duration::from_millis) {
             engine.reply(&pending[0], content_answer(Vec::new(), true));
             cx.run_until_parked();
-            // `take` itself advances the clock by the debounce; stay short of
-            // the wait, then cross it.
+            // Observe before/at the deadline without advancing time while
+            // draining unrelated RPCs.
             cx.executor().advance_clock(wait - early);
             assert!(
                 engine
-                    .take(methods::SEARCH_WORKSPACE_CONTENT, cx)
+                    .take_ready(methods::SEARCH_WORKSPACE_CONTENT, cx)
                     .is_empty(),
                 "refreshed before {wait:?}"
             );
             cx.executor().advance_clock(early);
-            pending = engine.take(methods::SEARCH_WORKSPACE_CONTENT, cx);
+            pending = engine.take_ready(methods::SEARCH_WORKSPACE_CONTENT, cx);
             assert_eq!(pending.len(), 1, "no refresh after {wait:?}");
         }
         engine.reply(&pending[0], content_answer(Vec::new(), false));
