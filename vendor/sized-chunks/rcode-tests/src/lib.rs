@@ -1,4 +1,7 @@
 #[cfg(test)]
+mod panic_safety;
+
+#[cfg(test)]
 mod aliasing {
     use im::OrdSet;
     use sized_chunks::Chunk;

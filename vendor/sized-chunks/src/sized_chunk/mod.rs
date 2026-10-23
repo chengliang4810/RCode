@@ -427,9 +427,12 @@ where
     ///
     /// Time: O(n) for the number of items dropped
     pub fn drop_left(&mut self, index: usize) {
+        assert!(index <= self.len(), "Chunk::drop_left: index out of bounds");
         if index > 0 {
-            unsafe { ptr::drop_in_place(&mut self[..index]) }
+            let start = self.left;
+            // Removed elements must no longer be live if a destructor panics.
             self.left += index;
+            unsafe { ptr::drop_in_place(from_raw_parts_mut(self.mut_ptr(start), index)) }
         }
     }
 
@@ -439,9 +442,11 @@ where
     ///
     /// Time: O(n) for the number of items dropped
     pub fn drop_right(&mut self, index: usize) {
+        assert!(index <= self.len(), "Chunk::drop_right: index out of bounds");
         if index != self.len() {
-            unsafe { ptr::drop_in_place(&mut self[index..]) }
+            let removed = self.len() - index;
             self.right = self.left + index;
+            unsafe { ptr::drop_in_place(from_raw_parts_mut(self.mut_ptr(self.right), removed)) }
         }
     }
 
@@ -696,7 +701,7 @@ where
     ///
     /// Time: O(n)
     pub fn clear(&mut self) {
-        unsafe { ptr::drop_in_place(self.as_mut_slice()) }
+        self.drop_left(self.len());
         self.left = 0;
         self.right = 0;
     }

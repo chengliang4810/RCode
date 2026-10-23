@@ -387,7 +387,10 @@ impl<A, T> InlineArray<A, T> {
 
     #[inline]
     unsafe fn drop_contents(&mut self) {
-        ptr::drop_in_place::<[A]>(&mut **self) // uses DerefMut
+        let length = self.len();
+        // Detach the elements before running potentially panicking user code.
+        *self.len_mut() = 0;
+        ptr::drop_in_place(from_raw_parts_mut(self.data_mut(), length));
     }
 
     /// Discard the contents of the array.
@@ -396,7 +399,6 @@ impl<A, T> InlineArray<A, T> {
     pub fn clear(&mut self) {
         unsafe {
             self.drop_contents();
-            *self.len_mut() = 0;
         }
     }
 

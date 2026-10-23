@@ -483,11 +483,10 @@ where
             if index > self.len() {
                 panic!("RingBuffer::drop_left: index out of bounds");
             }
-            for i in self.range().take(index) {
-                unsafe { self.force_drop(i) }
+            for _ in 0..index {
+                // pop_front removes the element from the live range first.
+                drop(self.pop_front());
             }
-            self.origin += index;
-            self.length -= index;
         }
     }
 
@@ -503,10 +502,10 @@ where
         if index == self.len() {
             return;
         }
-        for i in self.range().skip(index) {
-            unsafe { self.force_drop(i) }
+        while self.len() > index {
+            // Removing from the back leaves a valid live prefix on unwind.
+            drop(self.pop_back());
         }
-        self.length = index;
     }
 
     /// Split a buffer into two, the original buffer containing
@@ -777,11 +776,8 @@ where
     ///
     /// Time: O(n)
     pub fn clear(&mut self) {
-        for i in self.range() {
-            unsafe { self.force_drop(i) };
-        }
+        self.drop_left(self.len());
         self.origin = 0.into();
-        self.length = 0;
     }
 }
 
