@@ -951,6 +951,7 @@ impl TerminalPanel {
             TerminalEvent::Exit { seq, exit_code, .. } => {
                 tab.last_seq = seq;
                 tab.exited = Some(exit_code);
+                tab.emulator.process_exited();
                 tab.emulator.feed(&exit_message(exit_code));
                 cx.notify();
                 StreamDisposition::Stop
@@ -970,6 +971,10 @@ impl TerminalPanel {
         let Some(tab) = tabs.tabs.get_mut(active) else {
             return;
         };
+        if !bytes.is_empty() {
+            tab.emulator.acknowledge_program_status();
+            cx.notify();
+        }
         if tab.exited.is_some() {
             return;
         }
@@ -1541,7 +1546,12 @@ impl TerminalPanel {
                         // fixed "Terminal N" fallback.
                         let title = display_title(tab);
                         let exited = tab.exited.is_some();
-                        (ix, key, title, selected, exited)
+                        let status = super::status_view::presentation(
+                            tab.emulator.program_statuses(),
+                            &title,
+                            &theme,
+                        );
+                        (ix, key, title, selected, exited, status)
                     })
                     .collect()
             })
@@ -1589,7 +1599,7 @@ impl TerminalPanel {
             .children(
                 tab_elements
                     .into_iter()
-                    .map(|(ix, key, title, selected, exited)| {
+                    .map(|(ix, key, title, selected, exited, status)| {
                         let chat_select = chat_owned.clone();
                         let chat_close = chat_owned.clone();
                         let chat_close2 = chat_owned.clone();
@@ -1675,10 +1685,20 @@ impl TerminalPanel {
                                 },
                             )
                             .when(exited, |el| el.opacity(0.55))
+                            .when_some(status.as_ref(), |el, status| {
+                                el.tooltip(crate::settings::widgets::text_tooltip(
+                                    status.tooltip.clone(),
+                                ))
+                            })
                             .child(
-                                crate::icons::icon(crate::icons::TERMINAL)
-                                    .size(px(16.0))
-                                    .text_color(text_color.opacity(glyph_alpha)),
+                                crate::icons::icon(
+                                    status.as_ref().map_or(crate::icons::TERMINAL, |status| status.icon),
+                                )
+                                .size(px(16.0))
+                                .text_color(status.as_ref().map_or(
+                                    text_color.opacity(glyph_alpha),
+                                    |status| status.color,
+                                )),
                             )
                             .child(div().flex_1().min_w_0().truncate().child(title))
                             .child(close_btn);

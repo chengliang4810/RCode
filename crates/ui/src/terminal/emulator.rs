@@ -32,6 +32,8 @@ use alacritty_terminal::vte::ansi::{
     Color as AnsiColor, CursorShape, NamedColor, Processor, Rgb as AnsiRgb,
 };
 
+use super::program_status::{ProgramStatuses, StatusDecoder, StatusOutput};
+
 /// Grid coordinates and selection granularity, re-exported so the panel and
 /// view speak the emulator's vocabulary without depending on
 /// `alacritty_terminal` directly — the same seam [`CellColor`] draws for
@@ -169,6 +171,7 @@ impl EventListener for EventCapture {
 pub struct Emulator {
     term: Term<EventCapture>,
     parser: Processor,
+    status_decoder: StatusDecoder,
     capture: EventCapture,
     title: Option<String>,
     bell: bool,
@@ -185,6 +188,7 @@ impl Emulator {
         Self {
             term,
             parser: Processor::new(),
+            status_decoder: StatusDecoder::default(),
             capture,
             title: None,
             bell: false,
@@ -194,18 +198,40 @@ impl Emulator {
     /// Advance the state machine over decoded PTY output. Returns bytes the
     /// terminal wants written back to the PTY (DSR/DA query responses etc.).
     pub fn feed(&mut self, bytes: &[u8]) -> Vec<u8> {
-        self.parser.advance(&mut self.term, bytes);
         let mut responses = Vec::new();
-        for event in self.capture.events.borrow_mut().drain(..) {
-            match event {
-                Event::PtyWrite(text) => responses.extend_from_slice(text.as_bytes()),
-                Event::Title(title) => self.title = Some(title),
-                Event::ResetTitle => self.title = None,
-                Event::Bell => self.bell = true,
-                _ => {}
+        self.status_decoder.advance(bytes, |output| match output {
+            StatusOutput::Bytes(bytes) => {
+                self.parser.advance(&mut self.term, bytes);
+                // Collect replies at each boundary so OSC 7501 and standard
+                // DA/DSR queries retain their order in a shared output frame.
+                for event in self.capture.events.borrow_mut().drain(..) {
+                    match event {
+                        Event::PtyWrite(text) => responses.extend_from_slice(text.as_bytes()),
+                        Event::Title(title) => self.title = Some(title),
+                        Event::ResetTitle => self.title = None,
+                        Event::Bell => self.bell = true,
+                        _ => {}
+                    }
+                }
             }
-        }
+            StatusOutput::Reply(bytes) => responses.extend_from_slice(bytes),
+        });
         responses
+    }
+
+    pub fn program_statuses(&self) -> &ProgramStatuses {
+        self.status_decoder.statuses()
+    }
+
+    pub fn acknowledge_program_status(&mut self) {
+        self.status_decoder.statuses_mut().acknowledge();
+    }
+
+    pub fn process_exited(&mut self) {
+        self.status_decoder.process_exited();
+        // A process may exit in the middle of any control string. Cancel it
+        // before the panel writes its own exit trailer into the grid.
+        self.parser.advance(&mut self.term, b"\x18");
     }
 
     pub fn resize(&mut self, cols: u16, rows: u16) {
@@ -586,6 +612,54 @@ mod tests {
         e.feed(b"\x07");
         assert!(e.take_bell());
         assert!(!e.take_bell(), "bell reads clear it");
+    }
+
+    #[test]
+    fn program_status_is_consumed_without_polluting_grid_title_or_bell() {
+        let mut e = emu(40, 3);
+        e.feed(b"\x1b]0;Claude Code\x07");
+        e.feed(b"before\x1b]7501;state=blocked:kind=permission:app=claude-code\x07after");
+        assert_eq!(e.row_text(0), "beforeafter");
+        assert_eq!(e.title(), Some("Claude Code"));
+        assert!(!e.take_bell());
+        let record = e.program_statuses().primary().unwrap().1;
+        assert_eq!(record.state, super::super::program_status::ProgramState::Blocked);
+        e.feed(b"\x1b[31mred\x1b[0m\x1b[6n");
+        assert!(e.row_text(0).ends_with("red"));
+        assert_eq!(e.line(0)[11].fg, CellColor::Indexed(1));
+    }
+
+    #[test]
+    fn program_status_and_standard_query_responses_keep_wire_order() {
+        let mut e = emu(40, 3);
+        let reply = b"\x1b]7501;?:states=idle,working,done,blocked,error:kinds=permission,question,auth\x1b\\";
+        let responses = e.feed(b"\x1b[6n\x1b]7501;?\x1b\\\x1b[6n");
+        let mut expected = b"\x1b[1;1R".to_vec();
+        expected.extend_from_slice(reply);
+        expected.extend_from_slice(b"\x1b[1;1R");
+        assert_eq!(responses, expected);
+        assert_eq!(e.row_text(0), "");
+    }
+
+    #[test]
+    fn program_status_survives_screen_switches_but_full_reset_clears_it() {
+        let mut e = emu(40, 3);
+        e.feed(b"\x1b]7501;state=working\x1b\\\x1b[?1049h\x1b[?1049l\x1b[!p");
+        assert!(e.program_statuses().primary().is_some());
+        e.feed(b"\x1bc");
+        assert!(e.program_statuses().primary().is_none());
+    }
+
+    #[test]
+    fn program_status_cancels_incomplete_ansi_and_exit_keeps_trailer_visible() {
+        let mut e = emu(40, 3);
+        e.feed(b"\x1b[\x1b]7501;state=working\x07visible");
+        assert_eq!(e.row_text(0), "visible");
+        e.feed(b"\x1b]7501;state=done");
+        e.process_exited();
+        e.feed(b" exit trailer");
+        assert_eq!(e.row_text(0), "visible exit trailer");
+        assert!(e.program_statuses().primary().is_none());
     }
 
     #[test]

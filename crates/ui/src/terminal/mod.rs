@@ -14,4 +14,6 @@
 pub(crate) mod dock;
 pub mod emulator;
 pub mod panel;
+pub mod program_status;
+mod status_view;
 pub mod view;
