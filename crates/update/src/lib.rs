@@ -2722,39 +2722,75 @@ mod tests {
 
     #[test]
     fn a_failed_rollback_preserves_the_only_backup_and_reports_its_path() {
-        let root = tempfile::tempdir().unwrap();
-        let bundle = root.path().join("RCode.app");
-        let source = root.path().join("cached.app");
-        write_test_bundle(&bundle, b"old");
-        write_test_bundle(&source, b"new");
-        let mut renames = 0;
-        let error = apply_mac_app_transaction(&source, &bundle, copy_test_bundle, |from, to| {
-            renames += 1;
-            if renames >= 2 {
-                return Err(std::io::Error::other("injected rename failure"));
-            }
-            std::fs::rename(from, to)
-        })
-        .unwrap_err();
-        assert!(!bundle.exists());
-        let recovery = std::fs::read_dir(root.path())
-            .unwrap()
-            .map(|entry| entry.unwrap().path())
-            .find(|path| {
-                path.file_name()
-                    .unwrap()
-                    .to_string_lossy()
-                    .starts_with(".rcode-install-")
-            })
-            .unwrap()
-            .join("old.app");
-        assert_eq!(
-            std::fs::read(recovery.join("Contents/MacOS/rcode")).unwrap(),
-            b"old"
-        );
-        assert!(error.to_string().contains("rollback failed"));
-        assert!(error.to_string().contains(&recovery.display().to_string()));
-        assert!(source.join("Contents/MacOS/rcode").is_file());
+        for equivalent_parent in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let installation_parent = if equivalent_parent {
+                std::fs::create_dir(root.path().join("equivalent")).unwrap();
+                root.path().join("equivalent/..")
+            } else {
+                root.path().to_owned()
+            };
+            let bundle = installation_parent.join("RCode.app");
+            let source = root.path().join("cached.app");
+            write_test_bundle(&bundle, b"old");
+            write_test_bundle(&source, b"new");
+            let mut renames = 0;
+            let error =
+                apply_mac_app_transaction(&source, &bundle, copy_test_bundle, |from, to| {
+                    renames += 1;
+                    if renames >= 2 {
+                        return Err(std::io::Error::other("injected rename failure"));
+                    }
+                    std::fs::rename(from, to)
+                })
+                .unwrap_err();
+            assert!(!bundle.exists());
+            let recovery = std::fs::read_dir(&installation_parent)
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .find(|path| {
+                    path.file_name()
+                        .unwrap()
+                        .to_string_lossy()
+                        .starts_with(".rcode-install-")
+                })
+                .unwrap()
+                .join("old.app");
+            assert_eq!(
+                std::fs::read(recovery.join("Contents/MacOS/rcode")).unwrap(),
+                b"old"
+            );
+            let message = error.to_string();
+            assert!(message.contains("rollback failed"), "{message}");
+            let (_, reported) = message
+                .rsplit_once("original app preserved at ")
+                .unwrap_or_else(|| panic!("error must report a recovery path: {message}"));
+            let reported = PathBuf::from(reported);
+            assert!(
+                reported.is_absolute(),
+                "recovery path must be absolute: {message}"
+            );
+            // The installation target is canonicalized before the transaction.
+            // Windows short TEMP paths and Unix aliases can spell that same parent
+            // differently from read_dir; the reported path must still be usable and
+            // identify the independently discovered surviving backup.
+            let reported_canonical = reported.canonicalize().unwrap_or_else(|error| {
+                panic!("reported recovery path must exist: {message}; canonicalize error={error}")
+            });
+            assert_eq!(
+                reported_canonical,
+                recovery.canonicalize().unwrap(),
+                "reported path must identify the surviving backup: error={message}; discovered={}; installation_parent={}",
+                recovery.display(),
+                installation_parent.display()
+            );
+            assert_eq!(
+                std::fs::read(reported.join("Contents/MacOS/rcode")).unwrap(),
+                b"old",
+                "reported recovery path must contain the original installation: {message}"
+            );
+            assert!(source.join("Contents/MacOS/rcode").is_file());
+        }
     }
 
     #[test]
