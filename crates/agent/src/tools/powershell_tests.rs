@@ -156,10 +156,14 @@ async fn the_working_directory_and_explicit_exit_code_are_preserved() {
         .unwrap();
     assert!(result.is_error, "{}", result.output);
     assert!(result.output.starts_with("exit 17\n"), "{}", result.output);
-    assert!(
-        result
-            .output
-            .contains(dir.path().to_string_lossy().as_ref())
+    // Windows CI can expose TEMP through an 8.3 alias, while PowerShell
+    // reports its expanded path. Compare directory identity, not spelling.
+    let reported = result.output.strip_prefix("exit 17\n").unwrap().trim();
+    assert_eq!(
+        std::fs::canonicalize(reported).unwrap(),
+        std::fs::canonicalize(dir.path()).unwrap(),
+        "{}",
+        result.output,
     );
 }
 
