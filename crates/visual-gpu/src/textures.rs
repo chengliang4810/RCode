@@ -31,7 +31,7 @@ pub(crate) struct Loaded {
 
 /// The bytes' content and how they're read: the same image uploads once,
 /// whichever visual (or re-parse of one) brings it.
-type Key = (u64, usize, Space);
+type Key = (u64, usize, Space, Option<(u32, u32)>);
 
 struct Entry {
     key: Key,
@@ -75,6 +75,14 @@ fn content_hash(bytes: &[u8]) -> u64 {
     hasher.finish()
 }
 
+fn texture_key(data: &TextureData, hash: u64, space: Space) -> Key {
+    let dimensions = match data {
+        TextureData::Encoded(_) => None,
+        TextureData::Rgba { width, height, .. } => Some((*width, *height)),
+    };
+    (hash, bytes_of(data).len(), space, dimensions)
+}
+
 impl Textures {
     /// `data` on the GPU, decoding and uploading it on first use. Decoding
     /// runs outside the lock, so a large image doesn't hold up other renders.
@@ -96,7 +104,7 @@ impl Textures {
                 .map(|a| a.hash)
         };
         let hash = known.unwrap_or_else(|| content_hash(bytes));
-        let key = (hash, bytes.len(), space);
+        let key = texture_key(data, hash, space);
         {
             let mut guard = self.state.lock().unwrap_or_else(|e| e.into_inner());
             let state = &mut *guard;
@@ -119,7 +127,10 @@ impl Textures {
         let (loaded, retry_at) = match rcode_visual::image::decode_texture(data) {
             Ok(image) => {
                 let loaded = upload(device, queue, &image, space);
-                let retry_at = loaded.as_ref().err().map(|_| Instant::now() + Duration::from_secs(5));
+                let retry_at = loaded
+                    .as_ref()
+                    .err()
+                    .map(|_| Instant::now() + Duration::from_secs(5));
                 (loaded, retry_at)
             }
             Err(error) => (Err(error), None),
@@ -367,15 +378,30 @@ mod tests {
         let Some(gpu) = crate::gpu() else { return };
         let textures = Textures::default();
         let pixels: Arc<[u8]> = vec![255; 4].into();
-        let data = TextureData::Rgba { width: 1, height: 1, pixels: pixels.clone() };
-        let key = (content_hash(&pixels), pixels.len(), Space::Color);
+        let data = TextureData::Rgba {
+            width: 1,
+            height: 1,
+            pixels: pixels.clone(),
+        };
+        let key = texture_key(&data, content_hash(&pixels), Space::Color);
         textures.state.lock().unwrap().entries.push(Entry {
-            key, loaded: Err("temporary upload failure".into()), size: 1024, used: 0,
+            key,
+            loaded: Err("temporary upload failure".into()),
+            size: 1024,
+            used: 0,
             retry_at: Some(Instant::now() + Duration::from_secs(5)),
         });
-        assert!(textures.get(&gpu.device, &gpu.queue, &data, Space::Color).is_err());
+        assert!(
+            textures
+                .get(&gpu.device, &gpu.queue, &data, Space::Color)
+                .is_err()
+        );
         textures.state.lock().unwrap().entries[0].retry_at = Some(Instant::now());
-        assert!(textures.get(&gpu.device, &gpu.queue, &data, Space::Color).is_ok());
+        assert!(
+            textures
+                .get(&gpu.device, &gpu.queue, &data, Space::Color)
+                .is_ok()
+        );
         let state = textures.state.lock().unwrap();
         assert_eq!(state.entries.len(), 1);
         assert!(state.entries[0].retry_at.is_none());
@@ -389,6 +415,71 @@ mod tests {
         assert_eq!(half(0.5), 0x3800);
         assert_eq!(half(f32::INFINITY), 0);
         assert_eq!(half(1e9), 0x7bff);
+    }
+
+    #[test]
+    fn raw_texture_cache_keys_include_dimensions_and_encoding() {
+        let pixels: Arc<[u8]> = vec![255; 16].into();
+        let tall = TextureData::Rgba {
+            width: 1,
+            height: 4,
+            pixels: pixels.clone(),
+        };
+        let square = TextureData::Rgba {
+            width: 2,
+            height: 2,
+            pixels: pixels.clone(),
+        };
+        let encoded = TextureData::Encoded(pixels.clone());
+        let hash = content_hash(&pixels);
+        assert_ne!(
+            texture_key(&tall, hash, Space::Color),
+            texture_key(&square, hash, Space::Color)
+        );
+        assert_ne!(
+            texture_key(&tall, hash, Space::Color),
+            texture_key(&encoded, hash, Space::Color)
+        );
+        assert_eq!(
+            texture_key(&tall, hash, Space::Color),
+            texture_key(&tall.clone(), hash, Space::Color)
+        );
+    }
+
+    #[test]
+    fn raw_texture_dimensions_do_not_reuse_a_different_gpu_view() {
+        let Some(gpu) = crate::gpu() else {
+            eprintln!("SKIP: texture dimension regression requires an available GPU");
+            return;
+        };
+        let textures = Textures::default();
+        let pixels: Arc<[u8]> = vec![255; 16].into();
+        let tall = TextureData::Rgba {
+            width: 1,
+            height: 4,
+            pixels: pixels.clone(),
+        };
+        let square = TextureData::Rgba {
+            width: 2,
+            height: 2,
+            pixels,
+        };
+        assert_eq!(
+            textures
+                .get(&gpu.device, &gpu.queue, &tall, Space::Color)
+                .unwrap()
+                .mips,
+            3
+        );
+        assert_eq!(
+            textures
+                .get(&gpu.device, &gpu.queue, &square, Space::Color)
+                .unwrap()
+                .mips,
+            2
+        );
+        assert_eq!(textures.state.lock().unwrap().entries.len(), 2);
+        eprintln!("GPU texture dimension regression exercised both real texture views");
     }
 
     #[test]
