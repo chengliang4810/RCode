@@ -36,9 +36,8 @@ const STAGING_TTL: Duration = Duration::from_secs(10 * 60);
 /// commits the bytes to its OWN uploads dir first (fast, offline-safe), the
 /// command queues immediately carrying refs, and the bytes chase it over the
 /// peer link. Any device resolves a ref against its own uploads dir — the
-/// deterministic committed name hashes the full upload id and original file
-/// name, making sender and
-/// host land the same file at the same relative path.
+/// committed identity hashes the full upload id and original file name. Each
+/// device resolves that identity locally with its own sanitized name suffix.
 pub const PENDING_REF_PREFIX: &str = "pending://";
 
 pub fn is_pending_ref(path: &str) -> bool {
@@ -222,11 +221,26 @@ impl Uploads {
             return Err(EngineError::Other("Upload too large".into()));
         }
         std::fs::create_dir_all(&self.inner.dir)?;
+        #[cfg(windows)]
+        let (persist_root, persist_path) = {
+            // tempfile passes these paths directly to MoveFileExW. Use a
+            // verbatim root internally, while retaining the ordinary path's
+            // Win32 normalization (notably trailing dots) for its basename.
+            let absolute = std::path::absolute(&path)?;
+            let name = absolute
+                .file_name()
+                .ok_or_else(|| EngineError::Other("Invalid upload destination".into()))?;
+            let root = self.inner.dir.canonicalize()?;
+            let destination = root.join(name);
+            (root, destination)
+        };
+        #[cfg(not(windows))]
+        let (persist_root, persist_path) = (&self.inner.dir, &path);
         use std::io::Write;
-        let mut temporary = tempfile::NamedTempFile::new_in(&self.inner.dir)?;
+        let mut temporary = tempfile::NamedTempFile::new_in(&persist_root)?;
         temporary.write_all(&bytes)?;
         temporary.as_file().sync_all()?;
-        if let Err(error) = temporary.persist_noclobber(&path) {
+        if let Err(error) = temporary.persist_noclobber(&persist_path) {
             if error.error.kind() != std::io::ErrorKind::AlreadyExists || !committed_file(&path)? {
                 return Err(error.error.into());
             }
@@ -690,6 +704,95 @@ mod tests {
         assert_eq!(reopened.commit("complete-id", "image.png").unwrap(), first);
         assert_eq!(std::fs::read(first).unwrap(), b"complete");
         assert!(!dir.path().join("tmp/complete-id").exists());
+    }
+
+    #[cfg(windows)]
+    fn windows_long_upload_root(dir: &Path) -> PathBuf {
+        use std::os::windows::ffi::OsStrExt;
+        let prefix_length = dir.as_os_str().encode_wide().count() + 1;
+        let root = dir.join("r".repeat(120usize.saturating_sub(prefix_length).max(1)));
+        std::fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_long_upload_commit_preserves_ordinary_paths_and_retries() {
+        use std::os::windows::ffi::OsStrExt;
+        let dir = tempfile::tempdir().unwrap();
+        let root = windows_long_upload_root(dir.path());
+        let name = format!("{}.png", "n".repeat(76));
+        let id = "12345678-1111-4111-8111-111111111111-v2";
+        let reference = pending_ref(id, &name);
+        let uploads = Uploads::from_root(&root);
+        let expected = uploads.pending_target(id, &name);
+        assert_eq!(name.len(), 80);
+        assert_eq!(expected.file_name().unwrap().len(), 152);
+        assert!(expected.as_os_str().encode_wide().count() > 260);
+        assert!(!expected.to_string_lossy().starts_with(r"\\?\"));
+        let source = tempfile::NamedTempFile::new_in(&root).unwrap();
+        assert!(source.path().as_os_str().encode_wide().count() < 260);
+        drop(source);
+        assert_eq!(uploads.resolve_pending(&reference), None);
+        uploads
+            .append(id, &BASE64.encode(b"long-path bytes"), Some(0))
+            .unwrap();
+        let published = uploads.commit(id, &name).unwrap();
+        assert_eq!(published, expected.to_string_lossy());
+        assert_eq!(uploads.dir(), root);
+        assert_eq!(std::fs::read(&published).unwrap(), b"long-path bytes");
+        assert_eq!(uploads.resolve_pending(&reference), Some(published.clone()));
+        assert_eq!(uploads.commit(id, &name).unwrap(), published);
+        assert_eq!(
+            uploads.read_chunk(&reference, 0, &[]).unwrap().data,
+            BASE64.encode(b"long-path bytes")
+        );
+
+        let canonical_root = root.canonicalize().unwrap();
+        let canonical = Uploads::from_root(&canonical_root);
+        let other_id = "12345678-2222-4222-8222-222222222222-v2";
+        canonical
+            .append(other_id, &BASE64.encode(b"canonical bytes"), Some(0))
+            .unwrap();
+        let published = canonical.commit(other_id, &name).unwrap();
+        assert_eq!(
+            published,
+            canonical.pending_target(other_id, &name).to_string_lossy()
+        );
+        assert!(published.starts_with(r"\\?\"));
+        assert_eq!(std::fs::read(&published).unwrap(), b"canonical bytes");
+        assert_eq!(canonical.commit(other_id, &name).unwrap(), published);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_trailing_dot_uploads_keep_the_input_paths_read_semantics() {
+        let dir = tempfile::tempdir().unwrap();
+        let long_root = windows_long_upload_root(dir.path());
+        let canonical_root = long_root.canonicalize().unwrap();
+        for (root, name) in [
+            (dir.path(), "note.".to_owned()),
+            (long_root.as_path(), format!("{}.", "n".repeat(79))),
+            (canonical_root.as_path(), "literal.".to_owned()),
+        ] {
+            let uploads = Uploads::from_root(root);
+            let id = "87654321-1111-4111-8111-111111111111-v2";
+            let reference = pending_ref(id, &name);
+            let expected = uploads.pending_target(id, &name);
+            uploads
+                .append(id, &BASE64.encode(b"trailing-dot bytes"), Some(0))
+                .unwrap();
+            let published = uploads.commit(id, &name).unwrap();
+            assert_eq!(published, expected.to_string_lossy());
+            assert!(published.ends_with('.'));
+            assert_eq!(std::fs::read(&published).unwrap(), b"trailing-dot bytes");
+            assert_eq!(uploads.resolve_pending(&reference), Some(published.clone()));
+            assert_eq!(uploads.commit(id, &name).unwrap(), published);
+            assert_eq!(
+                uploads.read_chunk(&reference, 0, &[]).unwrap().data,
+                BASE64.encode(b"trailing-dot bytes")
+            );
+        }
     }
 
     #[test]
