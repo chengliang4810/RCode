@@ -901,6 +901,9 @@ mod tests {
         for chat in ["deleted", "retained"] {
             let mut record = registration(registry.clone(), root.path().into()).record;
             record.chat_id = chat.into();
+            // A completed command has no live group. Zero is reserved and can
+            // match kernel process groups on Linux, so it is not a dead PID.
+            record.pid = u32::MAX;
             record.status = "completed".into();
             record.exit_code = Some(0);
             let output = registry.output_path(&record.id).unwrap();
