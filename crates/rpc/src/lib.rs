@@ -360,7 +360,11 @@ pub struct ServerFrame {
     pub ok: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub err: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "present_value",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub item: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub done: bool,
@@ -483,6 +487,9 @@ mod tests {
                     ))
                 }
                 "Never" => Ok(RpcReply::Stream(futures::stream::pending().boxed())),
+                "NullStream" => Ok(RpcReply::Stream(
+                    futures::stream::iter([serde_json::Value::Null, serde_json::json!(1)]).boxed(),
+                )),
                 "Boom" => Err(RpcError::Failed("boom".into())),
                 "Capability" => Err(RpcError::Capability(
                     capability_errors::PULL_REQUESTS_AUTHENTICATION.into(),
@@ -670,6 +677,26 @@ mod tests {
             .await
             .expect("second device's quiet stream cancelled")
             .expect("second drop signal");
+    }
+
+    #[tokio::test]
+    async fn stream_null_items_survive_the_wire_round_trip() {
+        let frame: ServerFrame = serde_json::from_str(r#"{"id":1,"item":null}"#).unwrap();
+        assert_eq!(frame.item, Some(serde_json::Value::Null));
+        assert!(
+            serde_json::from_str::<ServerFrame>(r#"{"id":1}"#)
+                .unwrap()
+                .item
+                .is_none()
+        );
+        let client = memory_client(Arc::new(TestService));
+        let mut items = client
+            .subscribe("NullStream", serde_json::Value::Null)
+            .await
+            .unwrap();
+        assert_eq!(items.recv().await, Some(serde_json::Value::Null));
+        assert_eq!(items.recv().await, Some(serde_json::json!(1)));
+        assert_eq!(items.recv().await, None);
     }
 
     #[tokio::test]
