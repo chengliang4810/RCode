@@ -20,6 +20,7 @@ class RpcFixture {
   int mutations = 0;
   int subscriptions = 0;
   int cancellations = 0;
+  int handshakes = 0;
   String identity = 'fixture-host';
   bool dropMutationReply = false;
   bool holdingHandshake = false;
@@ -37,6 +38,7 @@ class RpcFixture {
       }
       if (holdingHandshake) await handshakeRelease.future;
       final socket = await WebSocketTransformer.upgrade(request);
+      handshakes++;
       sockets.add(socket);
       watches[socket] = {};
       socket.listen(
@@ -180,6 +182,28 @@ void main() {
       expect(fixture.subscriptions, count);
     },
   );
+
+  test('a successful handshake arriving after its timeout is closed', () async {
+    final fixture = RpcFixture()..holdingHandshake = true;
+    await fixture.start();
+    final rpc = RpcClient(
+      callTimeout: const Duration(milliseconds: 30),
+      retryDelay: const Duration(days: 1),
+    );
+    addTearDown(() async {
+      await rpc.disconnect();
+      rpc.dispose();
+      await fixture.close();
+    });
+    await expectLater(
+      rpc.connect(fixture.url, 'FixtureKey12'),
+      throwsA(isA<RpcException>()),
+    );
+    fixture.handshakeRelease.complete();
+    await eventually(() => fixture.handshakes == 1);
+    await eventually(() => fixture.sockets.isEmpty);
+    expect(rpc.connected, isFalse);
+  });
 
   test('an older delayed handshake cannot replace a newer host', () async {
     final old = RpcFixture()..holdingHandshake = true;

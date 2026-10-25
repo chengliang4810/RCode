@@ -101,10 +101,28 @@ class RpcClient extends ChangeNotifier {
       return;
     }
     try {
-      final socket = await WebSocket.connect(
-        host!,
-        headers: {'Authorization': 'Bearer ${_key!}'},
-      ).timeout(callTimeout);
+      var timedOut = false;
+      final socket =
+          await WebSocket.connect(
+                host!,
+                headers: {'Authorization': 'Bearer ${_key!}'},
+              )
+              .then((socket) {
+                // Future.timeout does not cancel the underlying handshake. A socket
+                // arriving after its deadline has no owner and must be closed here.
+                if (timedOut) unawaited(socket.close());
+                return socket;
+              })
+              .timeout(
+                callTimeout,
+                onTimeout: () {
+                  timedOut = true;
+                  throw TimeoutException(
+                    'WebSocket connection timed out',
+                    callTimeout,
+                  );
+                },
+              );
       if (_disposed || generation != _generation) {
         await socket.close();
         return;
