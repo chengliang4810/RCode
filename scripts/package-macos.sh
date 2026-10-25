@@ -37,9 +37,10 @@ mkdir -p "$OUT_DIR"
 ENTITLEMENTS="$OUT_DIR/RCode.entitlements"
 plutil -convert xml1 -o "$ENTITLEMENTS" "$ROOT/dist/macos/RCode.entitlements"
 plutil -lint "$ENTITLEMENTS"
-BIN="${RCODE_PACKAGE_BIN:-$ROOT/target/$TARGET/release/rcode}"
-if [[ -z "${RCODE_PACKAGE_BIN:-}" ]]; then
-  cargo build --release --locked -p rcode --target "$TARGET"
+if [[ -n "${RCODE_PACKAGE_BIN:-}" ]]; then
+  BIN="$RCODE_PACKAGE_BIN"
+else
+  BIN="$(python3 "$ROOT/scripts/build-package-executable.py" --target "$TARGET")"
 fi
 [[ "$(lipo -archs "$BIN")" == "$ARCH" ]] || { echo "Incorrect Mach-O architecture" >&2; exit 1; }
 [[ "$("$BIN" --version)" == "rcode $VERSION" ]] || { echo "Incorrect executable version" >&2; exit 1; }

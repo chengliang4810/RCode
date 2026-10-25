@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 import plistlib
 import struct
+import sys
 import tarfile
 import tempfile
 import unittest
@@ -14,6 +15,9 @@ import zipfile
 spec = importlib.util.spec_from_file_location("prepare_release", Path(__file__).with_name("prepare-release.py"))
 release = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(release)
+build_spec = importlib.util.spec_from_file_location("build_package_executable", Path(__file__).with_name("build-package-executable.py"))
+package_build = importlib.util.module_from_spec(build_spec)
+build_spec.loader.exec_module(package_build)
 VERSION = "0.0.1-beta"
 
 
@@ -161,6 +165,71 @@ class ReleasePackagingTests(unittest.TestCase):
             stream.write(b"different build")
         with self.assertRaisesRegex(ValueError, "executables differ"):
             release.prepare_release(self.root, VERSION)
+
+
+class PackageExecutableTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.stale = self.root / "target/release/rcode.exe"
+        self.stale.parent.mkdir(parents=True)
+        self.stale.write_bytes(b"same-version-stale-build")
+        self.fresh = self.root / "external target/with spaces/target-triple/release/rcode.exe"
+        self.fresh.parent.mkdir(parents=True)
+        self.fresh.write_bytes(b"same-version-fresh-build")
+
+    def cargo(self, executable=True, status=0):
+        fake = self.root / "fake_cargo.py"
+        messages = [{"reason": "compiler-artifact", "target": {"name": "some_dependency", "kind": ["bin"]}, "executable": str(self.stale)}]
+        if executable:
+            messages.append({"reason": "compiler-artifact", "target": {"name": "rcode", "kind": ["bin"]}, "executable": str(self.fresh), "fresh": False})
+        fake.write_text(
+            "import json,sys\nfrom pathlib import Path\n"
+            "Path('cargo-args.json').write_text(json.dumps(sys.argv[1:]))\n"
+            f"messages=json.loads({json.dumps(messages)!r})\n"
+            "for message in messages: print(json.dumps(message))\n"
+            f"sys.exit({status})\n", encoding="utf-8"
+        )
+        return [sys.executable, str(fake)]
+
+    def test_actual_cargo_artifact_wins_over_same_version_default_target(self):
+        executable = package_build.build_executable(self.root, target="configured-target", cargo_command=self.cargo())
+        self.assertEqual(executable, self.fresh.resolve())
+        self.assertEqual(executable.read_bytes(), b"same-version-fresh-build")
+        args = json.loads((self.root / "cargo-args.json").read_text())
+        self.assertIn("--message-format=json-render-diagnostics", args)
+        self.assertEqual(args[-2:], ["--target", "configured-target"])
+        self.assertIn("--release", args)
+
+    def test_build_failure_never_falls_back_to_a_stale_executable(self):
+        with self.assertRaisesRegex(RuntimeError, "build failed"):
+            package_build.build_executable(self.root, cargo_command=self.cargo(status=1))
+
+    def test_missing_artifact_never_falls_back_to_a_stale_executable(self):
+        with self.assertRaisesRegex(RuntimeError, "did not report"):
+            package_build.build_executable(self.root, cargo_command=self.cargo(executable=False))
+
+    def test_missing_reported_executable_is_rejected(self):
+        command = self.cargo()
+        self.fresh.unlink()
+        with self.assertRaisesRegex(RuntimeError, "missing executable"):
+            package_build.build_executable(self.root, cargo_command=command)
+
+    def test_development_profile_does_not_request_release(self):
+        package_build.build_executable(self.root, profile="dev", cargo_command=self.cargo())
+        args = json.loads((self.root / "cargo-args.json").read_text())
+        self.assertNotIn("--release", args)
+
+    def test_packagers_use_the_reported_artifact_and_keep_mac_override(self):
+        root = Path(__file__).resolve().parent
+        for name in ["package-linux.sh", "package-macos.sh", "package-windows.ps1"]:
+            source = (root / name).read_text(encoding="utf-8")
+            self.assertIn("build-package-executable.py", source)
+            self.assertNotIn("$ROOT/target/release/rcode", source)
+            self.assertNotIn("$ROOT/target/$TARGET/release/rcode", source)
+            self.assertNotIn("'./target/release/rcode.exe'", source)
+        self.assertIn('BIN="$RCODE_PACKAGE_BIN"', (root / "package-macos.sh").read_text())
 
 
 if __name__ == "__main__":

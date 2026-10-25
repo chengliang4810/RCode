@@ -42,12 +42,12 @@ function Get-WindowsPackageArch([string]$Path) {
 
 Push-Location $root
 try {
-    cargo build --release --locked -p rcode
+    $executable = & python (Join-Path $PSScriptRoot 'build-package-executable.py')
     if ($LASTEXITCODE -ne 0) { throw 'Windows build failed' }
     # Explicit pipes also work for the GUI-subsystem executable in CI. A
     # PowerShell collection match does not populate the scalar $Matches map.
     $probe = [Diagnostics.ProcessStartInfo]::new()
-    $probe.FileName = (Resolve-Path -LiteralPath './target/release/rcode.exe').Path
+    $probe.FileName = (Resolve-Path -LiteralPath $executable).Path
     $probe.Arguments = '--version'
     $probe.UseShellExecute = $false
     $probe.CreateNoWindow = $true
@@ -73,7 +73,7 @@ try {
     $stage = Join-Path $out "rcode-$version-windows-$arch"
     if (Test-Path -LiteralPath $stage) { Remove-Item -LiteralPath $stage -Recurse -Force }
     New-Item -ItemType Directory -Force -Path $stage | Out-Null
-    Copy-Item -LiteralPath './target/release/rcode.exe' -Destination (Join-Path $stage 'rcode.exe')
+    Copy-Item -LiteralPath $probe.FileName -Destination (Join-Path $stage 'rcode.exe')
     @{ releases_url = $ReleasesUrl } | ConvertTo-Json | Set-Content -Encoding utf8NoBOM -LiteralPath (Join-Path $stage 'rcode-update.json')
     Copy-Item -LiteralPath 'LICENSE','LICENSE-APACHE','THIRD_PARTY_NOTICES.md' -Destination $stage
     $licenses = Join-Path $stage 'licenses/fonts'
@@ -83,7 +83,7 @@ try {
     New-Item -ItemType Directory -Force -Path $iconLicenses | Out-Null
     Copy-Item -LiteralPath 'crates/ui/assets/file-icons/LICENSE.symbols' -Destination $iconLicenses
     Compress-Archive -Path "$stage/*" -DestinationPath "$stage.zip" -Force
-    Copy-Item -LiteralPath './target/release/rcode.exe' -Destination "$stage.exe"
+    Copy-Item -LiteralPath $probe.FileName -Destination "$stage.exe"
     # The per-user installer wraps the same staged directory (rcode-update.json
     # included), so installed copies update in place like the portable zip.
     $iscc = Find-InnoSetupCompiler

@@ -21,11 +21,9 @@ TARBALL="$STAGE.tar.gz"
 
 cd "$ROOT"
 if [[ "$PROFILE" == "release" ]]; then
-  cargo build --release --locked -p rcode
-  BIN="$ROOT/target/release/rcode"
+  BIN="$(python3 "$ROOT/scripts/build-package-executable.py")"
 else
-  cargo build --locked -p rcode
-  BIN="$ROOT/target/debug/rcode"
+  BIN="$(python3 "$ROOT/scripts/build-package-executable.py" --profile dev)"
 fi
 
 [[ "$("$BIN" --version)" == "rcode $VERSION" ]] || { echo "Incorrect executable version or missing runtime dependency" >&2; exit 1; }
