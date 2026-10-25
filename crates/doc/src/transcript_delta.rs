@@ -171,6 +171,8 @@ fn try_text_append(prev: &SessionMessageEntry, next: &SessionMessageEntry) -> Op
         || prev.device_id != next.device_id
         || prev.status != next.status
         || prev.continuation_of != next.continuation_of
+        || prev.duration_ms != next.duration_ms
+        || prev.excluded != next.excluded
         || prev.parts.len() != next.parts.len()
     {
         return None;
@@ -385,6 +387,17 @@ mod tests {
         apply(&[], &[a.clone()]);
         apply(&[a.clone()], &[a.clone(), b0.clone()]);
         apply(&[a.clone(), b0], &[a, b1]);
+    }
+
+    #[test]
+    fn text_append_with_changed_entry_metadata_round_trips() {
+        let before = entry("a", "hello");
+        for (duration_ms, excluded) in [(Some(42), false), (None, true), (Some(42), true)] {
+            let mut after = entry("a", "hello world");
+            after.duration_ms = duration_ms;
+            after.excluded = excluded;
+            apply(std::slice::from_ref(&before), &[after]);
+        }
     }
 
     #[test]
