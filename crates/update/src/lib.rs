@@ -514,10 +514,8 @@ impl InstallKind {
         match self {
             Self::MacApp { bundle } => {
                 apply_mac_app(staged, bundle)?;
-                // The swap copied the staged bundle; the cache is spent.
-                if let Some(version_dir) = staged.parent() {
-                    let _ = std::fs::remove_dir_all(version_dir);
-                }
+                // Another process may still be copying this shared cache.
+                // Reclamation needs explicit ownership/leases, not a PathBuf.
                 if relaunch {
                     relaunch_after_exit(Path::new("/usr/bin/open"), bundle);
                 }
@@ -725,14 +723,36 @@ fn record_verified_stage(root: &Path, binary: &Path, expected: &str) -> anyhow::
 
 /// Old, incomplete or modified caches must never be executed as a version
 /// probe. The marker is written only after a checksum-verified extraction.
+#[cfg(test)]
 fn cached_stage_verified(root: &Path, binary: &Path, expected: &str) -> bool {
-    let verify = || -> anyhow::Result<bool> {
-        let record: StageVerification =
-            serde_json::from_slice(&std::fs::read(root.join(".rcode-verified.json"))?)?;
-        Ok(record.artifact_sha256.eq_ignore_ascii_case(expected)
-            && record.executable_sha256 == executable_digest(binary)?)
+    verified_stage_record(root, binary)
+        .is_some_and(|record| record.artifact_sha256.eq_ignore_ascii_case(expected))
+}
+
+fn verified_stage_record(root: &Path, binary: &Path) -> Option<StageVerification> {
+    let record: StageVerification =
+        serde_json::from_slice(&std::fs::read(root.join(".rcode-verified.json")).ok()?).ok()?;
+    (record.artifact_sha256.len() == 64
+        && record
+            .artifact_sha256
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+        && record.executable_sha256 == executable_digest(binary).ok()?)
+    .then_some(record)
+}
+
+/// Verified version directories are immutable: other callers can still hold
+/// their paths as an apply source. A changed artifact needs a new version.
+fn reusable_verified_stage(root: &Path, binary: &Path, expected: &str) -> anyhow::Result<bool> {
+    let Some(record) = verified_stage_record(root, binary) else {
+        return Ok(false);
     };
-    verify().unwrap_or(false)
+    anyhow::ensure!(
+        record.artifact_sha256.eq_ignore_ascii_case(expected),
+        "release artifact conflict at {}: a verified cache has a different SHA-256; publish the changed artifact under a new version",
+        root.display()
+    );
+    Ok(true)
 }
 
 fn run(program: &str, args: &[&str]) -> anyhow::Result<()> {
@@ -779,6 +799,39 @@ async fn verify_staged_binary(binary: &Path, version: &str) -> anyhow::Result<()
 // Managed (symlink) installs — the daemon/VPS path and Linux desktop
 // ---------------------------------------------------------------------------
 
+fn update_stage_directory(app_root: &Path, version: &str) -> anyhow::Result<tempfile::TempDir> {
+    std::fs::create_dir_all(app_root)?;
+    tempfile::Builder::new()
+        .prefix(&format!(".stage-{version}-{}-", std::process::id()))
+        .tempdir_in(app_root)
+        .with_context(|| format!("creating a stage in {}", app_root.display()))
+}
+
+/// Serialize only cache replacement, including across CLI/desktop processes.
+/// Downloading and version probes never hold this per-installation file lock.
+fn promote_verified_stage(
+    unpacked: &Path,
+    dest: &Path,
+    binary_relative: &Path,
+    expected: &str,
+) -> anyhow::Result<()> {
+    let app_root = dest.parent().context("release stage has no parent")?;
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(app_root.join(".stage-promote.lock"))?;
+    lock.lock().context("locking release stage promotion")?;
+    if reusable_verified_stage(dest, &dest.join(binary_relative), expected)? {
+        return Ok(());
+    }
+    if dest.exists() {
+        std::fs::remove_dir_all(dest).context("removing an unverified cached stage")?;
+    }
+    std::fs::rename(unpacked, dest).with_context(|| format!("moving {} into place", dest.display()))
+}
+
 /// Download + unpack the headless tarball into `app_root/<ver>` (idempotent —
 /// an already-staged version is reused). Returns the versioned dir.
 pub async fn stage_headless(
@@ -796,12 +849,13 @@ pub async fn stage_headless(
     let file = headless_artifact(version);
     let expected = release_checksum(manifest, &file)?;
     let dest = app_root.join(version);
-    if cached_stage_verified(&dest, &dest.join("rcode"), expected) {
+    if reusable_verified_stage(&dest, &dest.join("rcode"), expected)? {
         return Ok(dest);
     }
-    let stage = app_root.join(format!(".stage-{version}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&stage);
-    std::fs::create_dir_all(&stage).with_context(|| format!("creating {}", stage.display()))?;
+    // Each caller owns its directory. Dropping this guard also cleans up when
+    // the download future is cancelled, without touching another caller's stage.
+    let stage_directory = update_stage_directory(app_root, version)?;
+    let stage = stage_directory.path();
     let result = async {
         let tarball = stage.join(&file);
         download_release_file(release_base, manifest, &file, &tarball).await?;
@@ -824,21 +878,10 @@ pub async fn stage_headless(
         }
         verify_staged_binary(&unpacked.join("rcode"), version).await?;
         record_verified_stage(&unpacked, &unpacked.join("rcode"), expected)?;
-        if dest.exists() && !cached_stage_verified(&dest, &dest.join("rcode"), expected) {
-            std::fs::remove_dir_all(&dest).context("removing an unverified cached stage")?;
-        }
-        match std::fs::rename(&unpacked, &dest) {
-            Ok(()) => {}
-            // Lost a race with another stager — the staged copy is equivalent.
-            Err(_) if cached_stage_verified(&dest, &dest.join("rcode"), expected) => {}
-            Err(err) => {
-                return Err(err).with_context(|| format!("moving {} into place", dest.display()));
-            }
-        }
+        promote_verified_stage(&unpacked, &dest, Path::new("rcode"), expected)?;
         Ok(dest.clone())
     }
     .await;
-    let _ = std::fs::remove_dir_all(&stage);
     result
 }
 
@@ -851,8 +894,10 @@ pub fn apply_headless(app_root: &Path, version: &str) -> anyhow::Result<()> {
         if !target.join("rcode").exists() {
             bail!("{} is not a staged install", target.display());
         }
-        let tmp = app_root.join(format!(".current-{}", std::process::id()));
-        let _ = std::fs::remove_file(&tmp);
+        let temporary = tempfile::Builder::new()
+            .prefix(".current-")
+            .tempdir_in(app_root)?;
+        let tmp = temporary.path().join("next");
         std::os::unix::fs::symlink(&target, &tmp).context("creating current symlink")?;
         std::fs::rename(&tmp, app_root.join("current")).context("swapping current symlink")?;
         Ok(())
@@ -933,17 +978,15 @@ pub async fn stage_mac_app(
     let dir = updates.join(version);
     let staged = dir.join("RCode.app");
     let staged_binary = staged.join("Contents/MacOS/rcode");
-    if cached_stage_verified(&dir, &staged_binary, expected) {
+    if reusable_verified_stage(&dir, &staged_binary, expected)? {
         return Ok(staged);
     }
-    prune_stale_stages(&updates, version);
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
-    let tarball = dir.join(&file);
+    let stage_directory = update_stage_directory(&updates, version)?;
+    let tarball = stage_directory.path().join(&file);
     download_release_file(release_base, manifest, &file, &tarball).await?;
-    let unpack = dir.join(".unpack");
+    let unpack = stage_directory.path().join("unpacked");
     std::fs::create_dir_all(&unpack)?;
-    let unpacked = run(
+    run(
         "tar",
         &[
             "-xzf",
@@ -951,37 +994,21 @@ pub async fn stage_mac_app(
             "-C",
             &unpack.to_string_lossy(),
         ],
-    )
-    .map(|()| unpack.join("RCode.app"));
-    std::fs::remove_file(&tarball).ok();
-    let unpacked = unpacked?;
+    )?;
+    let unpacked = unpack.join("RCode.app");
     let unpacked_binary = unpacked.join("Contents/MacOS/rcode");
     if !unpacked_binary.exists() {
-        let _ = std::fs::remove_dir_all(&dir);
         bail!("app tarball {file} did not contain RCode.app");
     }
-    if let Err(err) = verify_staged_binary(&unpacked_binary, version).await {
-        let _ = std::fs::remove_dir_all(&dir);
-        return Err(err);
-    }
-    std::fs::rename(&unpacked, &staged)
-        .with_context(|| format!("moving {} into place", staged.display()))?;
-    record_verified_stage(&dir, &staged_binary, expected)?;
-    let _ = std::fs::remove_dir_all(&unpack);
+    verify_staged_binary(&unpacked_binary, version).await?;
+    record_verified_stage(&unpack, &unpacked_binary, expected)?;
+    promote_verified_stage(
+        &unpack,
+        &dir,
+        Path::new("RCode.app/Contents/MacOS/rcode"),
+        expected,
+    )?;
     Ok(staged)
-}
-
-/// Staged bundles of other versions are dead weight (each is a whole app):
-/// drop them whenever a new version stages.
-fn prune_stale_stages(updates: &Path, keep: &str) {
-    let Ok(entries) = std::fs::read_dir(updates) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        if entry.file_name() != keep {
-            let _ = std::fs::remove_dir_all(entry.path());
-        }
-    }
 }
 
 /// Swap the installed bundle for the staged one: `ditto` the staged copy next to
@@ -989,34 +1016,91 @@ fn prune_stale_stages(updates: &Path, keep: &str) {
 /// old bundle is restored if the second rename fails.
 pub fn apply_mac_app(staged: &Path, bundle: &Path) -> anyhow::Result<()> {
     require_mac_app_update_platform()?;
+    apply_mac_app_transaction(
+        staged,
+        bundle,
+        |source, fresh| {
+            run(
+                "ditto",
+                &[&source.to_string_lossy(), &fresh.to_string_lossy()],
+            )
+        },
+        |from, to| std::fs::rename(from, to),
+    )
+}
+
+/// Resolve the target's parent and any final symlink without requiring the
+/// bundle itself to exist during another install's brief rename boundary.
+fn bundle_install_target(bundle: &Path) -> anyhow::Result<PathBuf> {
+    let mut target = bundle.to_owned();
+    for _ in 0..32 {
+        let parent = target
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        let name = target.file_name().context("app bundle has no name")?;
+        let parent = parent
+            .canonicalize()
+            .context("resolving app installation directory")?;
+        let candidate = parent.join(name);
+        match std::fs::symlink_metadata(&candidate) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                let link = std::fs::read_link(&candidate)?;
+                target = if link.is_absolute() {
+                    link
+                } else {
+                    parent.join(link)
+                };
+            }
+            Ok(_) => return Ok(candidate),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(candidate),
+            Err(error) => return Err(error.into()),
+        }
+    }
+    bail!("app bundle has too many symbolic links")
+}
+
+fn apply_mac_app_transaction(
+    staged: &Path,
+    bundle: &Path,
+    copy: impl FnOnce(&Path, &Path) -> anyhow::Result<()>,
+    mut rename: impl FnMut(&Path, &Path) -> std::io::Result<()>,
+) -> anyhow::Result<()> {
+    let bundle = bundle_install_target(bundle)?;
     let parent = bundle
         .parent()
         .context("app bundle has no parent directory")?;
-    let name = bundle
-        .file_name()
-        .context("app bundle has no name")?
-        .to_string_lossy();
-    let pid = std::process::id();
-    let fresh = parent.join(format!(".{name}.new-{pid}"));
-    let old = parent.join(format!(".{name}.old-{pid}"));
-    let _ = std::fs::remove_dir_all(&fresh);
-    if let Err(err) = run(
-        "ditto",
-        &[&staged.to_string_lossy(), &fresh.to_string_lossy()],
-    ) {
-        let _ = std::fs::remove_dir_all(&fresh);
-        return Err(err);
+    let mut lock_name = std::ffi::OsString::from(".");
+    lock_name.push(bundle.file_name().context("app bundle has no name")?);
+    lock_name.push(".update.lock");
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(parent.join(lock_name))?;
+    // Stable per actual destination, shared by GUI/CLI and independent opens.
+    // Only copying, swapping and rollback hold this lock; no download or UI wait.
+    lock.lock().context("locking app bundle installation")?;
+    let transaction = tempfile::Builder::new()
+        .prefix(".rcode-install-")
+        .tempdir_in(parent)?;
+    let fresh = transaction.path().join("new.app");
+    let old = transaction.path().join("old.app");
+    copy(staged, &fresh).context("copying the staged app bundle")?;
+    rename(&bundle, &old).context("moving the current app aside")?;
+    if let Err(error) = rename(&fresh, &bundle) {
+        if let Err(rollback) = rename(&old, &bundle) {
+            // This is the only surviving installation. Never let TempDir's
+            // destructor reclaim it when rollback could not restore its name.
+            let recovery = transaction.keep().join("old.app");
+            bail!(
+                "installing the new app bundle failed: {error}; rollback failed: {rollback}; original app preserved at {}",
+                recovery.display()
+            );
+        }
+        return Err(error).context("installing the new app bundle; original app restored");
     }
-    if let Err(err) = std::fs::rename(bundle, &old) {
-        let _ = std::fs::remove_dir_all(&fresh);
-        return Err(err).context("moving the current app aside");
-    }
-    if let Err(err) = std::fs::rename(&fresh, bundle) {
-        let _ = std::fs::rename(&old, bundle);
-        let _ = std::fs::remove_dir_all(&fresh);
-        return Err(err).context("installing the new app bundle");
-    }
-    let _ = std::fs::remove_dir_all(&old);
     Ok(())
 }
 
@@ -2199,6 +2283,776 @@ mod tests {
         )
         .unwrap();
         std::fs::read(tarball).unwrap()
+    }
+
+    #[tokio::test]
+    async fn cancelled_headless_stage_cleans_only_its_own_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let sibling = update_stage_directory(root.path(), "9.9.9").unwrap();
+        let sibling_file = sibling.path().join("keep");
+        std::fs::write(&sibling_file, b"another download").unwrap();
+        let app_root = root.path().to_owned();
+        let (ready, started) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            let directory = update_stage_directory(&app_root, "9.9.9").unwrap();
+            ready.send(directory.path().to_owned()).unwrap();
+            std::future::pending::<()>().await;
+            drop(directory);
+        });
+        let cancelled = started.await.unwrap();
+        assert_ne!(cancelled, sibling.path());
+        assert!(cancelled.is_dir());
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        assert!(!cancelled.exists());
+        assert_eq!(std::fs::read(sibling_file).unwrap(), b"another download");
+    }
+
+    #[test]
+    fn concurrent_headless_promotions_preserve_the_verified_cache() {
+        let root = tempfile::tempdir().unwrap();
+        let dest = root.path().join("9.9.9");
+        std::fs::create_dir(&dest).unwrap();
+        std::fs::write(dest.join("rcode"), b"old unverified cache").unwrap();
+        let expected = "a".repeat(64);
+        let stages: Vec<_> = (0..2)
+            .map(|_| {
+                let stage = update_stage_directory(root.path(), "9.9.9").unwrap();
+                let unpacked = stage.path().join("unpacked");
+                std::fs::create_dir(&unpacked).unwrap();
+                std::fs::write(unpacked.join("rcode"), b"verified image").unwrap();
+                record_verified_stage(&unpacked, &unpacked.join("rcode"), &expected).unwrap();
+                stage
+            })
+            .collect();
+        assert_ne!(stages[0].path(), stages[1].path());
+        let barrier = std::sync::Barrier::new(stages.len());
+        std::thread::scope(|scope| {
+            let tasks: Vec<_> = stages
+                .iter()
+                .map(|stage| {
+                    let barrier = &barrier;
+                    let dest = &dest;
+                    let expected = &expected;
+                    scope.spawn(move || {
+                        barrier.wait();
+                        promote_verified_stage(
+                            &stage.path().join("unpacked"),
+                            dest,
+                            Path::new("rcode"),
+                            expected,
+                        )
+                    })
+                })
+                .collect();
+            for task in tasks {
+                task.join().unwrap().unwrap();
+            }
+        });
+        assert!(cached_stage_verified(&dest, &dest.join("rcode"), &expected));
+        assert_eq!(
+            std::fs::read(dest.join("rcode")).unwrap(),
+            b"verified image"
+        );
+    }
+
+    #[test]
+    fn failed_headless_promotion_does_not_remove_another_stage() {
+        let root = tempfile::tempdir().unwrap();
+        let first = update_stage_directory(root.path(), "9.9.9").unwrap();
+        let second = update_stage_directory(root.path(), "9.9.9").unwrap();
+        let keep = second.path().join("keep");
+        std::fs::write(&keep, b"another download").unwrap();
+        // A directory in the lock file's place makes promotion fail before
+        // touching a destination or any other in-progress download.
+        std::fs::create_dir(root.path().join(".stage-promote.lock")).unwrap();
+        let abandoned = first.path().to_owned();
+        assert!(
+            promote_verified_stage(
+                first.path(),
+                &root.path().join("9.9.9"),
+                Path::new("rcode"),
+                &"a".repeat(64)
+            )
+            .is_err()
+        );
+        drop(first);
+        assert!(!abandoned.exists());
+        assert_eq!(std::fs::read(keep).unwrap(), b"another download");
+    }
+
+    #[test]
+    fn staging_another_version_preserves_completed_and_active_sources() {
+        let root = tempfile::tempdir().unwrap();
+        let active = update_stage_directory(root.path(), "3.0.0").unwrap();
+        std::fs::write(active.path().join("downloading"), b"in progress").unwrap();
+        for version in ["1.0.0", "2.0.0"] {
+            let incoming = update_stage_directory(root.path(), version).unwrap();
+            std::fs::write(incoming.path().join("rcode"), version).unwrap();
+            record_verified_stage(
+                incoming.path(),
+                &incoming.path().join("rcode"),
+                &"a".repeat(64),
+            )
+            .unwrap();
+            promote_verified_stage(
+                incoming.path(),
+                &root.path().join(version),
+                Path::new("rcode"),
+                &"a".repeat(64),
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            std::fs::read(root.path().join("1.0.0/rcode")).unwrap(),
+            b"1.0.0"
+        );
+        assert_eq!(
+            std::fs::read(root.path().join("2.0.0/rcode")).unwrap(),
+            b"2.0.0"
+        );
+        assert!(active.path().join("downloading").is_file());
+        assert!(root.path().join(".stage-promote.lock").is_file());
+    }
+
+    #[test]
+    fn a_different_artifact_for_a_verified_version_is_rejected_without_replacing_it() {
+        let root = tempfile::tempdir().unwrap();
+        let dest = root.path().join("1.0.0");
+        std::fs::create_dir(&dest).unwrap();
+        std::fs::write(dest.join("rcode"), b"original verified bytes").unwrap();
+        record_verified_stage(&dest, &dest.join("rcode"), &"a".repeat(64)).unwrap();
+        let incoming = update_stage_directory(root.path(), "1.0.0").unwrap();
+        std::fs::write(incoming.path().join("rcode"), b"different bytes").unwrap();
+        record_verified_stage(
+            incoming.path(),
+            &incoming.path().join("rcode"),
+            &"b".repeat(64),
+        )
+        .unwrap();
+        let error =
+            promote_verified_stage(incoming.path(), &dest, Path::new("rcode"), &"b".repeat(64))
+                .unwrap_err();
+        assert!(error.to_string().contains("release artifact conflict"));
+        assert!(error.to_string().contains("new version"));
+        assert_eq!(
+            std::fs::read(dest.join("rcode")).unwrap(),
+            b"original verified bytes"
+        );
+        assert!(cached_stage_verified(
+            &dest,
+            &dest.join("rcode"),
+            &"a".repeat(64)
+        ));
+        assert!(incoming.path().join("rcode").is_file());
+    }
+
+    fn write_test_bundle(bundle: &Path, bytes: &[u8]) {
+        let binary = bundle.join("Contents/MacOS/rcode");
+        std::fs::create_dir_all(binary.parent().unwrap()).unwrap();
+        std::fs::write(binary, bytes).unwrap();
+    }
+
+    fn copy_test_bundle(source: &Path, target: &Path) -> anyhow::Result<()> {
+        let bytes = std::fs::read(source.join("Contents/MacOS/rcode"))?;
+        write_test_bundle(target, &bytes);
+        Ok(())
+    }
+
+    #[test]
+    fn concurrent_app_bundle_transactions_serialize_the_same_destination() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let root = tempfile::tempdir().unwrap();
+        let bundle = root.path().join("RCode.app");
+        let source = root.path().join("cached.app");
+        write_test_bundle(&bundle, b"old");
+        write_test_bundle(&source, b"new");
+        let barrier = std::sync::Barrier::new(2);
+        let active = AtomicUsize::new(0);
+        std::thread::scope(|scope| {
+            let tasks: Vec<_> = (0..2)
+                .map(|_| {
+                    scope.spawn(|| {
+                        barrier.wait();
+                        apply_mac_app_transaction(
+                            &source,
+                            &bundle,
+                            |from, to| {
+                                assert_eq!(active.fetch_add(1, Ordering::SeqCst), 0);
+                                std::thread::sleep(Duration::from_millis(20));
+                                let result = copy_test_bundle(from, to);
+                                active.fetch_sub(1, Ordering::SeqCst);
+                                result
+                            },
+                            |from, to| std::fs::rename(from, to),
+                        )
+                    })
+                })
+                .collect();
+            for task in tasks {
+                task.join().unwrap().unwrap();
+            }
+        });
+        assert_eq!(
+            std::fs::read(bundle.join("Contents/MacOS/rcode")).unwrap(),
+            b"new"
+        );
+        assert!(source.join("Contents/MacOS/rcode").is_file());
+        assert!(std::fs::read_dir(root.path()).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".rcode-install-")
+        }));
+    }
+
+    struct InstallSubprocess {
+        child: std::process::Child,
+        log: PathBuf,
+    }
+
+    impl Drop for InstallSubprocess {
+        fn drop(&mut self) {
+            // Also runs on an assertion/timeout: no child may outlive its
+            // temporary installation directory or keep its file lock open.
+            if !matches!(self.child.try_wait(), Ok(Some(_))) {
+                let _ = self.child.kill();
+            }
+            let _ = self.child.wait();
+        }
+    }
+
+    impl InstallSubprocess {
+        fn spawn(root: &Path, role: &str) -> Self {
+            let log = root.join(format!("{role}.log"));
+            let output = std::fs::File::create(&log).unwrap();
+            let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+            command
+                .args([
+                    "--exact",
+                    "tests::app_bundle_install_subprocess",
+                    "--ignored",
+                    "--nocapture",
+                ])
+                .env("RCODE_TEST_INSTALL_ROOT", root)
+                .env("RCODE_TEST_INSTALL_ROLE", role)
+                .stdin(std::process::Stdio::null())
+                .stdout(output.try_clone().unwrap())
+                .stderr(output);
+            #[cfg(windows)]
+            {
+                use std::os::windows::process::CommandExt as _;
+                command.creation_flags(0x08000000); // CREATE_NO_WINDOW
+            }
+            Self {
+                child: command.spawn().unwrap(),
+                log,
+            }
+        }
+
+        fn wait_for_file(&mut self, path: &Path) {
+            let deadline = std::time::Instant::now() + Duration::from_secs(15);
+            while !path.is_file() {
+                if let Some(status) = self.child.try_wait().unwrap() {
+                    panic!(
+                        "install subprocess exited {status} before {}: {}",
+                        path.display(),
+                        std::fs::read_to_string(&self.log).unwrap_or_default()
+                    );
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "install subprocess timed out waiting for {}: {}",
+                    path.display(),
+                    std::fs::read_to_string(&self.log).unwrap_or_default()
+                );
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+
+        fn wait_success(&mut self) {
+            let deadline = std::time::Instant::now() + Duration::from_secs(15);
+            loop {
+                if let Some(status) = self.child.try_wait().unwrap() {
+                    assert!(
+                        status.success(),
+                        "install subprocess failed {status}: {}",
+                        std::fs::read_to_string(&self.log).unwrap_or_default()
+                    );
+                    return;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "install subprocess did not finish: {}",
+                    std::fs::read_to_string(&self.log).unwrap_or_default()
+                );
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "helper invoked only by the isolated cross-process installation test"]
+    fn app_bundle_install_subprocess() {
+        let root = PathBuf::from(
+            std::env::var_os("RCODE_TEST_INSTALL_ROOT").expect("parent fixture root"),
+        );
+        assert_eq!(
+            std::fs::read(root.join("fixture-owner")).unwrap(),
+            b"isolated update transaction fixture"
+        );
+        let role = std::env::var("RCODE_TEST_INSTALL_ROLE").expect("parent fixture role");
+        assert!(matches!(role.as_str(), "a" | "b"));
+        std::fs::write(root.join(format!("{role}.ready")), b"ready").unwrap();
+        if role == "b" {
+            // This is a real OS process, not another handle in one process.
+            // Prove A's live transaction owns the stable destination lock.
+            let probe = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(root.join(".RCode.app.update.lock"))
+                .unwrap();
+            assert!(
+                matches!(probe.try_lock(), Err(std::fs::TryLockError::WouldBlock)),
+                "the other process must hold the destination lock"
+            );
+            std::fs::write(root.join("b.blocked"), b"blocked").unwrap();
+        }
+        let source = root.join(format!("source-{role}.app"));
+        let bundle = if role == "b" {
+            root.join("alternate/../RCode.app")
+        } else {
+            root.join("RCode.app")
+        };
+        apply_mac_app_transaction(
+            &source,
+            &bundle,
+            |from, to| {
+                std::fs::write(root.join(format!("{role}.entered")), b"entered")?;
+                if role == "a" {
+                    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+                    while !root.join("release-a").is_file() {
+                        anyhow::ensure!(
+                            std::time::Instant::now() < deadline,
+                            "parent did not release transaction A"
+                        );
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                }
+                copy_test_bundle(from, to)
+            },
+            |from, to| std::fs::rename(from, to),
+        )
+        .unwrap();
+        std::fs::write(root.join(format!("{role}.done")), b"done").unwrap();
+    }
+
+    #[test]
+    fn separate_processes_serialize_app_bundle_installation_and_preserve_shared_sources() {
+        let root = tempfile::Builder::new()
+            .prefix("rcode-install-process-")
+            .tempdir()
+            .unwrap();
+        std::fs::write(
+            root.path().join("fixture-owner"),
+            b"isolated update transaction fixture",
+        )
+        .unwrap();
+        std::fs::create_dir(root.path().join("alternate")).unwrap();
+        let bundle = root.path().join("RCode.app");
+        let first = root.path().join("source-a.app");
+        let second = root.path().join("source-b.app");
+        write_test_bundle(&bundle, b"old installation");
+        write_test_bundle(&first, b"first update");
+        write_test_bundle(&second, b"second update");
+        let mut a = InstallSubprocess::spawn(root.path(), "a");
+        a.wait_for_file(&root.path().join("a.entered"));
+        let mut b = InstallSubprocess::spawn(root.path(), "b");
+        b.wait_for_file(&root.path().join("b.ready"));
+        b.wait_for_file(&root.path().join("b.blocked"));
+        assert!(!root.path().join("b.entered").exists());
+        assert_eq!(
+            std::fs::read(bundle.join("Contents/MacOS/rcode")).unwrap(),
+            b"old installation"
+        );
+        std::fs::write(root.path().join("release-a"), b"release").unwrap();
+        a.wait_success();
+        b.wait_success();
+        assert!(root.path().join("a.done").is_file());
+        assert!(root.path().join("b.done").is_file());
+        assert!(root.path().join(".RCode.app.update.lock").is_file());
+        assert_eq!(
+            std::fs::read(first.join("Contents/MacOS/rcode")).unwrap(),
+            b"first update"
+        );
+        assert_eq!(
+            std::fs::read(second.join("Contents/MacOS/rcode")).unwrap(),
+            b"second update"
+        );
+        assert_eq!(
+            std::fs::read(bundle.join("Contents/MacOS/rcode")).unwrap(),
+            b"second update"
+        );
+    }
+
+    #[test]
+    fn a_failed_bundle_swap_restores_the_previous_installation() {
+        let root = tempfile::tempdir().unwrap();
+        let bundle = root.path().join("RCode.app");
+        let source = root.path().join("cached.app");
+        write_test_bundle(&bundle, b"old");
+        write_test_bundle(&source, b"new");
+        let mut renames = 0;
+        let error = apply_mac_app_transaction(&source, &bundle, copy_test_bundle, |from, to| {
+            renames += 1;
+            if renames == 2 {
+                return Err(std::io::Error::other("injected swap failure"));
+            }
+            std::fs::rename(from, to)
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("original app restored"));
+        assert_eq!(
+            std::fs::read(bundle.join("Contents/MacOS/rcode")).unwrap(),
+            b"old"
+        );
+        assert!(source.join("Contents/MacOS/rcode").is_file());
+    }
+
+    #[test]
+    fn a_failed_rollback_preserves_the_only_backup_and_reports_its_path() {
+        let root = tempfile::tempdir().unwrap();
+        let bundle = root.path().join("RCode.app");
+        let source = root.path().join("cached.app");
+        write_test_bundle(&bundle, b"old");
+        write_test_bundle(&source, b"new");
+        let mut renames = 0;
+        let error = apply_mac_app_transaction(&source, &bundle, copy_test_bundle, |from, to| {
+            renames += 1;
+            if renames >= 2 {
+                return Err(std::io::Error::other("injected rename failure"));
+            }
+            std::fs::rename(from, to)
+        })
+        .unwrap_err();
+        assert!(!bundle.exists());
+        let recovery = std::fs::read_dir(root.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| {
+                path.file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .starts_with(".rcode-install-")
+            })
+            .unwrap()
+            .join("old.app");
+        assert_eq!(
+            std::fs::read(recovery.join("Contents/MacOS/rcode")).unwrap(),
+            b"old"
+        );
+        assert!(error.to_string().contains("rollback failed"));
+        assert!(error.to_string().contains(&recovery.display().to_string()));
+        assert!(source.join("Contents/MacOS/rcode").is_file());
+    }
+
+    #[test]
+    fn a_failed_bundle_copy_keeps_the_installation_and_shared_cache() {
+        let root = tempfile::tempdir().unwrap();
+        let bundle = root.path().join("RCode.app");
+        let source = root.path().join("cached.app");
+        write_test_bundle(&bundle, b"old");
+        write_test_bundle(&source, b"new");
+        assert!(
+            apply_mac_app_transaction(
+                &source,
+                &bundle,
+                |_, fresh| {
+                    write_test_bundle(fresh, b"partial");
+                    bail!("injected copy failure")
+                },
+                |from, to| std::fs::rename(from, to)
+            )
+            .is_err()
+        );
+        assert_eq!(
+            std::fs::read(bundle.join("Contents/MacOS/rcode")).unwrap(),
+            b"old"
+        );
+        assert!(source.join("Contents/MacOS/rcode").is_file());
+        assert!(std::fs::read_dir(root.path()).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".rcode-install-")
+        }));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bundle_aliases_use_the_actual_installation_target() {
+        let root = tempfile::tempdir().unwrap();
+        let bundle = root.path().join("RCode.app");
+        let alias = root.path().join("Alias.app");
+        let source = root.path().join("cached.app");
+        write_test_bundle(&bundle, b"old");
+        write_test_bundle(&source, b"new");
+        std::os::unix::fs::symlink("RCode.app", &alias).unwrap();
+        assert_eq!(
+            bundle_install_target(&alias).unwrap(),
+            bundle_install_target(&bundle).unwrap()
+        );
+        apply_mac_app_transaction(&source, &alias, copy_test_bundle, |from, to| {
+            std::fs::rename(from, to)
+        })
+        .unwrap();
+        assert!(
+            std::fs::symlink_metadata(&alias)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(
+            std::fs::read(bundle.join("Contents/MacOS/rcode")).unwrap(),
+            b"new"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    fn fake_mac_app_tarball(directory: &Path, reported: &str) -> Vec<u8> {
+        use std::os::unix::fs::PermissionsExt as _;
+        let binary = directory.join("RCode.app/Contents/MacOS/rcode");
+        std::fs::create_dir_all(binary.parent().unwrap()).unwrap();
+        std::fs::write(&binary, format!("#!/bin/sh\necho \"rcode {reported}\"\n")).unwrap();
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let tarball = directory.join("app.tar.gz");
+        run(
+            "tar",
+            &[
+                "-czf",
+                &tarball.to_string_lossy(),
+                "-C",
+                &directory.to_string_lossy(),
+                "RCode.app",
+            ],
+        )
+        .unwrap();
+        std::fs::read(tarball).unwrap()
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn mac_staging_and_installation_leave_all_verified_apply_sources_available() {
+        use sha2::{Digest as _, Sha256};
+        let root = tempfile::tempdir().unwrap();
+        let data = root.path().join("data");
+        let mut sources = Vec::new();
+        for version in ["1.0.0", "2.0.0"] {
+            let bytes =
+                fake_mac_app_tarball(&root.path().join(format!("package-{version}")), version);
+            let manifest = Manifest {
+                version: version.into(),
+                files: [(
+                    mac_app_artifact(version),
+                    FileMeta {
+                        sha256: Some(format!("{:x}", Sha256::digest(&bytes))),
+                    },
+                )]
+                .into(),
+            };
+            let (base, server) = serve_forever(bytes).await;
+            let staged = stage_mac_app(&base, &manifest, &data).await;
+            server.abort();
+            sources.push(staged.unwrap());
+        }
+        let installed = root.path().join("installed/RCode.app");
+        write_test_bundle(&installed, b"old installation");
+        InstallKind::MacApp {
+            bundle: installed.clone(),
+        }
+        .apply_desktop(&sources[1], false)
+        .unwrap();
+        for source in &sources {
+            assert!(
+                source.join("Contents/MacOS/rcode").is_file(),
+                "another caller must retain its source after a newer stage/apply"
+            );
+        }
+        let expected = std::fs::read(sources[1].join("Contents/MacOS/rcode")).unwrap();
+        assert_eq!(
+            std::fs::read(installed.join("Contents/MacOS/rcode")).unwrap(),
+            expected
+        );
+        let conflict = Manifest {
+            version: "2.0.0".into(),
+            files: [(
+                mac_app_artifact("2.0.0"),
+                FileMeta {
+                    sha256: Some("0".repeat(64)),
+                },
+            )]
+            .into(),
+        };
+        let error = stage_mac_app("http://127.0.0.1:1", &conflict, &data)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("release artifact conflict"));
+        assert_eq!(
+            std::fs::read(sources[1].join("Contents/MacOS/rcode")).unwrap(),
+            expected
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn concurrent_mac_app_stagers_preserve_other_active_downloads() {
+        use sha2::{Digest as _, Sha256};
+        let root = tempfile::tempdir().unwrap();
+        let data = root.path().join("data");
+        let other = update_stage_directory(&data.join("updates"), "8.8.8").unwrap();
+        std::fs::write(other.path().join("keep"), b"other download").unwrap();
+        let bytes = fake_mac_app_tarball(&root.path().join("package"), "9.9.9");
+        let expected = format!("{:x}", Sha256::digest(&bytes));
+        let manifest = Manifest {
+            version: "9.9.9".into(),
+            files: [(
+                mac_app_artifact("9.9.9"),
+                FileMeta {
+                    sha256: Some(expected.clone()),
+                },
+            )]
+            .into(),
+        };
+        let (base, server) = serve_forever(bytes).await;
+        let (first, second) = tokio::join!(
+            stage_mac_app(&base, &manifest, &data),
+            stage_mac_app(&base, &manifest, &data),
+        );
+        server.abort();
+        let staged = first.unwrap();
+        assert_eq!(staged, second.unwrap());
+        assert!(cached_stage_verified(
+            staged.parent().unwrap(),
+            &staged.join("Contents/MacOS/rcode"),
+            &expected
+        ));
+        assert_eq!(
+            std::fs::read(other.path().join("keep")).unwrap(),
+            b"other download"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn failed_mac_app_stage_cleans_only_its_owned_directory() {
+        use sha2::{Digest as _, Sha256};
+        let root = tempfile::tempdir().unwrap();
+        let data = root.path().join("data");
+        let updates = data.join("updates");
+        let other = update_stage_directory(&updates, "8.8.8").unwrap();
+        std::fs::write(other.path().join("keep"), b"other download").unwrap();
+        let bytes = b"this is not a tarball".to_vec();
+        let manifest = Manifest {
+            version: "9.9.9".into(),
+            files: [(
+                mac_app_artifact("9.9.9"),
+                FileMeta {
+                    sha256: Some(format!("{:x}", Sha256::digest(&bytes))),
+                },
+            )]
+            .into(),
+        };
+        let (base, server) = serve_forever(bytes).await;
+        assert!(stage_mac_app(&base, &manifest, &data).await.is_err());
+        server.abort();
+        assert!(!updates.join("9.9.9").exists());
+        assert_eq!(
+            std::fs::read(other.path().join("keep")).unwrap(),
+            b"other download"
+        );
+        assert!(std::fs::read_dir(&updates).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".stage-9.9.9-")
+        }));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn concurrent_headless_stagers_for_one_release_both_succeed() {
+        use sha2::{Digest as _, Sha256};
+        let root = tempfile::tempdir().unwrap();
+        let app_root = root.path().join("app");
+        let bytes = fake_headless_tarball(&root.path().join("package"), "9.9.9");
+        let expected = format!("{:x}", Sha256::digest(&bytes));
+        let manifest = Manifest {
+            version: "9.9.9".into(),
+            files: [(
+                headless_artifact("9.9.9"),
+                FileMeta {
+                    sha256: Some(expected.clone()),
+                },
+            )]
+            .into(),
+        };
+        let (base, server) = serve_forever(bytes).await;
+        let (first, second) = tokio::join!(
+            stage_headless(&base, &manifest, &app_root),
+            stage_headless(&base, &manifest, &app_root),
+        );
+        server.abort();
+        let staged = first.unwrap();
+        assert_eq!(staged, second.unwrap());
+        assert!(cached_stage_verified(
+            &staged,
+            &staged.join("rcode"),
+            &expected
+        ));
+        assert!(std::fs::read_dir(&app_root).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".stage-9.9.9-")
+        }));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn concurrent_headless_symlink_swaps_use_independent_temporary_paths() {
+        let root = tempfile::tempdir().unwrap();
+        for version in ["1.0.0", "2.0.0"] {
+            std::fs::create_dir(root.path().join(version)).unwrap();
+            std::fs::write(root.path().join(version).join("rcode"), b"binary").unwrap();
+        }
+        let barrier = std::sync::Barrier::new(8);
+        std::thread::scope(|scope| {
+            let tasks: Vec<_> = (0..8)
+                .map(|i| {
+                    let barrier = &barrier;
+                    let app_root = root.path();
+                    scope.spawn(move || {
+                        barrier.wait();
+                        apply_headless(app_root, if i % 2 == 0 { "1.0.0" } else { "2.0.0" })
+                    })
+                })
+                .collect();
+            for task in tasks {
+                task.join().unwrap().unwrap();
+            }
+        });
+        assert!(root.path().join("current/rcode").is_file());
+        assert!(std::fs::read_dir(root.path()).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".current-")
+        }));
     }
 
     #[cfg(unix)]
