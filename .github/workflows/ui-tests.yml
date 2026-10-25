@@ -6,6 +6,7 @@ on:
       - 'Cargo.toml'
       - 'Cargo.lock'
       - 'rust-toolchain.toml'
+      - 'apps/rcode/**'
       - 'crates/**'
       - '.github/actions/linux-ci/**'
       - 'scripts/ci/**'
@@ -18,6 +19,7 @@ on:
       - 'Cargo.toml'
       - 'Cargo.lock'
       - 'rust-toolchain.toml'
+      - 'apps/rcode/**'
       - 'crates/**'
       - '.github/actions/linux-ci/**'
       - 'scripts/ci/**'
@@ -47,6 +49,10 @@ jobs:
           save-rust-cache: 'true'
       - name: Harness, engine, sync, update, doc and preview tests
         run: scripts/ci/test-core.sh
+      - name: Native Linux daemon installation contracts
+        run: |
+          systemd-analyze --version
+          cargo test --locked -p rcode --no-default-features daemon::tests -- --test-threads=1 --nocapture
 
   ui-tests:
     runs-on: ubuntu-24.04

@@ -77,15 +77,10 @@ pub fn install(data_dir: &Path) -> anyhow::Result<()> {
         std::fs::create_dir_all(data_dir)?;
         // Reinstall-friendly: unload any previous incarnation before rewriting.
         let _ = run_quiet("launchctl", &["bootout", &launchd_service_target()?]);
-        std::fs::write(
+        write_private_service_file(
             &plist,
-            render_launchd_plist(&exe, &env, &data_dir.join("daemon.log")),
+            &render_launchd_plist(&exe, &env, &data_dir.join("daemon.log")),
         )?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&plist, std::fs::Permissions::from_mode(0o600))?;
-        }
         run(
             "launchctl",
             &["bootstrap", &launchd_domain()?, &plist.to_string_lossy()],
@@ -98,7 +93,7 @@ pub fn install(data_dir: &Path) -> anyhow::Result<()> {
         let unit = systemd_unit_path()?;
         std::fs::create_dir_all(unit.parent().expect("systemd user dir"))?;
         let contents = render_systemd_unit(&exe, &env, Some(&data_dir.join("env")))?;
-        std::fs::write(&unit, contents)?;
+        write_private_service_file(&unit, &contents)?;
         run("systemctl", &["--user", "daemon-reload"])?;
         run("systemctl", &["--user", "enable", "--now", SYSTEMD_UNIT])?;
         println!("Installed and started {SYSTEMD_UNIT} ({}).", unit.display());
@@ -117,6 +112,24 @@ pub fn install(data_dir: &Path) -> anyhow::Result<()> {
             format!("journalctl --user -u {SYSTEMD_UNIT}")
         }
     );
+    Ok(())
+}
+
+fn write_private_service_file(path: &Path, contents: &str) -> anyhow::Result<()> {
+    use std::io::Write;
+    let parent = path
+        .parent()
+        .context("service file has no parent directory")?;
+    let mut file = tempfile::NamedTempFile::new_in(parent)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.as_file()
+            .set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    }
+    file.write_all(contents.as_bytes())?;
+    file.as_file().sync_all()?;
+    file.persist(path).map_err(|error| error.error)?;
     Ok(())
 }
 
@@ -303,6 +316,9 @@ fn render_systemd_unit(
         "[Unit]\nDescription=RCode headless engine\nAfter=network-online.target\nStartLimitIntervalSec=60\nStartLimitBurst=5\n\n[Service]\n",
     );
     for (key, value) in env {
+        if value.contains(['\r', '\n', '\0']) {
+            bail!("service environment value for {key} must not contain a line break or NUL");
+        }
         // systemd unquotes the value; escape the characters it treats specially.
         let value = value
             .replace('\\', "\\\\")
@@ -312,7 +328,7 @@ fn render_systemd_unit(
     }
     unit.push_str(&format!(
         "ExecStart={} headless\nRestart=on-failure\nRestartSec=5\nEnvironmentFile={environment_file}\n\n[Install]\nWantedBy=default.target\n",
-        systemd_exec_path(exe)
+        systemd_exec_path(exe)?
     ));
     Ok(unit)
 }
@@ -339,18 +355,39 @@ fn systemd_environment_file_path(path: &Path) -> anyhow::Result<String> {
 /// curl|sh installer, whose upgrades relink `app/current` — point the unit at
 /// the symlink (as the installer's own unit does) so it never pins one version.
 /// (`current_exe` resolves symlinks, so the versioned dir is what we see here.)
-fn systemd_exec_path(exe: &Path) -> String {
+fn systemd_exec_path(exe: &Path) -> anyhow::Result<String> {
     exec_path_for(exe, std::env::var_os("HOME").map(PathBuf::from).as_deref())
 }
 
-fn exec_path_for(exe: &Path, home: Option<&Path>) -> String {
+fn exec_path_for(exe: &Path, home: Option<&Path>) -> anyhow::Result<String> {
+    let path = exe
+        .to_str()
+        .context("service executable path must be UTF-8")?;
+    if path
+        .chars()
+        .any(|character| character.is_ascii_control() || matches!(character, '\'' | '"' | '\\'))
+    {
+        bail!(
+            "systemd does not support quotes, backslashes or control characters in an executable path; move RCode to a supported path"
+        );
+    }
     let installed = home
         .map(|home| home.join(".rcode/app"))
         .is_some_and(|app_root| exe.starts_with(app_root));
     if installed {
-        "%h/.rcode/app/current/rcode".to_string()
+        Ok("\"%h/.rcode/app/current/rcode\"".to_string())
     } else {
-        format!("{}", exe.display())
+        let mut escaped = String::from("\"");
+        for character in path.chars() {
+            match character {
+                '%' => escaped.push_str("%%"),
+                // Executable paths are not environment-expanded. Unlike
+                // ordinary argv words, literal '$' must not become '$$'.
+                _ => escaped.push(character),
+            }
+        }
+        escaped.push('"');
+        Ok(escaped)
     }
 }
 
@@ -484,7 +521,7 @@ mod tests {
             None,
         )
         .unwrap();
-        assert!(unit.contains("ExecStart=/usr/local/bin/rcode headless\n"));
+        assert!(unit.contains("ExecStart=\"/usr/local/bin/rcode\" headless\n"));
         assert!(unit.contains("Environment=\"PATH=/usr/bin:/bin\"\n"));
         assert!(unit.contains("Environment=\"RCODE_EDGE_URL=https://edge.example\"\n"));
         // Inner quotes escaped so systemd re-parses the value verbatim.
@@ -592,16 +629,147 @@ mod tests {
             exec_path_for(
                 Path::new("/home/u/.rcode/app/0.3.0/rcode"),
                 Some(Path::new("/home/u")),
-            ),
-            "%h/.rcode/app/current/rcode"
+            )
+            .unwrap(),
+            "\"%h/.rcode/app/current/rcode\""
         );
         // Source build: literal path.
         assert_eq!(
             exec_path_for(
                 Path::new("/src/target/debug/rcode"),
                 Some(Path::new("/home/u"))
-            ),
-            "/src/target/debug/rcode"
+            )
+            .unwrap(),
+            "\"/src/target/debug/rcode\""
+        );
+    }
+
+    #[test]
+    fn systemd_exec_path_preserves_spaces_and_literal_special_characters() {
+        let path = Path::new("/opt/RCode Preview/%h/$runtime/rcode");
+        assert_eq!(
+            exec_path_for(path, None).unwrap(),
+            "\"/opt/RCode Preview/%%h/$runtime/rcode\""
+        );
+        let unit = render_systemd_unit(path, &[], None).unwrap();
+        assert!(unit.contains("ExecStart=\"/opt/RCode Preview/%%h/$runtime/rcode\" headless\n"));
+        for path in ["/opt/rcode\nExecStart=/bin/false", "/opt/rcode\rtest"] {
+            assert!(exec_path_for(Path::new(path), None).is_err());
+        }
+    }
+
+    #[test]
+    fn systemd_exec_path_rejects_paths_the_native_parser_does_not_support() {
+        for path in [
+            "/opt/inner\"quote/rcode",
+            "/opt/inner'quote/rcode",
+            "/opt/back\\slash/rcode",
+            "/opt/tab\tpath/rcode",
+            "/opt/control\u{7f}/rcode",
+        ] {
+            let error = render_systemd_unit(Path::new(path), &[], None).unwrap_err();
+            assert!(error.to_string().contains("move RCode to a supported path"));
+        }
+    }
+
+    #[test]
+    fn systemd_environment_rejects_embedded_line_breaks() {
+        for value in ["bad\nvalue", "bad\rvalue", "bad\0value"] {
+            let error = render_systemd_unit(
+                Path::new("/usr/bin/rcode"),
+                &[("RCODE_DEVICE_NAME".into(), value.into())],
+                None,
+            )
+            .unwrap_err();
+            assert!(error.to_string().contains("RCODE_DEVICE_NAME"));
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn systemd_analyze_resolves_the_real_executable_with_literal_path_characters() {
+        use std::os::unix::fs::PermissionsExt;
+        let tool = match Command::new("systemd-analyze").arg("--version").output() {
+            Ok(output) if output.status.success() => "systemd-analyze",
+            _ => {
+                eprintln!(
+                    "SKIP: systemd-analyze is unavailable; native unit verification was not run"
+                );
+                return;
+            }
+        };
+        let directory = tempfile::tempdir().unwrap();
+        let executable_dir = directory.path().join("RCode Preview %h $runtime");
+        std::fs::create_dir(&executable_dir).unwrap();
+        let executable = executable_dir.join("rcode");
+        std::fs::write(&executable, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let unit = directory.path().join("rcode-literal-path.service");
+        std::fs::write(&unit, render_systemd_unit(&executable, &[], None).unwrap()).unwrap();
+        let checked = Command::new(tool)
+            .arg("verify")
+            .arg("--man=no")
+            .arg(&unit)
+            .output()
+            .unwrap();
+        assert!(
+            checked.status.success(),
+            "systemd rejected the existing executable {}:\n{}",
+            executable.display(),
+            String::from_utf8_lossy(&checked.stderr)
+        );
+        for name in [
+            "unsupported\"quote",
+            "unsupported'quote",
+            "unsupported\\slash",
+        ] {
+            let unsupported = directory.path().join(name);
+            std::fs::create_dir(&unsupported).unwrap();
+            let executable = unsupported.join("rcode");
+            std::fs::write(&executable, "#!/bin/sh\nexit 0\n").unwrap();
+            std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+            assert!(executable.is_file());
+            assert!(render_systemd_unit(&executable, &[], None).is_err());
+        }
+    }
+
+    #[test]
+    fn private_service_file_replaces_contents_without_exposing_credentials() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("rcode.service");
+        std::fs::write(&path, "old contents").unwrap();
+        write_private_service_file(&path, "Environment=\"RCODE_EDGE_TOKEN=private-token\"\n")
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "Environment=\"RCODE_EDGE_TOKEN=private-token\"\n"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_service_file_does_not_follow_a_previous_symlink() {
+        let directory = tempfile::tempdir().unwrap();
+        let victim = directory.path().join("unrelated");
+        let path = directory.path().join("rcode.service");
+        std::fs::write(&victim, "keep this").unwrap();
+        std::os::unix::fs::symlink(&victim, &path).unwrap();
+        write_private_service_file(&path, "new unit").unwrap();
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep this");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "new unit");
+        assert!(
+            !std::fs::symlink_metadata(&path)
+                .unwrap()
+                .file_type()
+                .is_symlink()
         );
     }
 
