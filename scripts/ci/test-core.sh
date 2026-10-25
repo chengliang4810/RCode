@@ -28,7 +28,7 @@ done
 # (session_publication, codex_subagents, pi_resume) were caught. Check the
 # target exists under SOME selected package before deleting a name here:
 # `attachments_roundtrip` is rcode-doc's, not the engine's.
-for t in restart_resume local_profiles message_queue attachments_roundtrip; do
+for t in restart_resume local_profiles message_queue queued_attachments attachments_roundtrip; do
   tests+=(--test "$t")
 done
 

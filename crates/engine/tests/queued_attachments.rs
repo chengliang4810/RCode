@@ -161,9 +161,10 @@ async fn run_defers_until_attachment_bytes_land_then_executes_rewritten() {
     // Queue a Run whose attachment bytes have NOT landed yet: it must sit
     // Pending — deferred, unprocessed, no turn — instead of running without
     // its image (or worse, handing the harness a dangling ref).
-    let pending_ref = "pending://att-1/photo one.png";
+    let upload_id = "11111111-1111-4111-8111-111111111111-v2";
+    let pending_ref = format!("pending://{upload_id}/photo one.png");
     core.doc_host
-        .queue_command(CHAT, run_payload("msg-qa-1", pending_ref))
+        .queue_command(CHAT, run_payload("msg-qa-1", &pending_ref))
         .expect("queue run command");
     tokio::time::sleep(Duration::from_millis(400)).await;
     assert_eq!(
@@ -192,18 +193,21 @@ async fn run_defers_until_attachment_bytes_land_then_executes_rewritten() {
         .call(
             rcode_rpc::methods::UPLOAD_CHUNK,
             serde_json::json!({
-                "uploadId": "att-1", "seq": 0, "data": BASE64.encode(b"png-bytes"),
+                "uploadId": upload_id, "seq": 0, "data": BASE64.encode(b"png-bytes"),
             }),
         )
         .await
         .expect("upload chunk");
-    client
+    let committed = client
         .call(
             rcode_rpc::methods::UPLOAD_COMMIT,
-            serde_json::json!({ "uploadId": "att-1", "fileName": "photo one.png" }),
+            serde_json::json!({ "uploadId": upload_id, "fileName": "photo one.png" }),
         )
         .await
         .expect("upload commit");
+    let committed_path = committed["path"].as_str().expect("committed path");
+    assert!(std::path::Path::new(committed_path).is_absolute());
+    assert_eq!(std::fs::read(committed_path).unwrap(), b"png-bytes");
 
     wait_for(
         || complete_assistant_count(&core) == 1,
@@ -228,7 +232,9 @@ async fn run_defers_until_attachment_bytes_land_then_executes_rewritten() {
         "persisted text must not leak pending refs: {user_text}"
     );
     assert!(
-        user_text.contains("att-1-photo_one.png"),
+        user_text
+            .lines()
+            .any(|line| line.strip_prefix("- ") == Some(committed_path)),
         "persisted text names the committed file: {user_text}"
     );
 
@@ -262,8 +268,10 @@ async fn run_with_a_non_image_file_defers_executes_and_reads_back() {
         .rename_chat(CHAT, "Pre-titled")
         .expect("rename chat");
 
+    let upload_id = "22222222-2222-4222-8222-222222222222-v2";
+    let pending_ref = format!("pending://{upload_id}/notes.md");
     core.doc_host
-        .queue_command(CHAT, run_payload("msg-file-1", "pending://att-2/notes.md"))
+        .queue_command(CHAT, run_payload("msg-file-1", &pending_ref))
         .expect("queue run command");
     tokio::time::sleep(Duration::from_millis(400)).await;
     assert_eq!(
@@ -275,17 +283,20 @@ async fn run_with_a_non_image_file_defers_executes_and_reads_back() {
     client
         .call(
             rcode_rpc::methods::UPLOAD_CHUNK,
-            serde_json::json!({ "uploadId": "att-2", "seq": 0, "data": BASE64.encode(b"# notes") }),
+            serde_json::json!({ "uploadId": upload_id, "seq": 0, "data": BASE64.encode(b"# notes") }),
         )
         .await
         .expect("upload chunk");
-    client
+    let committed = client
         .call(
             rcode_rpc::methods::UPLOAD_COMMIT,
-            serde_json::json!({ "uploadId": "att-2", "fileName": "notes.md" }),
+            serde_json::json!({ "uploadId": upload_id, "fileName": "notes.md" }),
         )
         .await
         .expect("upload commit");
+    let committed_path = committed["path"].as_str().expect("committed path");
+    assert!(std::path::Path::new(committed_path).is_absolute());
+    assert_eq!(std::fs::read(committed_path).unwrap(), b"# notes");
     wait_for(
         || complete_assistant_count(&core) == 1,
         "deferred run to execute",
@@ -303,17 +314,18 @@ async fn run_with_a_non_image_file_defers_executes_and_reads_back() {
         })
         .expect("user entry persisted");
     assert!(!user_text.contains("pending://"), "{user_text}");
-    let committed = user_text
-        .lines()
-        .find(|line| line.ends_with("att-2-notes.md"))
-        .and_then(|line| line.strip_prefix("- "))
-        .unwrap_or_else(|| panic!("committed path missing: {user_text}"));
+    assert!(
+        user_text
+            .lines()
+            .any(|line| line.strip_prefix("- ") == Some(committed_path)),
+        "committed path missing: {user_text}"
+    );
 
     // Restoring the queued message for editing reads the file back.
     let chunk = client
         .call(
             rcode_rpc::methods::READ_ATTACHMENT_CHUNK,
-            serde_json::json!({ "path": committed, "offset": 0 }),
+            serde_json::json!({ "path": committed_path, "offset": 0 }),
         )
         .await
         .expect("read back the uploaded file");
@@ -357,9 +369,10 @@ async fn queued_row_waits_for_attachment_bytes_then_sends_resolved_paths() {
 
     // A clean-text row (attachments ride the row, not the text) whose bytes
     // have not landed yet: the idle chat must NOT send it.
-    let pending_ref = "pending://att-q1/queued shot.png";
+    let upload_id = "33333333-3333-4333-8333-333333333333-v2";
+    let pending_ref = format!("pending://{upload_id}/queued shot.png");
     core.doc_host
-        .queue_message_with_behavior(CHAT, "what is this", vec![pending_ref.into()], false)
+        .queue_message_with_behavior(CHAT, "what is this", vec![pending_ref], false)
         .expect("queue row");
     tokio::time::sleep(Duration::from_millis(400)).await;
     assert_eq!(
@@ -378,18 +391,21 @@ async fn queued_row_waits_for_attachment_bytes_then_sends_resolved_paths() {
         .call(
             rcode_rpc::methods::UPLOAD_CHUNK,
             serde_json::json!({
-                "uploadId": "att-q1", "seq": 0, "data": BASE64.encode(b"png-bytes"),
+                "uploadId": upload_id, "seq": 0, "data": BASE64.encode(b"png-bytes"),
             }),
         )
         .await
         .expect("upload chunk");
-    client
+    let committed = client
         .call(
             rcode_rpc::methods::UPLOAD_COMMIT,
-            serde_json::json!({ "uploadId": "att-q1", "fileName": "queued shot.png" }),
+            serde_json::json!({ "uploadId": upload_id, "fileName": "queued shot.png" }),
         )
         .await
         .expect("upload commit");
+    let committed_path = committed["path"].as_str().expect("committed path");
+    assert!(std::path::Path::new(committed_path).is_absolute());
+    assert_eq!(std::fs::read(committed_path).unwrap(), b"png-bytes");
 
     wait_for(
         || complete_assistant_count(&core) == 1,
@@ -412,7 +428,9 @@ async fn queued_row_waits_for_attachment_bytes_then_sends_resolved_paths() {
         "persisted text must not leak pending refs: {user_text}"
     );
     assert!(
-        user_text.contains("att-q1-queued_shot.png"),
+        user_text
+            .lines()
+            .any(|line| line.strip_prefix("- ") == Some(committed_path)),
         "persisted text names the committed file: {user_text}"
     );
 

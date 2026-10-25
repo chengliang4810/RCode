@@ -103,7 +103,7 @@ jobs:
       # device routing, restart/resume and the local profile store, which are
       # the parts a Windows-only bug is most likely to reach.
       - name: Engine integration tests
-        run: cargo test --release --locked -p rcode-engine --test device_routing --test restart_resume --test local_profiles
+        run: cargo test --release --locked -p rcode-engine --test device_routing --test restart_resume --test local_profiles --test queued_attachments
 
   app:
     runs-on: windows-2022

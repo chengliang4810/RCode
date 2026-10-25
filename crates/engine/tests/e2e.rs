@@ -2176,7 +2176,12 @@ async fn attachment_upload_then_run_threads_refs_and_paths() {
         .await
         .expect("ReadAttachmentChunk");
     assert_eq!(chunk["mimeType"], "image/png");
-    assert_eq!(chunk["name"], "e2e-att-red.png");
+    let committed_name = std::path::Path::new(&path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .expect("committed file name");
+    assert_eq!(chunk["name"], committed_name);
+    assert_eq!(chunk["data"], encoded);
 }
 
 // ---------------------------------------------------------------------------
