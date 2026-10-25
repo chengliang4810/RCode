@@ -1,6 +1,6 @@
 use super::*;
 use crate::state::EngineHandle;
-use gpui::{TestAppContext, WindowHandle};
+use gpui::{Focusable, TestAppContext, WindowHandle};
 use rcode_rpc::{ClientFrame, RpcClient};
 use tokio::sync::mpsc;
 
@@ -23,12 +23,17 @@ impl Server {
     }
 
     fn reply(&mut self, runtime: &tokio::runtime::Runtime, request: &ClientFrame, value: Value) {
+        self.deliver(runtime, json!({"id":request.id,"ok":value}));
+    }
+
+    fn fail(&mut self, runtime: &tokio::runtime::Runtime, request: &ClientFrame, reason: &str) {
+        self.deliver(runtime, json!({"id":request.id,"err":reason}));
+    }
+
+    fn deliver(&mut self, runtime: &tokio::runtime::Runtime, value: Value) {
         let engine = self.engine.clone();
         runtime.block_on(async {
-            self.replies
-                .send(json!({"id":request.id,"ok":value}).to_string())
-                .await
-                .unwrap();
+            self.replies.send(value.to_string()).await.unwrap();
             let barrier = engine.client().call("DevicesTestBarrier", Value::Null);
             tokio::pin!(barrier);
             loop {
@@ -111,28 +116,109 @@ fn replace_engine(
     cx.run_until_parked();
 }
 
+fn replace_engine_and_act_before_observers(
+    window: WindowHandle<DevicesPage>,
+    engine: EngineHandle,
+    cx: &mut TestAppContext,
+    action: impl FnOnce(&mut DevicesPage, &mut Context<DevicesPage>),
+) {
+    window
+        .update(cx, |page, _, cx| {
+            page.state.update(cx, |state, cx| {
+                state.set_test_engine(engine);
+                cx.notify();
+            });
+            // This is the same UI callback, before queued notifications can
+            // reset the page. Exercise real RPC tasks rather than a manually
+            // detached task that production does not retain across replacement.
+            assert_ne!(page.loaded_context, page.context(cx));
+            action(page, cx);
+        })
+        .unwrap();
+}
+
+#[gpui::test]
+fn engine_switch_and_leave_in_one_callback_never_send_the_old_access_draft(
+    cx: &mut TestAppContext,
+) {
+    let runtime = runtime();
+    let _guard = runtime.enter();
+    let (mut old, window) = setup(&runtime, cx);
+    window
+        .update(cx, |page, _, cx| {
+            page.port
+                .update(cx, |input, cx| input.set_text("28777", cx));
+        })
+        .unwrap();
+    let mut new = server();
+    replace_engine_and_act_before_observers(window, new.engine.clone(), cx, |page, cx| {
+        page.set_active(false, cx);
+    });
+    // The first actual request on the replacement connection must be its own
+    // load, never SetRemoteAccess carrying the previous page's port.
+    finish_context_load(&mut new, &runtime, cx);
+    new.assert_idle(cx);
+    old.assert_idle(cx);
+    window
+        .update(cx, |page, _, cx| {
+            assert_eq!(page.port.read(cx).text(), "29666");
+            assert!(!page.saving);
+            assert!(page.pending_actions.is_empty());
+        })
+        .unwrap();
+}
+
+#[gpui::test]
+fn engine_switch_and_host_edit_in_one_callback_never_request_the_old_host_key(
+    cx: &mut TestAppContext,
+) {
+    let runtime = runtime();
+    let _guard = runtime.enter();
+    let (mut old, window) = setup(&runtime, cx);
+    let mut new = server();
+    replace_engine_and_act_before_observers(window, new.engine.clone(), cx, |page, cx| {
+        page.edit_host(Some(host("old-host")), cx);
+    });
+    finish_context_load(&mut new, &runtime, cx);
+    new.assert_idle(cx);
+    old.assert_idle(cx);
+    window
+        .update(cx, |page, _, _| assert!(page.editor.is_none()))
+        .unwrap();
+}
+
+#[gpui::test]
+fn engine_switch_and_host_write_in_one_callback_never_send_the_old_host_payload(
+    cx: &mut TestAppContext,
+) {
+    let runtime = runtime();
+    let _guard = runtime.enter();
+    let (mut old, window) = setup(&runtime, cx);
+    let mut new = server();
+    replace_engine_and_act_before_observers(window, new.engine.clone(), cx, |page, cx| {
+        page.write_host(
+            "SaveRemoteHost",
+            json!({"id":"old-host","name":"Old draft"}),
+            true,
+            cx,
+        );
+    });
+    finish_context_load(&mut new, &runtime, cx);
+    new.assert_idle(cx);
+    old.assert_idle(cx);
+    window
+        .update(cx, |page, _, _| {
+            assert!(!page.saving);
+            assert!(page.pending_actions.is_empty());
+        })
+        .unwrap();
+}
+
 fn setup(
     runtime: &tokio::runtime::Runtime,
     cx: &mut TestAppContext,
 ) -> (Server, WindowHandle<DevicesPage>) {
-    cx.update(|cx| {
-        gpui_base::init(cx);
-        cx.set_global(Theme::dark());
-        crate::app_menus::init(cx);
-        crate::composer::init(cx, crate::settings::ComposerSendBehavior::default());
-    });
-    let mut server = server();
-    let engine = server.engine.clone();
-    let window = cx.add_window(|_, cx| {
-        let state = cx.new(|_| {
-            let mut state = AppState::new();
-            state.set_test_engine(engine);
-            state
-        });
-        DevicesPage::new(state, cx)
-    });
-    // Stop the periodic refresh so the tests exercise only user operations.
-    window.update(cx, |page, _, _| page._poll = None).unwrap();
+    let (mut server, window) = setup_loading(cx);
     let request = server.request(cx);
     assert_eq!(request.method.as_deref(), Some("GetRemoteAccess"));
     server.reply(
@@ -144,6 +230,28 @@ fn setup(
     assert_eq!(request.method.as_deref(), Some("ListRemoteHosts"));
     server.reply(runtime, &request, json!([]));
     cx.run_until_parked();
+    (server, window)
+}
+
+fn setup_loading(cx: &mut TestAppContext) -> (Server, WindowHandle<DevicesPage>) {
+    cx.update(|cx| {
+        gpui_base::init(cx);
+        cx.set_global(Theme::dark());
+        crate::app_menus::init(cx);
+        crate::composer::init(cx, crate::settings::ComposerSendBehavior::default());
+    });
+    let server = server();
+    let engine = server.engine.clone();
+    let window = cx.add_window(|_, cx| {
+        let state = cx.new(|_| {
+            let mut state = AppState::new();
+            state.set_test_engine(engine);
+            state
+        });
+        DevicesPage::new(state, cx)
+    });
+    // Stop the periodic refresh so the tests exercise only user operations.
+    window.update(cx, |page, _, _| page._poll = None).unwrap();
     (server, window)
 }
 
@@ -163,6 +271,566 @@ fn host(id: &str) -> RemoteHost {
         connected: true,
         error: None,
     }
+}
+
+fn draw(cx: &mut TestAppContext, window: WindowHandle<DevicesPage>) {
+    cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear())
+        .unwrap();
+}
+
+fn finish_access_save(
+    server: &mut Server,
+    runtime: &tokio::runtime::Runtime,
+    cx: &mut TestAppContext,
+    enabled: bool,
+    port: u16,
+    key: &str,
+) {
+    let request = server.request(cx);
+    assert_eq!(request.method.as_deref(), Some("SetRemoteAccess"));
+    assert_eq!(request.params["enabled"], enabled);
+    assert_eq!(request.params["port"], port);
+    server.reply(
+        runtime,
+        &request,
+        json!({"enabled":enabled,"port":port,"hasApiKey":!key.is_empty(),"error":null}),
+    );
+    let request = server.request(cx);
+    assert_eq!(request.method.as_deref(), Some("GetRemoteAccessApiKey"));
+    server.reply(runtime, &request, json!({"apiKey":key}));
+    cx.run_until_parked();
+}
+
+#[gpui::test]
+fn loading_finishes_the_save_requested_by_blur_or_leaving(cx: &mut TestAppContext) {
+    let runtime = runtime();
+    let _guard = runtime.enter();
+    let (mut server, window) = setup(&runtime, cx);
+    window.update(cx, |page, _, cx| page.load(cx)).unwrap();
+    let request = server.request(cx);
+    server.reply(
+        &runtime,
+        &request,
+        json!({"enabled":true,"port":27655,"hasApiKey":true,"error":null}),
+    );
+    let request = server.request(cx);
+    server.reply(&runtime, &request, json!([]));
+    let key_load = server.request(cx);
+    assert_eq!(key_load.method.as_deref(), Some("GetRemoteAccessApiKey"));
+    window
+        .update(cx, |page, _, cx| {
+            page.port
+                .update(cx, |input, cx| input.set_text("28888", cx));
+            page.key
+                .update(cx, |input, cx| input.set_text("LatestDraft123", cx));
+            page.save_access_draft(cx);
+            page.set_active(false, cx);
+        })
+        .unwrap();
+    server.assert_idle(cx);
+    server.reply(&runtime, &key_load, json!({"apiKey":"OldStored123"}));
+    let request = server.request(cx);
+    assert_eq!(request.method.as_deref(), Some("SetRemoteAccess"));
+    assert_eq!(
+        request.params,
+        json!({"enabled":true,"port":28888,"apiKey":"LatestDraft123"})
+    );
+    server.reply(
+        &runtime,
+        &request,
+        json!({"enabled":true,"port":28888,"hasApiKey":true,"error":null}),
+    );
+    let request = server.request(cx);
+    server.reply(&runtime, &request, json!({"apiKey":"LatestDraft123"}));
+    server.assert_idle(cx);
+    window
+        .update(cx, |page, _, cx| {
+            assert_eq!(page.port.read(cx).text(), "28888");
+            assert_eq!(page.key.read(cx).text(), "LatestDraft123");
+            assert!(page.pending_actions.is_empty());
+        })
+        .unwrap();
+}
+
+#[gpui::test]
+fn adding_and_editing_hosts_waits_for_the_automatic_local_save(cx: &mut TestAppContext) {
+    let runtime = runtime();
+    let _guard = runtime.enter();
+    let (mut server, window) = setup(&runtime, cx);
+    window
+        .update(cx, |page, _, cx| {
+            page.port
+                .update(cx, |input, cx| input.set_text("28888", cx));
+            page.save_access_draft(cx);
+            page.edit_host(None, cx);
+        })
+        .unwrap();
+    finish_access_save(&mut server, &runtime, cx, false, 28888, "");
+    window
+        .update(cx, |page, _, cx| {
+            assert!(page.editor.as_ref().unwrap().id.is_none());
+            page.port
+                .update(cx, |input, cx| input.set_text("28889", cx));
+            page.save_access_draft(cx);
+            page.edit_host(Some(host("existing")), cx);
+        })
+        .unwrap();
+    finish_access_save(&mut server, &runtime, cx, false, 28889, "");
+    let request = server.request(cx);
+    assert_eq!(request.method.as_deref(), Some("GetRemoteHostApiKey"));
+    assert_eq!(request.params, json!({"id":"existing"}));
+    server.reply(&runtime, &request, json!({"apiKey":"StoredHost123"}));
+    server.assert_idle(cx);
+    window
+        .update(cx, |page, _, cx| {
+            assert_eq!(
+                page.editor.as_ref().unwrap().id.as_deref(),
+                Some("existing")
+            );
+            assert_eq!(
+                page.editor.as_ref().unwrap().key.read(cx).text(),
+                "StoredHost123"
+            );
+        })
+        .unwrap();
+}
+
+#[gpui::test]
+fn remote_writes_keep_their_order_after_an_automatic_local_save(cx: &mut TestAppContext) {
+    let runtime = runtime();
+    let _guard = runtime.enter();
+    let (mut server, window) = setup(&runtime, cx);
+    window
+        .update(cx, |page, _, cx| {
+            page.port
+                .update(cx, |input, cx| input.set_text("28888", cx));
+            page.save_access_draft(cx);
+            page.write_host(
+                "SaveRemoteHost",
+                json!({"id":"first","enabled":true}),
+                false,
+                cx,
+            );
+            page.write_host("RemoveRemoteHost", json!({"id":"second"}), false, cx);
+        })
+        .unwrap();
+    finish_access_save(&mut server, &runtime, cx, false, 28888, "");
+    for (method, id) in [("SaveRemoteHost", "first"), ("RemoveRemoteHost", "second")] {
+        let request = server.request(cx);
+        assert_eq!(request.method.as_deref(), Some(method));
+        assert_eq!(request.params["id"], id);
+        server.reply(&runtime, &request, json!({}));
+        let request = server.request(cx);
+        assert_eq!(request.method.as_deref(), Some("ListRemoteHosts"));
+        server.reply(&runtime, &request, json!([]));
+    }
+    server.assert_idle(cx);
+}
+
+#[gpui::test]
+fn queued_old_editor_writes_do_not_close_the_new_editor(cx: &mut TestAppContext) {
+    let runtime = runtime();
+    let _guard = runtime.enter();
+    let (mut server, window) = setup(&runtime, cx);
+    window
+        .update(cx, |page, _, cx| {
+            page.port
+                .update(cx, |input, cx| input.set_text("28888", cx));
+            page.save_access_draft(cx);
+            page.edit_host(None, cx);
+            page.write_host("SaveRemoteHost", json!({"id":"old"}), true, cx);
+        })
+        .unwrap();
+    finish_access_save(&mut server, &runtime, cx, false, 28888, "");
+    let request = server.request(cx);
+    assert_eq!(request.method.as_deref(), Some("SaveRemoteHost"));
+    window
+        .update(cx, |page, _, cx| {
+            page.editor
+                .as_ref()
+                .unwrap()
+                .name
+                .update(cx, |input, cx| input.set_text("New draft", cx));
+        })
+        .unwrap();
+    server.reply(&runtime, &request, json!({}));
+    let request = server.request(cx);
+    server.reply(&runtime, &request, json!([]));
+    server.assert_idle(cx);
+    window
+        .update(cx, |page, _, cx| {
+            assert_eq!(
+                page.editor.as_ref().unwrap().name.read(cx).text(),
+                "New draft"
+            );
+        })
+        .unwrap();
+}
+
+#[gpui::test]
+fn engine_replacement_discards_queued_remote_intents(cx: &mut TestAppContext) {
+    let runtime = runtime();
+    let _guard = runtime.enter();
+    let (mut old, window) = setup(&runtime, cx);
+    window
+        .update(cx, |page, _, cx| {
+            page.port
+                .update(cx, |input, cx| input.set_text("28888", cx));
+            page.save_access_draft(cx);
+            page.edit_host(None, cx);
+            page.write_host("RemoveRemoteHost", json!({"id":"old-host"}), false, cx);
+        })
+        .unwrap();
+    let old_write = old.request(cx);
+    let mut new = server();
+    replace_engine(window, new.engine.clone(), cx);
+    finish_context_load(&mut new, &runtime, cx);
+    old.reply(
+        &runtime,
+        &old_write,
+        json!({"enabled":false,"port":28888,"hasApiKey":false,"error":null}),
+    );
+    new.assert_idle(cx);
+    window
+        .update(cx, |page, _, _| {
+            assert!(page.pending_actions.is_empty());
+            assert!(page.editor.is_none());
+        })
+        .unwrap();
+}
+
+#[gpui::test]
+fn canceling_a_host_editor_waits_for_the_local_save(cx: &mut TestAppContext) {
+    let runtime = runtime();
+    let _guard = runtime.enter();
+    let (mut server, window) = setup(&runtime, cx);
+    window
+        .update(cx, |page, _, cx| {
+            page.edit_host(None, cx);
+            page.port
+                .update(cx, |input, cx| input.set_text("28888", cx));
+            page.save_access_draft(cx);
+            page.cancel_host(page.editor_generation, cx);
+            page.save_access_draft(cx);
+            page.save_access_draft(cx);
+            assert_eq!(
+                page.pending_actions
+                    .iter()
+                    .filter(|queued| matches!(&queued.action, PendingAction::AccessDraft))
+                    .count(),
+                1
+            );
+        })
+        .unwrap();
+    finish_access_save(&mut server, &runtime, cx, false, 28888, "");
+    server.assert_idle(cx);
+    window
+        .update(cx, |page, _, _| assert!(page.editor.is_none()))
+        .unwrap();
+}
+
+#[gpui::test]
+fn failed_writes_continue_the_fifo_without_closing_a_new_editor(cx: &mut TestAppContext) {
+    let runtime = runtime();
+    let _guard = runtime.enter();
+    let (mut server, window) = setup(&runtime, cx);
+    window
+        .update(cx, |page, _, cx| {
+            page.edit_host(None, cx);
+            page.port
+                .update(cx, |input, cx| input.set_text("28888", cx));
+            page.save_access_draft(cx);
+            page.edit_host(None, cx);
+            page.write_host(
+                "RemoveRemoteHost",
+                json!({"id":"failed-old-host"}),
+                true,
+                cx,
+            );
+            page.write_host(
+                "SaveRemoteHost",
+                json!({"id":"next-host","enabled":true}),
+                false,
+                cx,
+            );
+        })
+        .unwrap();
+    let request = server.request(cx);
+    assert_eq!(request.method.as_deref(), Some("SetRemoteAccess"));
+    server.fail(&runtime, &request, "port unavailable");
+    let request = server.request(cx);
+    assert_eq!(request.method.as_deref(), Some("RemoveRemoteHost"));
+    window
+        .update(cx, |page, _, cx| {
+            page.editor
+                .as_ref()
+                .unwrap()
+                .name
+                .update(cx, |input, cx| input.set_text("Keep new draft", cx));
+        })
+        .unwrap();
+    server.fail(&runtime, &request, "remote removal failed");
+    let request = server.request(cx);
+    assert_eq!(request.method.as_deref(), Some("SaveRemoteHost"));
+    assert_eq!(request.params, json!({"id":"next-host","enabled":true}));
+    server.reply(&runtime, &request, json!({}));
+    let request = server.request(cx);
+    assert_eq!(request.method.as_deref(), Some("ListRemoteHosts"));
+    server.reply(&runtime, &request, json!([]));
+    server.assert_idle(cx);
+    window
+        .update(cx, |page, _, cx| {
+            assert_eq!(
+                page.editor.as_ref().unwrap().name.read(cx).text(),
+                "Keep new draft"
+            );
+            assert_eq!(page.access.as_ref().unwrap().port, 27655);
+            assert!(
+                page.error
+                    .as_deref()
+                    .is_some_and(|error| error.contains("remote removal failed"))
+            );
+        })
+        .unwrap();
+}
+
+#[gpui::test]
+fn failed_initial_load_retains_intents_until_retry_and_does_not_retarget_them(
+    cx: &mut TestAppContext,
+) {
+    let runtime = runtime();
+    let _guard = runtime.enter();
+    let (mut server, window) = setup_loading(cx);
+    let request = server.request(cx);
+    assert_eq!(request.method.as_deref(), Some("GetRemoteAccess"));
+    window
+        .update(cx, |page, _, cx| {
+            page.port
+                .update(cx, |input, cx| input.set_text("28888", cx));
+            page.save_access_draft(cx);
+            page.edit_host(None, cx);
+            page.write_host("SaveRemoteHost", json!({"id":"first"}), false, cx);
+        })
+        .unwrap();
+    server.fail(&runtime, &request, "initial load failed");
+    server.assert_idle(cx);
+    window
+        .update(cx, |page, _, cx| {
+            page.port
+                .update(cx, |input, cx| input.set_text("28889", cx));
+            page.write_host("RemoveRemoteHost", json!({"id":"second"}), false, cx);
+            page.save_access(true, false, cx);
+        })
+        .unwrap();
+    // Failure does not authorize writes from unknown local configuration, nor
+    // may new clicks jump ahead of the retained FIFO.
+    server.assert_idle(cx);
+    window.update(cx, |page, _, cx| page.load(cx)).unwrap();
+    let request = server.request(cx);
+    assert_eq!(request.method.as_deref(), Some("GetRemoteAccess"));
+    server.reply(
+        &runtime,
+        &request,
+        json!({"enabled":false,"port":27655,"hasApiKey":false,"error":null}),
+    );
+    let request = server.request(cx);
+    server.reply(&runtime, &request, json!([]));
+    finish_access_save(&mut server, &runtime, cx, false, 28889, "");
+    for (method, id) in [("SaveRemoteHost", "first"), ("RemoveRemoteHost", "second")] {
+        let request = server.request(cx);
+        assert_eq!(request.method.as_deref(), Some(method));
+        assert_eq!(request.params["id"], id);
+        server.reply(&runtime, &request, json!({}));
+        let request = server.request(cx);
+        assert_eq!(request.method.as_deref(), Some("ListRemoteHosts"));
+        server.reply(&runtime, &request, json!([]));
+    }
+    finish_access_save(&mut server, &runtime, cx, true, 28889, "GeneratedKey123");
+    server.assert_idle(cx);
+    window
+        .update(cx, |page, _, cx| {
+            assert!(page.editor.as_ref().unwrap().id.is_none());
+            assert_eq!(page.port.read(cx).text(), "28889");
+            page.load(cx);
+            page.write_host(
+                "RemoveRemoteHost",
+                json!({"id":"old-engine-only"}),
+                false,
+                cx,
+            );
+        })
+        .unwrap();
+    let request = server.request(cx);
+    server.fail(&runtime, &request, "another load failed");
+    server.assert_idle(cx);
+    let mut replacement = super::tests::server();
+    replace_engine(window, replacement.engine.clone(), cx);
+    finish_context_load(&mut replacement, &runtime, cx);
+    replacement.assert_idle(cx);
+    server.assert_idle(cx);
+    window
+        .update(cx, |page, _, _| assert!(page.editor.is_none()))
+        .unwrap();
+}
+
+#[gpui::test]
+fn local_access_fields_save_on_blur_including_the_disabled_port(cx: &mut TestAppContext) {
+    let runtime = runtime();
+    let _guard = runtime.enter();
+    let (mut server, window) = setup(&runtime, cx);
+    window
+        .update(cx, |_, window, _| window.activate_window())
+        .unwrap();
+    draw(cx, window);
+    for enabled in [false, true] {
+        window
+            .update(cx, |page, window, cx| {
+                page.access.as_mut().unwrap().enabled = enabled;
+                let input = if enabled { &page.key } else { &page.port };
+                window.focus(&input.focus_handle(cx), cx);
+            })
+            .unwrap();
+        draw(cx, window);
+        window
+            .update(cx, |page, _, cx| {
+                page.port.update(cx, |input, cx| {
+                    input.set_text(if enabled { "28889" } else { "28888" }, cx)
+                });
+                if enabled {
+                    page.key
+                        .update(cx, |input, cx| input.set_text("UpdatedKey123", cx));
+                }
+            })
+            .unwrap();
+        server.assert_idle(cx);
+        window.update(cx, |_, window, _| window.blur()).unwrap();
+        draw(cx, window);
+        let request = server.request(cx);
+        assert_eq!(request.method.as_deref(), Some("SetRemoteAccess"));
+        let port = if enabled { 28889 } else { 28888 };
+        let expected = if enabled {
+            json!({"enabled":true,"port":port,"apiKey":"UpdatedKey123"})
+        } else {
+            json!({"enabled":false,"port":port})
+        };
+        assert_eq!(request.params, expected);
+        server.reply(
+            &runtime,
+            &request,
+            json!({"enabled":enabled,"port":port,"hasApiKey":enabled,"error":null}),
+        );
+        let request = server.request(cx);
+        assert_eq!(request.method.as_deref(), Some("GetRemoteAccessApiKey"));
+        server.reply(
+            &runtime,
+            &request,
+            json!({"apiKey":if enabled { "UpdatedKey123" } else { "" }}),
+        );
+        cx.run_until_parked();
+        // Refocusing an unchanged field must not rewrite the configuration.
+        window
+            .update(cx, |page, window, cx| {
+                window.focus(&page.port.focus_handle(cx), cx)
+            })
+            .unwrap();
+        draw(cx, window);
+        window.update(cx, |_, window, _| window.blur()).unwrap();
+        draw(cx, window);
+        server.assert_idle(cx);
+    }
+    let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+    assert!(visual.debug_bounds("devices-access-save").is_none());
+    assert!(visual.debug_bounds("devices-add-host").is_some());
+}
+
+#[gpui::test]
+fn leaving_devices_saves_pending_local_changes(cx: &mut TestAppContext) {
+    let runtime = runtime();
+    let _guard = runtime.enter();
+    let (mut server, window) = setup(&runtime, cx);
+    window
+        .update(cx, |page, _, cx| {
+            page.port
+                .update(cx, |input, cx| input.set_text("28888", cx));
+            page.set_active(false, cx);
+        })
+        .unwrap();
+    let request = server.request(cx);
+    assert_eq!(request.method.as_deref(), Some("SetRemoteAccess"));
+    assert_eq!(request.params, json!({"enabled":false,"port":28888}));
+    server.reply(
+        &runtime,
+        &request,
+        json!({"enabled":false,"port":28888,"hasApiKey":false,"error":null}),
+    );
+    let request = server.request(cx);
+    assert_eq!(request.method.as_deref(), Some("GetRemoteAccessApiKey"));
+    server.reply(&runtime, &request, json!({"apiKey":""}));
+    server.assert_idle(cx);
+}
+
+#[gpui::test]
+fn access_toggle_waits_for_the_automatic_field_save(cx: &mut TestAppContext) {
+    let runtime = runtime();
+    let _guard = runtime.enter();
+    let (mut server, window) = setup(&runtime, cx);
+    window
+        .update(cx, |page, _, cx| {
+            page.port
+                .update(cx, |input, cx| input.set_text("28888", cx));
+            page.save_access_draft(cx);
+            page.save_access(true, false, cx);
+        })
+        .unwrap();
+    for enabled in [false, true] {
+        let request = server.request(cx);
+        assert_eq!(request.method.as_deref(), Some("SetRemoteAccess"));
+        assert_eq!(request.params, json!({"enabled":enabled,"port":28888}));
+        server.reply(
+            &runtime,
+            &request,
+            json!({"enabled":enabled,"port":28888,"hasApiKey":enabled,"error":null}),
+        );
+        let request = server.request(cx);
+        assert_eq!(request.method.as_deref(), Some("GetRemoteAccessApiKey"));
+        server.reply(
+            &runtime,
+            &request,
+            json!({"apiKey":if enabled { "Fixture12345" } else { "" }}),
+        );
+    }
+    server.assert_idle(cx);
+    window
+        .update(cx, |page, _, _| {
+            assert!(page.access.as_ref().unwrap().enabled)
+        })
+        .unwrap();
+}
+
+#[gpui::test]
+fn automatic_access_save_rejects_invalid_values_without_changing_saved_settings(
+    cx: &mut TestAppContext,
+) {
+    let runtime = runtime();
+    let _guard = runtime.enter();
+    let (mut server, window) = setup(&runtime, cx);
+    window
+        .update(cx, |page, _, cx| {
+            page.port.update(cx, |input, cx| input.set_text("0", cx));
+            page.save_access_draft(cx);
+            assert!(page.error.is_some());
+            assert_eq!(page.access.as_ref().unwrap().port, 27655);
+            page.access.as_mut().unwrap().enabled = true;
+            page.port
+                .update(cx, |input, cx| input.set_text("27655", cx));
+            page.key
+                .update(cx, |input, cx| input.set_text("invalid", cx));
+            page.save_access_draft(cx);
+            assert!(page.error.is_some());
+            assert!(page.saved_key.is_empty());
+        })
+        .unwrap();
+    server.assert_idle(cx);
 }
 
 #[gpui::test]
