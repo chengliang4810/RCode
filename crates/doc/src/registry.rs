@@ -824,6 +824,42 @@ impl RegistryDoc {
         self.clock.next(Self::now_ms(), &device)
     }
 
+    /// A local edit follows the target row's observed history, including a
+    /// pending local write or tombstone. Unrelated rows do not advance it.
+    fn observe_row_clock(&mut self, kind: &str, id: &str) {
+        let clock = self
+            .authoritative
+            .get(kind)
+            .and_then(|rows| rows.get(id))
+            .and_then(RegistryRow::max_clock)
+            .into_iter()
+            .chain(
+                self.pending_ops()
+                    .filter(|op| op.kind == kind && op.id == id)
+                    .flat_map(|op| {
+                        std::iter::once(op.hlc.as_str()).chain(
+                            op.clocks
+                                .iter()
+                                .flat_map(|clocks| clocks.values().map(String::as_str)),
+                        )
+                    }),
+            )
+            .max();
+        let observed = clock.and_then(|clock| {
+            let mut parts = clock.splitn(3, '-');
+            let ms = parts.next()?.parse::<i64>().ok()?;
+            let counter = parts.next()?.parse::<u32>().ok()?;
+            // The wire clock uses 13 millis digits and 6 counter digits.
+            // Malformed peer data must not overflow the next local tick.
+            ((0..=9_999_999_999_999).contains(&ms) && counter <= 999_999).then_some((ms, counter))
+        });
+        if let Some(observed) = observed {
+            if observed > (self.clock.last_ms, self.clock.counter) {
+                (self.clock.last_ms, self.clock.counter) = observed;
+            }
+        }
+    }
+
     fn enqueue_ops(&mut self, mut ops: Vec<RowOp>) {
         if ops.is_empty() {
             return;
@@ -991,6 +1027,7 @@ impl RegistryDoc {
     }
 
     fn write(&mut self, kind: &str, id: &str, op: OpKind, set: BTreeMap<String, Value>) {
+        self.observe_row_clock(kind, id);
         let hlc = self.next_hlc();
         self.enqueue_ops(vec![RowOp {
             kind: kind.to_string(),
@@ -1003,6 +1040,9 @@ impl RegistryDoc {
     }
 
     fn delete_row_ops(&mut self, keys: &[(&str, &str)]) {
+        for &(kind, id) in keys {
+            self.observe_row_clock(kind, id);
+        }
         let hlc = self.next_hlc();
         let ops = keys
             .iter()

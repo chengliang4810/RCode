@@ -65,20 +65,7 @@ impl RegistryDoc {
         self.observe_sidebar_row("sidebarLocations", id);
         // Observe this pin's field clocks before a causally subsequent edit,
         // including clocks from a device whose wall clock runs ahead of ours.
-        if let Some(row) = self.overlay_row(KIND_SIDEBAR_PINS, id) {
-            if let Some(clock) = row.max_clock() {
-                let mut parts = clock.splitn(3, '-');
-                if let (Some(ms), Some(counter)) = (
-                    parts.next().and_then(|v| v.parse::<i64>().ok()),
-                    parts.next().and_then(|v| v.parse::<u32>().ok()),
-                ) {
-                    if (ms, counter) > (self.clock.last_ms, self.clock.counter) {
-                        self.clock.last_ms = ms;
-                        self.clock.counter = counter;
-                    }
-                }
-            }
-        }
+        self.observe_row_clock(KIND_SIDEBAR_PINS, id);
         if matches!(change, SidebarPinChange::Unpin { .. }) {
             if current.iter().any(|v| v == id) {
                 self.write_sidebar_location(id, "");

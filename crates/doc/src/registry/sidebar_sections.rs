@@ -11,21 +11,7 @@ const LOCATIONS: &str = "sidebarLocations";
 
 impl RegistryDoc {
     pub(super) fn observe_sidebar_row(&mut self, kind: &str, id: &str) {
-        if let Some(clock) = self
-            .overlay_row(kind, id)
-            .and_then(|r| r.max_clock().map(str::to_owned))
-        {
-            let mut parts = clock.splitn(3, '-');
-            if let (Some(ms), Some(counter)) = (
-                parts.next().and_then(|v| v.parse::<i64>().ok()),
-                parts.next().and_then(|v| v.parse::<u32>().ok()),
-            ) {
-                if (ms, counter) > (self.clock.last_ms, self.clock.counter) {
-                    self.clock.last_ms = ms;
-                    self.clock.counter = counter;
-                }
-            }
-        }
+        self.observe_row_clock(kind, id);
     }
 
     fn sidebar_location(&self, id: &str, pin: Option<&RegistryRow>) -> String {

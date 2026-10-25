@@ -305,6 +305,144 @@ fn session(chat_id: &str, device_id: &str, status: SessionStatus) -> Session {
     }
 }
 
+const OBSERVED_FUTURE_CLOCK: &str = "9999999999999-000001-remote";
+
+fn remote_rows_with_future_clocks() -> Vec<RegistryRow> {
+    let mut remote = RegistryDoc::new("remote");
+    remote
+        .upsert_device(&device("remote", "Remote device"))
+        .unwrap();
+    remote
+        .upsert_space(&space("space", "remote", "/project"))
+        .unwrap();
+    let mut conversation = chat("chat", "remote");
+    conversation.space_id = Some("space".into());
+    remote.upsert_chat(&conversation).unwrap();
+    remote
+        .upsert_session(&session("chat", "remote", SessionStatus::Idle))
+        .unwrap();
+    let mut rows: HashMap<(String, String), RegistryRow> = HashMap::new();
+    for batch in remote.take_pushable() {
+        for op in batch.ops {
+            let key = (op.kind.clone(), op.id.clone());
+            let row = apply_op(rows.get(&key), &op).0.unwrap();
+            rows.insert(key, row);
+        }
+    }
+    rows.into_values()
+        .map(|mut row| {
+            row.seq = 1;
+            for clock in row.clocks.values_mut() {
+                *clock = OBSERVED_FUTURE_CLOCK.into();
+            }
+            row
+        })
+        .collect()
+}
+
+#[test]
+fn causal_local_row_edits_follow_the_observed_remote_clock() {
+    let rows = remote_rows_with_future_clocks();
+    for action in 0..6 {
+        // Each operation starts fresh, so observing only one entity cannot
+        // accidentally make a later case pass with its advanced local clock.
+        let mut local = RegistryDoc::new("local");
+        let mut observed_rows = rows.clone();
+        let older_parent = match action {
+            2 => Some(KIND_CHATS),
+            5 => Some(KIND_SPACES),
+            _ => None,
+        };
+        // A cascade must observe all child rows before stamping one batch,
+        // even when the parent itself carries a much older clock.
+        for row in &mut observed_rows {
+            if older_parent == Some(row.kind.as_str()) {
+                for clock in row.clocks.values_mut() {
+                    *clock = hlc(1_000);
+                }
+            }
+        }
+        local.apply_state(1, true, 0, observed_rows);
+        match action {
+            0 => {
+                assert!(local.rename_chat("chat", "New title").unwrap());
+                assert_eq!(
+                    local.chat("chat").unwrap().unwrap().title.as_deref(),
+                    Some("New title")
+                );
+            }
+            1 => {
+                assert!(local.set_chat_archived("chat", true).unwrap());
+                assert!(local.chat("chat").unwrap().unwrap().archived);
+            }
+            2 => {
+                assert!(local.delete_chat("chat").unwrap());
+                assert!(local.read_chats().unwrap().is_empty());
+                assert!(local.read_sessions().unwrap().is_empty());
+            }
+            3 => {
+                assert!(local.rename_device("remote", "Renamed device").unwrap());
+                assert_eq!(local.read_devices().unwrap()[0].name, "Renamed device");
+            }
+            4 => {
+                assert!(
+                    local
+                        .rename_space("space", Some("Renamed project"))
+                        .unwrap()
+                );
+                assert_eq!(
+                    local.space("space").unwrap().unwrap().name.as_deref(),
+                    Some("Renamed project")
+                );
+            }
+            5 => {
+                let deleted = local.delete_space("space").unwrap();
+                assert!(deleted.existed);
+                assert_eq!(deleted.chat_ids, ["chat"]);
+                assert!(local.read_spaces().unwrap().is_empty());
+                assert!(local.read_chats().unwrap().is_empty());
+                assert!(local.read_sessions().unwrap().is_empty());
+            }
+            _ => unreachable!(),
+        }
+        let batches = local.take_pushable();
+        assert!(!batches.is_empty());
+        assert!(
+            batches
+                .iter()
+                .flat_map(|batch| &batch.ops)
+                .all(|op| { op.hlc.as_str() > OBSERVED_FUTURE_CLOCK }),
+            "operation {action} must follow the observed row"
+        );
+    }
+}
+
+#[test]
+fn row_clock_observation_does_not_revive_deleted_or_missing_rows_or_follow_unrelated_rows() {
+    let mut local = RegistryDoc::new("local");
+    local.apply_state(1, true, 0, remote_rows_with_future_clocks());
+    assert!(!local.rename_chat("missing", "No row").unwrap());
+    assert_eq!(local.pending_len(), 0);
+    local.upsert_chat(&chat("new", "local")).unwrap();
+    assert!(
+        local
+            .take_pushable()
+            .iter()
+            .flat_map(|batch| &batch.ops)
+            .all(|op| { op.hlc.as_str() < OBSERVED_FUTURE_CLOCK }),
+        "creating an unrelated row must not adopt the remote future clock"
+    );
+    assert!(local.delete_chat("chat").unwrap());
+    let pending = local.pending_len();
+    assert!(!local.rename_chat("chat", "Must stay deleted").unwrap());
+    assert!(!local.set_chat_archived("chat", true).unwrap());
+    assert_eq!(local.pending_len(), pending);
+    assert!(local.chat("chat").unwrap().is_none());
+    let reopened = RegistryDoc::from_bytes(&local.to_bytes().unwrap(), "local").unwrap();
+    assert!(reopened.chat("chat").unwrap().is_none());
+    assert!(reopened.chat("new").unwrap().is_some());
+}
+
 /// Stand-in for the server: applies every pushable batch from `docs` to a row
 /// table with the SAME merge fn, acks, and broadcasts merged rows to all.
 fn server_round(
@@ -2364,19 +2502,40 @@ fn external_sidebar_references_survive_restart_without_creating_execution_rows()
         &HashMap::from([("remote".into(), vec!["remote-chat".into()])]),
     );
     doc.change_sidebar_pin(&rcode_proto::SidebarPinChange::Pin {
-        session_id: "remote-chat".into(), after: None, before: None,
-    }).unwrap();
+        session_id: "remote-chat".into(),
+        after: None,
+        before: None,
+    })
+    .unwrap();
     let mut restored = RegistryDoc::from_bytes(&doc.to_bytes().unwrap(), "local").unwrap();
     restored.set_local_only(true);
     restored.reconcile_sidebar_pins(true).unwrap();
-    assert_eq!(restored.sidebar_preferences().unwrap().pinned_session_ids, ["remote-chat"]);
+    assert_eq!(
+        restored.sidebar_preferences().unwrap().pinned_session_ids,
+        ["remote-chat"]
+    );
     assert!(restored.read_chats().unwrap().is_empty());
     // A disconnected host has no new catalog yet: retain its references.
-    restored.update_external_sidebar_chats(&std::collections::HashSet::from(["remote".into()]), &HashMap::new());
+    restored.update_external_sidebar_chats(
+        &std::collections::HashSet::from(["remote".into()]),
+        &HashMap::new(),
+    );
     restored.reconcile_sidebar_pins(true).unwrap();
-    assert_eq!(restored.sidebar_preferences().unwrap().pinned_session_ids, ["remote-chat"]);
+    assert_eq!(
+        restored.sidebar_preferences().unwrap().pinned_session_ids,
+        ["remote-chat"]
+    );
     // An authoritative empty catalog or removed host clears the pin.
-    restored.update_external_sidebar_chats(&std::collections::HashSet::from(["remote".into()]), &HashMap::from([("remote".into(), vec![])]));
+    restored.update_external_sidebar_chats(
+        &std::collections::HashSet::from(["remote".into()]),
+        &HashMap::from([("remote".into(), vec![])]),
+    );
     restored.reconcile_sidebar_pins(true).unwrap();
-    assert!(restored.sidebar_preferences().unwrap().pinned_session_ids.is_empty());
+    assert!(
+        restored
+            .sidebar_preferences()
+            .unwrap()
+            .pinned_session_ids
+            .is_empty()
+    );
 }
