@@ -5,7 +5,7 @@
 //! target device is remote); chunks stage on disk under `{uploads_root}/tmp/
 //! {uploadId}/{seq}.b64` (surviving an engine restart mid-upload, unlike the original app's
 //! in-memory buffers), and `commit` assembles them into
-//! `{uploads_root}/{id8}-{name}` and returns the absolute path, which the
+//! `{uploads_root}/upload-{identity_hash}-{name}` and returns the absolute path, which the
 //! composer appends to the prompt so the agent can read the file from disk.
 //! Attachments live only on the host device — every read proxies through the
 //! owning device via `ReadAttachmentChunk`; nothing is mirrored to the edge.
@@ -36,7 +36,8 @@ const STAGING_TTL: Duration = Duration::from_secs(10 * 60);
 /// commits the bytes to its OWN uploads dir first (fast, offline-safe), the
 /// command queues immediately carrying refs, and the bytes chase it over the
 /// peer link. Any device resolves a ref against its own uploads dir — the
-/// deterministic committed name `{id8}-{sanitize(fileName)}` makes sender and
+/// deterministic committed name hashes the full upload id and original file
+/// name, making sender and
 /// host land the same file at the same relative path.
 pub const PENDING_REF_PREFIX: &str = "pending://";
 
@@ -59,7 +60,7 @@ pub fn parse_pending_ref(path: &str) -> Option<(&str, &str)> {
 
 /// One queued attachment a `QueueCommand` asks the engine to deliver: the
 /// bytes are already committed to THIS device's uploads dir under
-/// `{id8}-{sanitize(file_name)}`; the transfer pushes them to the chat's
+/// a full-identity committed name; the transfer pushes them to the chat's
 /// host device by upload identity (never by arbitrary path).
 #[derive(Debug, Clone, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -162,6 +163,7 @@ impl Uploads {
     /// double-appending. Callers without `seq` get append-only behavior.
     pub fn append(&self, upload_id: &str, data: &str, seq: Option<u64>) -> Result<(), EngineError> {
         let dir = self.staging_dir(upload_id)?;
+        let _write = self.lock_writes()?;
         self.sweep();
         std::fs::create_dir_all(&dir)?;
         let at = match seq {
@@ -189,6 +191,15 @@ impl Uploads {
     /// path.
     pub fn commit(&self, upload_id: &str, file_name: &str) -> Result<String, EngineError> {
         let dir = self.staging_dir(upload_id)?;
+        let _write = self.lock_writes()?;
+        let path = self.identity_target(upload_id, file_name);
+        // The full identity names an immutable, atomically published result.
+        // A lost response can therefore be retried after staging was removed
+        // or after an engine restart, without replaying a partial write.
+        if committed_file(&path)? {
+            let _ = std::fs::remove_dir_all(&dir);
+            return Ok(path.to_string_lossy().into_owned());
+        }
         let mut parts = chunk_files(&dir)?;
         if parts.is_empty() {
             return Err(EngineError::Other("Unknown or expired upload".into()));
@@ -211,30 +222,51 @@ impl Uploads {
             return Err(EngineError::Other("Upload too large".into()));
         }
         std::fs::create_dir_all(&self.inner.dir)?;
-        let name = sanitize(file_name);
-        let id8: String = upload_id.chars().take(8).collect();
-        let path = self.inner.dir.join(format!("{id8}-{name}"));
-        std::fs::write(&path, &bytes)?;
+        use std::io::Write;
+        let mut temporary = tempfile::NamedTempFile::new_in(&self.inner.dir)?;
+        temporary.write_all(&bytes)?;
+        temporary.as_file().sync_all()?;
+        if let Err(error) = temporary.persist_noclobber(&path) {
+            if error.error.kind() != std::io::ErrorKind::AlreadyExists || !committed_file(&path)? {
+                return Err(error.error.into());
+            }
+        }
         let _ = std::fs::remove_dir_all(&dir);
         Ok(path.to_string_lossy().to_string())
     }
 
     /// The committed absolute path a pending ref resolves to on THIS device
-    /// (`{uploads_dir}/{id8}-{sanitize(name)}`), whether or not it exists yet.
+    /// New writes always use the full identity. Historical short-id files
+    /// remain readable so queued attachments survive an application update.
     pub fn pending_target(&self, upload_id: &str, file_name: &str) -> PathBuf {
+        let target = self.identity_target(upload_id, file_name);
+        if target.is_file() || rcode_proto::upload_identity::is_full_identity_upload(upload_id) {
+            return target;
+        }
         let id8: String = upload_id.chars().take(8).collect();
         // The id8 fragment becomes part of a file name — jail its charset the
         // same way staging does (a hostile ref must not traverse).
         let id8 = sanitize(&id8);
-        self.inner
+        let legacy = self
+            .inner
             .dir
-            .join(format!("{id8}-{}", sanitize(file_name)))
+            .join(format!("{id8}-{}", sanitize(file_name)));
+        if legacy.is_file() { legacy } else { target }
+    }
+
+    fn identity_target(&self, upload_id: &str, file_name: &str) -> PathBuf {
+        self.inner.dir.join(format!(
+            "upload-{}-{}",
+            rcode_proto::upload_identity::upload_identity_hash(upload_id, file_name),
+            sanitize(file_name)
+        ))
     }
 
     /// Resolve a `pending://` ref against this device's uploads dir.
     /// `Some(absolute)` iff the bytes have landed here.
     pub fn resolve_pending(&self, path: &str) -> Option<String> {
         let (upload_id, file_name) = parse_pending_ref(path)?;
+        self.staging_dir(upload_id).ok()?;
         let target = self.pending_target(upload_id, file_name);
         target
             .is_file()
@@ -277,6 +309,20 @@ impl Uploads {
     }
 
     // ── internals ───────────────────────────────────────────────────────────
+
+    fn lock_writes(&self) -> Result<std::fs::File, EngineError> {
+        std::fs::create_dir_all(&self.inner.dir)?;
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(self.inner.dir.join(".upload.lock"))?;
+        // Include independently opened Uploads handles and other engine
+        // processes sharing this root. Do not unlink this stable lock file.
+        file.lock()?;
+        Ok(file)
+    }
 
     fn staging_dir(&self, upload_id: &str) -> Result<PathBuf, EngineError> {
         // The id becomes a directory name — jail it to a safe charset.
@@ -399,6 +445,19 @@ impl Uploads {
             size: meta.len(),
             resolved,
         })
+    }
+}
+
+/// An existing destination is a completed result only if it is a regular
+/// file. Never treat a symlink or directory as a successful upload receipt.
+fn committed_file(path: &Path) -> Result<bool, EngineError> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_file() => Ok(true),
+        Ok(_) => Err(EngineError::Other(
+            "Upload destination is not a regular file".into(),
+        )),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error.into()),
     }
 }
 
@@ -588,6 +647,131 @@ mod tests {
             !racing.exists(),
             "abandoned empty staging dir must be swept"
         );
+    }
+
+    #[test]
+    fn committed_uploads_use_the_full_id_and_unsanitized_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let uploads = Uploads::from_root(dir.path());
+        let mut paths = Vec::new();
+        for (id, name, bytes) in [
+            ("abcd1234-first", "image.png", b"first".as_slice()),
+            ("abcd1234-second", "image.png", b"second".as_slice()),
+            ("abcd1234-first", "im age.png", b"third".as_slice()),
+            ("abcd1234-first", "im_age.png", b"fourth".as_slice()),
+        ] {
+            uploads.append(id, &BASE64.encode(bytes), Some(0)).unwrap();
+            let path = uploads.commit(id, name).unwrap();
+            assert!(!paths.contains(&path), "distinct identities aliased");
+            assert_eq!(std::fs::read(&path).unwrap(), bytes);
+            assert_eq!(
+                uploads.resolve_pending(&pending_ref(id, name)),
+                Some(path.clone())
+            );
+            paths.push(path);
+        }
+        assert_eq!(std::fs::read(&paths[0]).unwrap(), b"first");
+    }
+
+    #[test]
+    fn completed_upload_commit_is_idempotent_across_reopen_and_chunk_retries() {
+        let dir = tempfile::tempdir().unwrap();
+        let uploads = Uploads::from_root(dir.path());
+        uploads
+            .append("complete-id", &BASE64.encode(b"complete"), Some(0))
+            .unwrap();
+        let first = uploads.commit("complete-id", "image.png").unwrap();
+        let reopened = Uploads::from_root(dir.path());
+        assert_eq!(reopened.commit("complete-id", "image.png").unwrap(), first);
+        // Replaying a complete transfer cannot change the immutable result.
+        reopened
+            .append("complete-id", &BASE64.encode(b"replacement"), Some(0))
+            .unwrap();
+        assert_eq!(reopened.commit("complete-id", "image.png").unwrap(), first);
+        assert_eq!(std::fs::read(first).unwrap(), b"complete");
+        assert!(!dir.path().join("tmp/complete-id").exists());
+    }
+
+    #[test]
+    fn independent_stores_can_commit_the_same_upload_concurrently() {
+        let dir = tempfile::tempdir().unwrap();
+        let uploads = Uploads::from_root(dir.path());
+        uploads
+            .append("concurrent-id", &BASE64.encode(b"complete"), Some(0))
+            .unwrap();
+        let start = std::sync::Arc::new(std::sync::Barrier::new(8));
+        let paths: Vec<_> = std::thread::scope(|scope| {
+            let workers: Vec<_> = (0..8)
+                .map(|_| {
+                    let start = start.clone();
+                    let uploads = Uploads::from_root(dir.path());
+                    scope.spawn(move || {
+                        start.wait();
+                        uploads.commit("concurrent-id", "image.png").unwrap()
+                    })
+                })
+                .collect();
+            workers
+                .into_iter()
+                .map(|worker| worker.join().unwrap())
+                .collect()
+        });
+        assert!(paths.iter().all(|path| path == &paths[0]));
+        assert_eq!(std::fs::read(&paths[0]).unwrap(), b"complete");
+    }
+
+    #[test]
+    fn full_identity_ref_never_resolves_to_a_colliding_legacy_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let uploads = Uploads::from_root(dir.path());
+        let legacy = dir.path().join("abcdefgh-image.png");
+        std::fs::write(&legacy, b"unrelated legacy bytes").unwrap();
+        let identity = "abcdefgh-new-id-v2";
+        let reference = pending_ref(identity, "image.png");
+        assert_eq!(uploads.resolve_pending(&reference), None);
+        assert!(uploads.read_chunk(&reference, 0, &[]).is_err());
+        assert_ne!(uploads.pending_target(identity, "image.png"), legacy);
+        uploads
+            .append(identity, &BASE64.encode(b"new full bytes"), Some(0))
+            .unwrap();
+        // Pending chunks alone are not a completion receipt.
+        assert_eq!(uploads.resolve_pending(&reference), None);
+        let published = uploads.commit(identity, "image.png").unwrap();
+        assert_eq!(uploads.resolve_pending(&reference), Some(published));
+        assert_eq!(
+            uploads.read_chunk(&reference, 0, &[]).unwrap().data,
+            BASE64.encode(b"new full bytes")
+        );
+        assert_eq!(std::fs::read(legacy).unwrap(), b"unrelated legacy bytes");
+    }
+
+    #[test]
+    fn legacy_short_id_uploads_remain_readable_without_being_overwritten() {
+        let dir = tempfile::tempdir().unwrap();
+        let uploads = Uploads::from_root(dir.path());
+        let legacy = dir.path().join("abcd1234-image.png");
+        std::fs::write(&legacy, b"historical").unwrap();
+        let reference = pending_ref("abcd1234-first", "image.png");
+        assert_eq!(
+            uploads.pending_target("abcd1234-first", "image.png"),
+            legacy
+        );
+        assert_eq!(
+            uploads.read_chunk(&reference, 0, &[]).unwrap().data,
+            BASE64.encode(b"historical")
+        );
+        uploads
+            .append("abcd1234-first", &BASE64.encode(b"new"), Some(0))
+            .unwrap();
+        let published = uploads.commit("abcd1234-first", "image.png").unwrap();
+        assert_ne!(Path::new(&published), legacy);
+        assert_eq!(std::fs::read(legacy).unwrap(), b"historical");
+        assert_eq!(uploads.resolve_pending(&reference), Some(published));
+        assert_eq!(
+            uploads.read_chunk(&reference, 0, &[]).unwrap().data,
+            BASE64.encode(b"new")
+        );
+        assert!(uploads.resolve_pending("pending://../image.png").is_none());
     }
 
     #[test]

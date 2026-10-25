@@ -633,6 +633,16 @@ void main() {
       UploadAttachment(name: 'fixture.bin', bytes: bytes),
     );
     expect(server.uploads.values.single.length, bytes.length);
+    final uploadId = server.uploads.keys.single;
+    expect(
+      uploadId,
+      matches(
+        RegExp(
+          r'^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}-v2$',
+        ),
+      ),
+    );
+    expect(path, '/uploads/$uploadId/fixture.bin');
     // A shorter read fixture exercises chunk offsets without thousands of requests.
     server.uploads.clear();
     server.uploads['read'] = BytesBuilder()..add(bytes.sublist(0, 71));

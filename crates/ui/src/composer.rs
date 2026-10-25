@@ -72,6 +72,10 @@ pub const ACTIONS_ROW_HEIGHT: f32 = 2.0 + 32.0 + ACTIONS_BOTTOM_PAD;
 pub const PILL_BORDER_V: f32 = 2.0;
 /// Corner radius shared by the composer and the queue tray behind it.
 pub(crate) const COMPOSER_RADIUS: f32 = 26.0;
+
+fn new_attachment_upload_id() -> String {
+    format!("{}{}", uuid::Uuid::new_v4(), rcode_proto::upload_identity::UPLOAD_ID_V2_SUFFIX)
+}
 /// Expanded composer bounds: 120px when empty, 304px at the content cap.
 pub const COMPOSER_MIN_HEIGHT: f32 = TEXTAREA_MIN + ACTIONS_ROW_HEIGHT + PILL_BORDER_V;
 pub const COMPOSER_MAX_HEIGHT: f32 = TEXTAREA_MAX + ACTIONS_ROW_HEIGHT + PILL_BORDER_V;
@@ -8571,7 +8575,7 @@ impl Composer {
         // id must exist before any bytes move.
         let upload_ids: Vec<String> = staged
             .iter()
-            .map(|_| uuid::Uuid::new_v4().to_string())
+            .map(|_| new_attachment_upload_id())
             .collect();
         // The echo carries attachment refs from the first frame, so photos
         // render while the send is still pending. Queued flow: the refs are
@@ -8602,8 +8606,8 @@ impl Composer {
             &echo_paths,
         );
         // Queued flow also seeds the UPLOAD ALIAS: the host rewrites the
-        // persisted ref to `{its uploads dir}/{id8}-{name}` — an absolute
-        // path the sender can't predict, but whose id8 it minted. The alias
+        // persisted ref to its full-identity basename — an absolute
+        // path the sender can't predict, but whose identity it minted. The alias
         // keeps the thumbnail on the already-local bytes through that
         // rewrite instead of blanking into a reload skeleton.
         if queued_flow {
@@ -10647,6 +10651,19 @@ mod attachment_chip_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn production_attachment_ids_use_full_identity_without_losing_uuid_entropy() {
+        let mut ids = std::collections::HashSet::new();
+        for _ in 0..32 {
+            let id = new_attachment_upload_id();
+            let uuid = id.strip_suffix(rcode_proto::upload_identity::UPLOAD_ID_V2_SUFFIX).unwrap();
+            assert_eq!(uuid::Uuid::parse_str(uuid).unwrap().get_version_num(), 4);
+            assert_eq!(id.len(), 39);
+            assert!(id[..8].bytes().all(|byte| byte.is_ascii_hexdigit()));
+            assert!(ids.insert(id));
+        }
+    }
 
     #[gpui::test]
     fn existing_chat_context_ring_is_interactive_even_before_usage_arrives(cx: &mut gpui::TestAppContext) {

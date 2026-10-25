@@ -582,7 +582,7 @@ class SessionController extends ChangeNotifier {
     if (attachment.bytes.length > 24 * 1024 * 1024) {
       throw const RpcException('attachment_too_large', 'attachment_too_large');
     }
-    final id = const Uuid().v4();
+    final id = '${const Uuid().v4()}-v2';
     const chunkBytes = 510000;
     final count = math.max(1, (attachment.bytes.length / chunkBytes).ceil());
     for (var seq = 0; seq < count; seq++) {

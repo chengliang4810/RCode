@@ -91,3 +91,11 @@ pub(crate) fn write<T>(lock: &std::sync::RwLock<T>) -> std::sync::RwLockWriteGua
 pub(crate) fn new_id() -> String {
     uuid::Uuid::new_v4().to_string()
 }
+
+pub(crate) fn new_upload_id() -> String {
+    format!(
+        "{}{}",
+        new_id(),
+        rcode_proto::upload_identity::UPLOAD_ID_V2_SUFFIX
+    )
+}

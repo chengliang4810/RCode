@@ -1028,23 +1028,20 @@ pub(crate) fn attachment_snapshot_for(source: &AttachmentKey) -> AttachmentSnaps
         },
         Some(CacheEntry::Loading { .. }) => AttachmentSnapshot::Loading,
         None => {
-            // Queued-send alias: the host materializes `pending://{id}/{name}`
-            // at `{uploads}/{id8}-{name}` and rewrites the persisted ref to
-            // that ABSOLUTE path — one the sender can't know up front (it's
-            // the host's disk). The id8 basename prefix IS derivable though,
-            // so the send seeds the bytes under an alias and this fallback
-            // resolves the rewritten ref instantly instead of blanking the
-            // thumbnail into a skeleton while the bytes round-trip
-            // (2026-08-19 "photo disappears after it finishes sending").
+            // The host's root is unknown, but its full upload identity is
+            // stable. Legacy id8 basenames are not unique: fetch their actual
+            // path rather than displaying another upload's optimistic bytes.
             if let Some(image) = source
                 .raster_mime
                 .is_none()
-                .then(|| upload_alias_id8(path))
+                .then(|| upload_alias_identity(path))
                 .flatten()
-                .and_then(|id8| match cache.map.get(&alias_key(device_id, &id8)) {
-                    Some(CacheEntry::Loaded { image, .. }) => Some(image.clone()),
-                    _ => None,
-                })
+                .and_then(
+                    |identity| match cache.map.get(&alias_key(device_id, &identity)) {
+                        Some(CacheEntry::Loaded { image, .. }) => Some(image.clone()),
+                        _ => None,
+                    },
+                )
             {
                 cache.insert_loaded(key(device_id, path), image.clone());
                 return AttachmentSnapshot::Loaded(image);
@@ -1054,26 +1051,24 @@ pub(crate) fn attachment_snapshot_for(source: &AttachmentKey) -> AttachmentSnaps
     }
 }
 
-/// The uploadId fragment a committed upload's basename starts with
-/// (`{id8}-{name}` per the engine's `Uploads::pending_target`). `None` when
-/// the path can't be a committed upload.
-fn upload_alias_id8(path: &str) -> Option<String> {
-    let base = std::path::Path::new(path).file_name()?.to_str()?;
-    let (id8, _) = base.split_at_checked(8)?;
-    (base.as_bytes().get(8) == Some(&b'-') && id8.bytes().all(|b| b.is_ascii_alphanumeric()))
-        .then(|| id8.to_string())
+/// Full identity from a new host's basename. Paths may belong to a different
+/// operating system than this UI, so recognize either directory separator.
+fn upload_alias_identity(path: &str) -> Option<String> {
+    let base = path.rsplit(['/', '\\']).next()?;
+    rcode_proto::upload_identity::split_full_upload_name(base)
+        .map(|(identity, _)| identity.to_ascii_lowercase())
 }
 
-fn alias_key(device_id: &str, id8: &str) -> AttachmentKey {
-    key(device_id, &format!("upload-alias://{id8}"))
+fn alias_key(device_id: &str, identity: &str) -> AttachmentKey {
+    key(device_id, &format!("upload-alias://full/{identity}"))
 }
 
 /// Seed the just-sent image under its upload identity so the persisted
 /// message's rewritten absolute ref (host-side path) resolves from the same
 /// local bytes — see the alias fallback in [`attachment_snapshot`].
 pub fn seed_attachment_alias(device_id: &str, upload_id: &str, name: &str, image: Arc<Image>) {
-    let id8: String = upload_id.chars().take(8).collect();
-    let source = alias_key(device_id, &id8);
+    let identity = rcode_proto::upload_identity::upload_identity_hash(upload_id, name);
+    let source = alias_key(device_id, &identity);
     store_loaded_for(&source, name.to_string().into(), image);
 }
 
@@ -1332,21 +1327,32 @@ mod tests {
     fn image_errors_are_bounded_without_evicting_active_loads() {
         let mut cache = ImageCache::default();
         for i in 0..300 {
-            cache.map.insert(key("device", &i.to_string()), CacheEntry::Error {
-                attempts: 1, at: Instant::now(),
-            });
+            cache.map.insert(
+                key("device", &i.to_string()),
+                CacheEntry::Error {
+                    attempts: 1,
+                    at: Instant::now(),
+                },
+            );
         }
         let loading = key("device", "active");
-        cache.map.insert(loading.clone(), CacheEntry::Loading { attempts: 0 });
+        cache
+            .map
+            .insert(loading.clone(), CacheEntry::Loading { attempts: 0 });
         cache.prune_errors();
         assert_eq!(cache.map.len(), 257);
-        assert!(matches!(cache.map.get(&loading), Some(CacheEntry::Loading { .. })));
+        assert!(matches!(
+            cache.map.get(&loading),
+            Some(CacheEntry::Loading { .. })
+        ));
     }
 
     #[test]
     fn clipboard_bmp_rejects_dimensions_above_the_decode_limit() {
         let mut bytes = std::io::Cursor::new(Vec::new());
-        image::DynamicImage::new_rgb8(16_385, 1).write_to(&mut bytes, image::ImageFormat::Bmp).unwrap();
+        image::DynamicImage::new_rgb8(16_385, 1)
+            .write_to(&mut bytes, image::ImageFormat::Bmp)
+            .unwrap();
         let bytes = bytes.into_inner();
         assert!(image::load_from_memory_with_format(&bytes, image::ImageFormat::Bmp).is_ok());
         assert!(bmp_to_png(&Image::from_bytes(ImageFormat::Bmp, bytes)).is_err());
@@ -1722,7 +1728,15 @@ mod generated_image_tests {
             attachment_snapshot_for(&png),
             AttachmentSnapshot::Loading
         ));
-        let alias = AttachmentKey::new(owner, "/another/policy01-image.png", Some("image/png"));
+        let alias_path = format!(
+            "/another/upload-{}-image.png",
+            rcode_proto::upload_identity::upload_identity_hash("policy01", "image.gif")
+        );
+        assert!(matches!(
+            attachment_snapshot(owner, &alias_path),
+            AttachmentSnapshot::Loaded(_)
+        ));
+        let alias = AttachmentKey::new(owner, &alias_path, Some("image/png"));
         assert!(matches!(
             attachment_snapshot_for(&alias),
             AttachmentSnapshot::Loading
@@ -2123,5 +2137,100 @@ mod accounting_tests {
         // Scrolling away leaves fewer protected keys, not more.
         protect_attachments(std::collections::HashSet::new());
         assert_eq!(protected().lock().unwrap().len(), 0);
+    }
+}
+
+#[cfg(test)]
+mod upload_identity_alias_tests {
+    use super::*;
+
+    fn image(bytes: &'static [u8]) -> Arc<Image> {
+        Arc::new(Image::from_bytes(ImageFormat::Png, bytes.to_vec()))
+    }
+
+    fn assert_image(owner: &str, path: &str, expected: &Arc<Image>) {
+        match attachment_snapshot(owner, path) {
+            AttachmentSnapshot::Loaded(loaded) => assert!(Arc::ptr_eq(&loaded.image, expected)),
+            _ => panic!("expected the optimistic image for {path}"),
+        }
+    }
+
+    #[test]
+    fn full_identity_aliases_separate_equal_prefixes_and_sanitized_names() {
+        let owner = "full-identity-alias-owner";
+        let first = image(b"first image");
+        let second = image(b"second image");
+        let third = image(b"third image");
+        let id_a = "12345678-1111-4111-8111-111111111111-v2";
+        let id_b = "12345678-2222-4222-8222-222222222222-v2";
+        for (id, name, bytes) in [
+            (id_a, "im age.png", &first),
+            (id_b, "im age.png", &second),
+            (id_a, "im_age.png", &third),
+        ] {
+            seed_attachment_alias(owner, id, name, bytes.clone());
+        }
+        for (id, name, bytes) in [
+            (id_a, "im age.png", &first),
+            (id_b, "im age.png", &second),
+            (id_a, "im_age.png", &third),
+        ] {
+            let hash = rcode_proto::upload_identity::upload_identity_hash(id, name);
+            let path = format!("/host-only/uploads/upload-{hash}-im_age.png");
+            assert_image(owner, &path, bytes);
+            assert_image(
+                owner,
+                &format!(r"D:\host-only\uploads\upload-{hash}-im_age.png"),
+                bytes,
+            );
+            assert!(matches!(
+                attachment_snapshot("another-owner", &path),
+                AttachmentSnapshot::Loading
+            ));
+        }
+    }
+
+    #[test]
+    fn old_host_short_paths_are_fetched_instead_of_guessing_an_identity() {
+        let owner = "legacy-path-no-guess-owner";
+        let sent = image(b"new sent bytes");
+        let historical = image(b"exact historical bytes");
+        seed_attachment_alias(
+            owner,
+            "12345678-1111-4111-8111-111111111111-v2",
+            "photo.png",
+            sent.clone(),
+        );
+        // Even historical unversioned IDs seed only their full identity.
+        seed_attachment_alias(
+            owner,
+            "12345678-2222-4222-8222-222222222222",
+            "photo.png",
+            sent,
+        );
+        let old_host = "/old-host/uploads/12345678-photo.png";
+        assert!(matches!(
+            attachment_snapshot(owner, old_host),
+            AttachmentSnapshot::Loading
+        ));
+        seed_attachment(owner, old_host, "photo.png", historical.clone());
+        assert_image(owner, old_host, &historical);
+    }
+
+    #[test]
+    fn only_complete_hash_basenames_are_eligible_for_an_alias() {
+        for path in [
+            "/uploads/12345678-photo.png",
+            "/uploads/upload-abcd-photo.png",
+            "/uploads/upload-zzzz-photo.png",
+        ] {
+            assert!(upload_alias_identity(path).is_none());
+        }
+        let hash = "a".repeat(64);
+        assert_eq!(
+            upload_alias_identity(&format!("/uploads/upload-{hash}-photo.png")),
+            Some(hash.clone())
+        );
+        assert!(upload_alias_identity(&format!("/uploads/upload-{hash}")).is_none());
     }
 }

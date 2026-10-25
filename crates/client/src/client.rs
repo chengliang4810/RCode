@@ -451,7 +451,7 @@ impl ClientInner {
         attachments
             .iter()
             .map(|attachment| {
-                let upload_id = crate::new_id();
+                let upload_id = crate::new_upload_id();
                 let name = attachments::upload_file_name(&attachment.name);
                 let reference = attachments::pending_ref(&upload_id, &name);
                 if let Some(live) = self.live() {
@@ -1481,7 +1481,7 @@ impl Client {
                 Ok(path)
             }
             Backend::Live(live) => {
-                let upload_id = crate::new_id();
+                let upload_id = crate::new_upload_id();
                 let file_name = attachments::upload_file_name(name);
                 let path = live
                     .relay

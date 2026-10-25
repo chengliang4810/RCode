@@ -19,6 +19,7 @@ pub mod preview;
 pub mod projectless;
 pub mod sidebar_pins;
 pub mod terminal_errors;
+pub mod upload_identity;
 pub mod view;
 pub mod workspace;
 pub mod workspace_errors;

@@ -227,7 +227,7 @@ impl DirectBackend {
         bytes: &[u8],
         progress: Option<crate::rpc::ProgressFn>,
     ) -> Result<String> {
-        let id = crate::new_id();
+        let id = crate::new_upload_id();
         let parts: Vec<&[u8]> = if bytes.is_empty() {
             vec![&[]]
         } else {

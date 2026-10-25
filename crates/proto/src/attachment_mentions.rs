@@ -87,8 +87,12 @@ pub fn is_image_path(path: &str) -> bool {
 }
 
 /// The file name to show for an attachment ref: uploads are stored as
-/// `{id8}-{name}`, and the prefix is not part of the name.
+/// `upload-{full_identity_hash}-{name}` or historically `{id8}-{name}`;
+/// the storage prefix is not part of the name.
 pub fn attachment_display_name(name: &str) -> &str {
+    if let Some((_, file_name)) = crate::upload_identity::split_full_upload_name(name) {
+        return file_name;
+    }
     match name.split_once('-') {
         Some((id, rest)) if id.len() == 8 && id.bytes().all(|b| b.is_ascii_hexdigit()) => rest,
         _ => name,
@@ -211,6 +215,20 @@ mod tests {
 
     fn image(index: u32) -> String {
         attachment_mention_link(index, None)
+    }
+
+    #[test]
+    fn full_identity_upload_names_keep_file_and_image_chips_matched() {
+        let hash = crate::upload_identity::upload_identity_hash("same-upload-v2", "my notes.zip");
+        let file = format!("upload-{hash}-my_notes.zip");
+        assert_eq!(attachment_display_name(&file), "my_notes.zip");
+        let mention = attachment_mentions(&attachment_mention_link(1, Some("my notes.zip")));
+        assert!(mention[0].names_attachment(&format!("C:\\uploads\\{file}")));
+        let image_name = format!("upload-{hash}-Image_2.png");
+        assert_eq!(image_index_from_name(&image_name), Some(2));
+        let image_mention = attachment_mentions(&attachment_mention_link(2, None));
+        assert!(image_mention[0].names_attachment(&format!("/uploads/{image_name}")));
+        assert!(!image_mention[0].names_attachment(&format!("/uploads/upload-{hash}-Image_3.png")));
     }
 
     #[test]
