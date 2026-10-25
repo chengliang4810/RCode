@@ -24,6 +24,18 @@ enum Pending {
     },
 }
 
+enum ReaderEvent {
+    Payload(String),
+    Disconnected(oneshot::Sender<()>),
+}
+
+fn receiver_stream<T: Send>(receiver: mpsc::Receiver<T>) -> impl futures::Stream<Item = T> {
+    futures::stream::unfold(receiver, |mut receiver| async move {
+        let item = receiver.recv().await?;
+        Some((item, receiver))
+    })
+}
+
 struct Shared {
     pending: Mutex<HashMap<u64, Pending>>,
     connected: AtomicBool,
@@ -125,7 +137,14 @@ fn cancel_pending(shared: &Shared, out: &mpsc::Sender<String>, id: u64) {
 
 impl RpcClient {
     /// Wrap an existing duplex: `out` carries client frames, `inbound` server frames.
-    pub fn new(out: mpsc::Sender<String>, mut inbound: mpsc::Receiver<String>) -> Self {
+    pub fn new(out: mpsc::Sender<String>, inbound: mpsc::Receiver<String>) -> Self {
+        Self::with_reader(out, receiver_stream(inbound).map(ReaderEvent::Payload))
+    }
+
+    fn with_reader(
+        out: mpsc::Sender<String>,
+        inbound: impl futures::Stream<Item = ReaderEvent> + Send + 'static,
+    ) -> Self {
         let shared = Arc::new(Shared {
             pending: Mutex::new(HashMap::new()),
             connected: AtomicBool::new(true),
@@ -133,20 +152,29 @@ impl RpcClient {
         let reader_shared = shared.clone();
         let reader_out = out.clone();
         let reader = tokio::spawn(async move {
-            while let Some(payload) = inbound.recv().await {
-                for line in payload.lines() {
-                    let line = line.trim();
-                    if line.is_empty() {
-                        continue;
-                    }
-                    let frame: ServerFrame = match serde_json::from_str(line) {
-                        Ok(frame) => frame,
-                        Err(err) => {
-                            tracing::warn!(error = %err, "rpc: dropping malformed server frame");
-                            continue;
+            futures::pin_mut!(inbound);
+            while let Some(event) = inbound.next().await {
+                match event {
+                    ReaderEvent::Payload(payload) => {
+                        for line in payload.lines() {
+                            let line = line.trim();
+                            if line.is_empty() {
+                                continue;
+                            }
+                            let frame: ServerFrame = match serde_json::from_str(line) {
+                                Ok(frame) => frame,
+                                Err(err) => {
+                                    tracing::warn!(error = %err, "rpc: dropping malformed server frame");
+                                    continue;
+                                }
+                            };
+                            route_frame(&reader_shared, &reader_out, frame).await;
                         }
-                    };
-                    route_frame(&reader_shared, &reader_out, frame).await;
+                    }
+                    ReaderEvent::Disconnected(done) => {
+                        reader_shared.disconnected();
+                        let _ = done.send(());
+                    }
                 }
             }
             reader_shared.disconnected();
@@ -416,16 +444,8 @@ async fn route_frame(shared: &Arc<Shared>, out: &mpsc::Sender<String>, frame: Se
             None => false,
         };
         if dead {
-            // Receiver was dropped — cancel server-side and forget the stream.
-            shared.lock().remove(&id);
-            if let Ok(json) = serde_json::to_string(&ClientFrame {
-                id,
-                method: None,
-                params: serde_json::Value::Null,
-                cancel: true,
-            }) {
-                let _ = out.send(json).await;
-            }
+            // Cancellation may wait for the writer, but never on this reader.
+            cancel_pending(shared, out, id);
         }
         return;
     }
@@ -503,9 +523,9 @@ async fn dial(url: &str, api_key: Option<&str>) -> Result<Socket, RpcError> {
 async fn connect_reconnecting(url: &str, api_key: Option<String>) -> Result<RpcClient, RpcError> {
     let socket = dial(url, api_key.as_deref()).await?;
     let (out_tx, mut out_rx) = mpsc::channel::<String>(256);
-    let (in_tx, in_rx) = mpsc::channel::<String>(256);
+    let (in_tx, in_rx) = mpsc::channel::<ReaderEvent>(256);
     let (reconnect_tx, mut reconnect_rx) = mpsc::channel(1);
-    let mut client = RpcClient::new(out_tx, in_rx);
+    let mut client = RpcClient::with_reader(out_tx, receiver_stream(in_rx));
     client.reconnect = Some(reconnect_tx);
     let shared = client.shared.clone();
     let url = url.to_owned();
@@ -562,7 +582,7 @@ async fn connect_reconnecting(url: &str, api_key: Option<String>) -> Result<RpcC
                     message = stream.next() => match message {
                         Some(Ok(WsMessage::Text(text))) => {
                             received = tokio::time::Instant::now();
-                            if !matches!(tokio::time::timeout(CONNECT_TIMEOUT, in_tx.send(text)).await, Ok(Ok(()))) { break; }
+                            if !matches!(tokio::time::timeout(CONNECT_TIMEOUT, in_tx.send(ReaderEvent::Payload(text))).await, Ok(Ok(()))) { break; }
                         }
                         Some(Ok(WsMessage::Ping(payload))) => {
                             received = tokio::time::Instant::now();
@@ -578,7 +598,17 @@ async fn connect_reconnecting(url: &str, api_key: Option<String>) -> Result<RpcC
                     }
                 }
             }
-            shared.disconnected();
+            // Mark the transport unavailable immediately, but route every
+            // already-received reply before failing the remaining requests.
+            // Wait for that boundary before a new socket can accept requests.
+            shared.connected.store(false, Ordering::Release);
+            let (done, disconnected) = oneshot::channel();
+            if in_tx.send(ReaderEvent::Disconnected(done)).await.is_err()
+                || disconnected.await.is_err()
+            {
+                shared.disconnected();
+                return;
+            }
             while out_rx.try_recv().is_ok() {}
             if immediate {
                 next_socket = dial(&url, api_key.as_deref()).await.ok();
@@ -622,6 +652,112 @@ mod tests {
         assert!(futures::poll!(&mut stream).is_pending());
         drop(stream);
         assert!(client.shared.lock().is_empty());
+    }
+
+    #[tokio::test]
+    async fn lagging_stream_cancellation_cannot_block_replies_when_outbound_is_full() {
+        let (out, mut requests) = mpsc::channel(1);
+        let (inbound, replies) = mpsc::channel(STREAM_QUEUE_CAP + 2);
+        let client = RpcClient::new(out.clone(), replies);
+        let mut stream = client
+            .subscribe("Watch", serde_json::Value::Null)
+            .await
+            .unwrap();
+        let subscription: ClientFrame =
+            serde_json::from_str(&requests.recv().await.unwrap()).unwrap();
+        let mut call = Box::pin(client.call("Read", serde_json::Value::Null));
+        assert!(futures::poll!(&mut call).is_pending());
+        let request: ClientFrame = serde_json::from_str(&requests.recv().await.unwrap()).unwrap();
+        // The peer stops reading client frames, while still producing replies.
+        out.try_send("occupied".to_owned()).unwrap();
+        for item in 0..=STREAM_QUEUE_CAP {
+            inbound
+                .send(serde_json::json!({"id":subscription.id,"item":item}).to_string())
+                .await
+                .unwrap();
+        }
+        inbound
+            .send(serde_json::json!({"id":request.id,"ok":"reply"}).to_string())
+            .await
+            .unwrap();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(1), &mut call)
+            .await
+            .expect("a queued cancellation must not stall the shared reader")
+            .unwrap();
+        assert_eq!(result, serde_json::json!("reply"));
+        assert_eq!(requests.recv().await.as_deref(), Some("occupied"));
+        let cancel: ClientFrame = serde_json::from_str(&requests.recv().await.unwrap()).unwrap();
+        assert_eq!(cancel.id, subscription.id);
+        assert!(cancel.cancel);
+        let mut buffered = 0;
+        while stream.recv().await.is_some() {
+            buffered += 1;
+        }
+        assert_eq!(buffered, STREAM_QUEUE_CAP);
+    }
+
+    #[tokio::test]
+    async fn a_final_stream_item_before_websocket_close_is_delivered() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let request: ClientFrame = loop {
+                match socket.next().await.unwrap().unwrap() {
+                    WsMessage::Text(text) => break serde_json::from_str(&text).unwrap(),
+                    WsMessage::Ping(payload) => {
+                        socket.send(WsMessage::Pong(payload)).await.unwrap()
+                    }
+                    _ => {}
+                }
+            };
+            socket
+                .send(WsMessage::Text(
+                    serde_json::json!({"id":request.id,"item":null}).to_string(),
+                ))
+                .await
+                .unwrap();
+            socket.close(None).await.unwrap();
+            // close() initiates the handshake; dropping the TCP socket with
+            // unread peer Ping/Close data can abort it on Windows and discard
+            // the final frame before the client receives any payload. Drain
+            // peer control data to Close/EOF, without waiting for an RPC-level
+            // acknowledgement or keeping the test connection artificially live.
+            loop {
+                match socket.next().await {
+                    Some(Ok(WsMessage::Close(_))) | None => break,
+                    Some(Ok(_)) => {},
+                    Some(Err(tokio_tungstenite::tungstenite::Error::ConnectionClosed
+                        | tokio_tungstenite::tungstenite::Error::AlreadyClosed
+                        | tokio_tungstenite::tungstenite::Error::Protocol(
+                            tokio_tungstenite::tungstenite::error::ProtocolError::ResetWithoutClosingHandshake,
+                        ))) => break,
+                    Some(Err(error)) => panic!("unexpected error draining peer close: {error}"),
+                }
+            }
+        });
+        let client = connect_ws(&format!("ws://{address}")).await.unwrap();
+        let mut stream = client
+            .subscribe("Final", serde_json::Value::Null)
+            .await
+            .unwrap();
+        assert_eq!(
+            tokio::time::timeout(std::time::Duration::from_secs(1), stream.recv())
+                .await
+                .unwrap(),
+            Some(serde_json::Value::Null)
+        );
+        assert_eq!(
+            tokio::time::timeout(std::time::Duration::from_secs(1), stream.recv())
+                .await
+                .unwrap(),
+            None
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(1), server)
+            .await
+            .unwrap()
+            .unwrap();
     }
 
     #[tokio::test]
