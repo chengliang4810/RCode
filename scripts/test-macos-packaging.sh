@@ -5,11 +5,14 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SANDBOX="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/rcode-package-smoke.XXXXXX")"
 trap 'rm -rf "$SANDBOX"' EXIT
-mkdir -p "$SANDBOX/scripts" "$SANDBOX/dist" "$SANDBOX/crates/ui/assets/fonts/licenses"
+mkdir -p "$SANDBOX/scripts" "$SANDBOX/dist" "$SANDBOX/crates/ui/assets/fonts/licenses" \
+  "$SANDBOX/crates/zatex/fonts" "$SANDBOX/crates/ui/assets/file-icons"
 cp "$ROOT/Cargo.toml" "$ROOT/LICENSE" "$ROOT/LICENSE-APACHE" "$ROOT/THIRD_PARTY_NOTICES.md" "$SANDBOX/"
 cp "$ROOT/scripts/package-macos.sh" "$SANDBOX/scripts/"
 cp -R "$ROOT/dist/macos" "$SANDBOX/dist/"
 cp "$ROOT/crates/ui/assets/fonts/licenses/"* "$SANDBOX/crates/ui/assets/fonts/licenses/"
+cp "$ROOT/crates/zatex/fonts/"*.txt "$SANDBOX/crates/zatex/fonts/"
+cp "$ROOT/crates/ui/assets/file-icons/LICENSE.symbols" "$SANDBOX/crates/ui/assets/file-icons/"
 VERSION="$(grep -m1 '^version' "$ROOT/Cargo.toml" | sed 's/.*"\(.*\)".*/\1/')"
 printf 'fn main() { println!("rcode %s"); }\n' "$VERSION" > "$SANDBOX/smoke.rs"
 rustc "$SANDBOX/smoke.rs" -o "$SANDBOX/rcode-smoke"
