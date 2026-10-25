@@ -112,34 +112,17 @@ impl Relay {
         self.links.reset_cooldown(device_id);
     }
 
-    /// One unary call with a deadline; a stale cached link is retried once
-    /// on a fresh dial.
+    /// Reads and explicitly idempotent writes may retry a stale cached link.
+    /// A lost mutation acknowledgement never authorizes a second mutation.
     pub(crate) async fn call(&self, device_id: &str, method: &str, params: Value) -> Result<Value> {
-        let timeout = deadline(method);
-        for attempt in 0..2 {
-            let client = self
-                .links
-                .client(device_id)
-                .await
-                .map_err(|e| map_rpc(device_id, method, e))?;
-            match tokio::time::timeout(timeout, client.call(method, params.clone())).await {
-                Ok(Ok(value)) => return Ok(value),
-                Ok(Err(err @ (RpcError::Closed | RpcError::Transport(_)))) => {
-                    self.links.invalidate(device_id);
-                    if attempt == 1 {
-                        return Err(map_rpc(device_id, method, err));
-                    }
-                }
-                Ok(Err(err)) => return Err(map_rpc(device_id, method, err)),
-                Err(_) => {
-                    self.links.invalidate(device_id);
-                    return Err(ClientError::HostUnavailable(format!(
-                        "{method} on {device_id} timed out"
-                    )));
-                }
-            }
-        }
-        unreachable!("the second attempt always returns")
+        call_with_retry(
+            device_id,
+            method,
+            params,
+            || self.links.client(device_id),
+            || self.links.invalidate(device_id),
+        )
+        .await
     }
 
     /// Chunked upload (`UploadChunk` ×N with `seq`, then `UploadCommit`).
@@ -295,6 +278,291 @@ impl Relay {
         for (_, token) in lock(&self.watches).drain() {
             token.cancel();
         }
+    }
+}
+
+/// Explicit allowlist: an unfamiliar method is a mutation until its contract
+/// proves otherwise. In particular, same-value setters, queue leases, terminal
+/// input and worktree creation may have observable side effects on each call.
+fn replay_safe(method: &str, params: &Value) -> bool {
+    match method {
+        methods::LIST_HARNESSES
+        | methods::LIST_MODELS
+        | methods::LIST_SKILLS
+        | methods::LIST_CUSTOM_COMMANDS
+        | methods::LIST_COMMANDS
+        | methods::LIST_SUBAGENTS
+        | methods::LIST_MCP_SERVERS
+        | methods::LIST_PLUGINS
+        | methods::LIST_PROJECT_MEMORY
+        | methods::LIST_REPOS
+        | methods::LIST_BRANCHES
+        | methods::LIST_REFS
+        | methods::LIST_GIT_HISTORY
+        | methods::SEARCH_GIT_HISTORY
+        | methods::RESOLVE_GIT_AVATARS
+        | methods::LIST_FOLDERS
+        | methods::LIST_DRIVES
+        | methods::SEARCH_HOME_FOLDERS
+        | methods::SEARCH_FILES
+        | methods::LIST_WORKSPACE_DIRECTORY
+        | methods::SEARCH_WORKSPACE_FILES
+        | methods::SEARCH_WORKSPACE_CONTENT
+        | methods::READ_WORKSPACE_IMAGE
+        | methods::READ_WORKSPACE_FILE
+        | methods::READ_ATTACHMENT_CHUNK
+        | methods::READ_COMMAND_OUTPUT
+        | methods::GET_TITLE_SETTINGS
+        | methods::GET_PROVIDER_SETTINGS
+        | methods::GET_PROVIDER_API_KEY
+        | methods::GET_AGENT_SETTINGS
+        | methods::GET_CUSTOM_INSTRUCTIONS
+        | methods::GET_WORKTREE_SETTINGS
+        | methods::GET_CHANGE_REQUEST_REPOSITORY
+        | methods::LIST_CHANGE_REQUEST_PAGE => true,
+        // Positional chunks overwrite the same slot; append-only legacy chunks
+        // do not. UploadCommit is deliberately absent: older peers remove its
+        // staging before replying and do not support idempotent completion.
+        methods::UPLOAD_CHUNK => params.get("seq").and_then(Value::as_u64).is_some(),
+        // RelayCommand carries a client-minted id, claimed in the host ledger.
+        methods::RELAY_COMMAND => params
+            .get("entry")
+            .and_then(|entry| entry.get("id"))
+            .and_then(Value::as_str)
+            .is_some_and(|id| !id.is_empty()),
+        _ => false,
+    }
+}
+
+async fn call_with_retry<Dial, DialFuture, Invalidate>(
+    device_id: &str,
+    method: &str,
+    params: Value,
+    mut dial: Dial,
+    invalidate: Invalidate,
+) -> Result<Value>
+where
+    Dial: FnMut() -> DialFuture,
+    DialFuture:
+        std::future::Future<Output = std::result::Result<Arc<rcode_rpc::RpcClient>, RpcError>>,
+    Invalidate: Fn(),
+{
+    let safe = replay_safe(method, &params);
+    for attempt in 0..2 {
+        let client = dial()
+            .await
+            .map_err(|err| map_rpc(device_id, method, err))?;
+        match tokio::time::timeout(deadline(method), client.call(method, params.clone())).await {
+            Ok(Ok(value)) => return Ok(value),
+            Ok(Err(err @ (RpcError::Closed | RpcError::Transport(_)))) => {
+                invalidate();
+                if !safe {
+                    return Err(uncertain_outcome(device_id, method, "connection lost"));
+                }
+                if attempt == 1 {
+                    return Err(map_rpc(device_id, method, err));
+                }
+            }
+            Ok(Err(err)) => return Err(map_rpc(device_id, method, err)),
+            Err(_) => {
+                invalidate();
+                return Err(if safe {
+                    ClientError::HostUnavailable(format!("{method} on {device_id} timed out"))
+                } else {
+                    uncertain_outcome(device_id, method, "request timed out")
+                });
+            }
+        }
+    }
+    unreachable!("the second attempt always returns")
+}
+
+fn uncertain_outcome(device_id: &str, method: &str, reason: &str) -> ClientError {
+    ClientError::HostUnavailable(format!(
+        "{method} on {device_id}: {reason}; the outcome may be unknown and the request was not retried. Check the host state before retrying."
+    ))
+}
+
+#[cfg(test)]
+mod retry_tests {
+    use super::*;
+    use futures::{SinkExt, StreamExt};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio_tungstenite::tungstenite::Message;
+
+    async fn next_request(
+        socket: &mut tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
+    ) -> rcode_rpc::ClientFrame {
+        loop {
+            match socket.next().await.unwrap().unwrap() {
+                Message::Text(text) => return serde_json::from_str(&text).unwrap(),
+                Message::Ping(payload) => socket.send(Message::Pong(payload)).await.unwrap(),
+                Message::Pong(_) => {}
+                message => panic!("expected an RPC text frame, received {message:?}"),
+            }
+        }
+    }
+
+    async fn finish_close(socket: &mut tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>) {
+        socket.close(None).await.unwrap();
+        // A successful reply must not be discarded by an abortive TCP drop
+        // with unread peer control data. Finish transport cleanup, not an
+        // application acknowledgement; the lost-ACK branch stays abortive.
+        loop {
+            match socket.next().await {
+                Some(Ok(Message::Close(_))) | None => break,
+                Some(Ok(_)) => {},
+                Some(Err(tokio_tungstenite::tungstenite::Error::ConnectionClosed
+                    | tokio_tungstenite::tungstenite::Error::AlreadyClosed
+                    | tokio_tungstenite::tungstenite::Error::Protocol(
+                        tokio_tungstenite::tungstenite::error::ProtocolError::ResetWithoutClosingHandshake,
+                    ))) => break,
+                Some(Err(error)) => panic!("unexpected error draining peer close: {error}"),
+            }
+        }
+    }
+
+    async fn drop_first_reply(method: &'static str, params: Value, retry: bool) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let received = Arc::new(AtomicUsize::new(0));
+        let observed = received.clone();
+        let server = tokio::spawn(async move {
+            for attempt in 0..if retry { 2 } else { 1 } {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+                let request = next_request(&mut socket).await;
+                assert_eq!(request.method.as_deref(), Some(method));
+                observed.fetch_add(1, Ordering::SeqCst);
+                if attempt == 1 {
+                    socket
+                        .send(Message::Text(
+                            json!({"id":request.id,"ok":42}).to_string().into(),
+                        ))
+                        .await
+                        .unwrap();
+                    finish_close(&mut socket).await;
+                }
+                // Model a completed host operation whose acknowledgement is
+                // lost with the transport. No synthetic RpcError is injected.
+                drop(socket);
+            }
+        });
+        let dials = AtomicUsize::new(0);
+        let clients = Mutex::new(Vec::<Arc<rcode_rpc::RpcClient>>::new());
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            call_with_retry(
+                "host",
+                method,
+                params,
+                || async {
+                    dials.fetch_add(1, Ordering::SeqCst);
+                    let client = Arc::new(rcode_rpc::connect_ws(&url).await?);
+                    clients.lock().unwrap().push(client.clone());
+                    Ok(client)
+                },
+                || {
+                    for client in clients.lock().unwrap().drain(..) {
+                        client.close();
+                    }
+                },
+            ),
+        )
+        .await
+        .expect("RPC retry policy must finish");
+        for client in clients.lock().unwrap().drain(..) {
+            client.close();
+        }
+        tokio::time::timeout(Duration::from_secs(5), server)
+            .await
+            .expect("host must observe the expected number of RPC requests")
+            .unwrap();
+        let expected = if retry { 2 } else { 1 };
+        assert_eq!(dials.load(Ordering::SeqCst), expected);
+        assert_eq!(received.load(Ordering::SeqCst), expected);
+        if retry {
+            assert_eq!(result.unwrap(), json!(42));
+        } else {
+            let message = result.unwrap_err().to_string();
+            assert!(message.contains("outcome may be unknown"), "{message}");
+            assert!(message.contains("not retried"), "{message}");
+        }
+    }
+
+    #[tokio::test]
+    async fn reply_before_graceful_close_is_delivered_before_pending_requests_fail() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let request = next_request(&mut socket).await;
+            // Flush the valid reply and the normal Close in wire order. TCP
+            // reset/lost bytes cannot explain discarding this received reply.
+            socket
+                .feed(Message::Text(
+                    json!({"id":request.id,"ok":42}).to_string().into(),
+                ))
+                .await
+                .unwrap();
+            finish_close(&mut socket).await;
+        });
+        let client = rcode_rpc::connect_ws(&url).await.unwrap();
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            client.call(methods::LIST_REFS, json!({})),
+        )
+        .await
+        .unwrap();
+        client.close();
+        server.await.unwrap();
+        assert_eq!(
+            result.unwrap(),
+            json!(42),
+            "a received reply precedes connection loss"
+        );
+    }
+
+    #[tokio::test]
+    async fn acknowledged_side_effect_is_not_replayed_after_socket_loss() {
+        for method in [
+            methods::CREATE_WORKTREE,
+            methods::BEGIN_QUEUED_MESSAGE_EDIT,
+            methods::FINISH_QUEUED_MESSAGE_EDIT,
+            methods::SEND_QUEUED_MESSAGE_NOW,
+            methods::SWITCH_REF,
+            methods::UPLOAD_COMMIT,
+        ] {
+            drop_first_reply(method, json!({}), false).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn reads_and_positional_upload_chunks_reconnect_once() {
+        drop_first_reply(methods::LIST_REFS, json!({}), true).await;
+        drop_first_reply(methods::UPLOAD_CHUNK, json!({"seq":0}), true).await;
+        drop_first_reply(methods::UPLOAD_CHUNK, json!({}), false).await;
+    }
+
+    #[test]
+    fn retry_contract_is_explicit_and_defaults_to_no_replay() {
+        for method in [
+            methods::LIST_HARNESSES,
+            methods::LIST_MODELS,
+            methods::SEARCH_FILES,
+            methods::LIST_FOLDERS,
+            methods::READ_ATTACHMENT_CHUNK,
+        ] {
+            assert!(replay_safe(method, &json!({})), "{method}");
+        }
+        assert!(replay_safe(
+            methods::RELAY_COMMAND,
+            &json!({"entry":{"id":"stable-command"}})
+        ));
+        assert!(!replay_safe(methods::RELAY_COMMAND, &json!({"entry":{}})));
+        assert!(!replay_safe("FutureMutation", &json!({})));
+        assert!(!replay_safe(methods::WRITE_TERMINAL, &json!({})));
     }
 }
 
