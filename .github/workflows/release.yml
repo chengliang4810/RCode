@@ -227,12 +227,15 @@ jobs:
         id: manifest
         run: |
           python3 scripts/prepare-release.py --artifacts target/release-assets
+      - name: Load curated release notes
+        run: cp "docs/releases/${{ steps.manifest.outputs.version }}.md" target/release-assets/release-notes.md
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: release-metadata
           path: |
             target/release-assets/manifest.json
             target/release-assets/latest.txt
+            target/release-assets/release-notes.md
           if-no-files-found: error
 
   publish:
@@ -251,6 +254,7 @@ jobs:
           name: ${{ needs.verify.outputs.version }}
           files: |
             dist/*
-          generate_release_notes: true
+          body_path: dist/release-notes.md
+          generate_release_notes: false
           prerelease: false
           make_latest: true
