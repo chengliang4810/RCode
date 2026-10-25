@@ -770,23 +770,30 @@ mod tests {
         drop(watch_b);
     }
 
-    /// A burst of registrations is one pass over the OS watcher (one stream
-    /// restart on FSEvents), not one per path.
+    /// Registrations queued before a pending worker runs take one pass over
+    /// the OS watcher (one stream restart on FSEvents), not one per path.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn registration_burst_applies_in_one_pass() {
         let (_tmp, root) = tree();
         let hub = FsWatchHub::new();
+        // Model a spawned worker that has not been scheduled yet. Filesystem
+        // work between registrations need not fit within the quiet window.
+        lock(&hub.batch).worker = true;
         let mut watches = Vec::new();
         for i in 0..8 {
             let dir = root.join(format!("d{i}"));
             std::fs::create_dir(&dir).unwrap();
             watches.push(hub.watch(&dir, notify::RecursiveMode::Recursive, |_| {}));
         }
+        hub.run_batches();
         settle(&hub).await;
         assert!(watches.iter().all(FsWatch::is_live));
         assert_eq!(hub.installed().len(), 8);
         assert_eq!(hub.stats.passes.load(Ordering::Relaxed), 1);
+        // Queue the complete drop burst before letting its worker run, too.
+        lock(&hub.batch).worker = true;
         watches.clear();
+        hub.run_batches();
         settle(&hub).await;
         assert!(hub.installed().is_empty());
         assert_eq!(
