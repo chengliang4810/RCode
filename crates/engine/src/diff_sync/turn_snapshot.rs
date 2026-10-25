@@ -679,14 +679,14 @@ mod tests {
         (root, repos, data_dir)
     }
 
-    /// Every file under the checkout's object database, relative to it.
+    /// Object database files, excluding Git's transient maintenance lock.
     fn checkout_objects(root: &Path) -> BTreeSet<PathBuf> {
         fn collect(dir: &Path, base: &Path, out: &mut BTreeSet<PathBuf>) {
             for entry in std::fs::read_dir(dir).expect("read objects dir").flatten() {
                 let path = entry.path();
                 if path.is_dir() {
                     collect(&path, base, out);
-                } else {
+                } else if path != base.join("maintenance.lock") {
                     out.insert(path.strip_prefix(base).expect("under base").to_path_buf());
                 }
             }
