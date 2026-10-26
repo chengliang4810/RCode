@@ -135,7 +135,12 @@ settings-appearance-reduce-motion-off = Animations play even if the system asks 
 settings-appearance-pause-animations = Pause animations in background
 settings-appearance-pause-animations-detail = Hold animations still while RCode isn't the focused window.
 
-settings-appearance-background = New thread background
+settings-appearance-background = Background image
+settings-appearance-background-scope = Background scope
+settings-appearance-background-scope-new-thread = New threads only
+settings-appearance-background-scope-conversation = Conversation
+settings-appearance-background-scope-sidebar = Conversation and left sidebar
+settings-appearance-background-scope-workspace = Entire workspace
 settings-appearance-background-adjust = Adjust
 settings-appearance-background-replace = Replace image
 settings-appearance-background-remove = Remove
@@ -143,7 +148,7 @@ settings-appearance-background-choose = Choose image
 settings-appearance-background-unavailable = Image unavailable
 settings-appearance-background-choose-replacement = Choose a replacement or remove it.
 settings-appearance-background-none = No image selected
-settings-appearance-choose-background = Choose New Thread Composer Background
+settings-appearance-choose-background = Choose Background Image
 
 settings-appearance-adjust-background = Adjust background
 settings-appearance-adjust-background-detail = Drag to reposition. Scroll or pinch to zoom.

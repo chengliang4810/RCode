@@ -31,18 +31,61 @@ pub struct LinkRanges {
     pub layout: TextLayout,
     pub links: Vec<(Range<usize>, LinkTarget)>,
     pub ui: Option<LinkUi>,
+    pub decorations: Vec<Vec<Range<usize>>>,
+}
+#[derive(Default)]
+pub struct HoverDestination {
+    target: Option<(usize, Bounds<Pixels>)>,
+    shown: bool,
+    task: Option<gpui::Task<()>>,
+}
+
+fn hover_destination(
+    hover: &Rc<RefCell<HoverDestination>>,
+    target: Option<(usize, Bounds<Pixels>)>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let mut state = hover.borrow_mut();
+    state.task = None;
+    if let Some(target) = target {
+        if state.target == Some(target) && state.shown {
+            return;
+        }
+        state.target = Some(target);
+        state.shown = false;
+    }
+    let delay = if target.is_some() { 500 } else { 180 };
+    let weak = Rc::downgrade(hover);
+    state.task = Some(window.spawn(cx, async move |cx| {
+        cx.background_executor()
+            .timer(std::time::Duration::from_millis(delay))
+            .await;
+        let Some(hover) = weak.upgrade() else { return };
+        let _ = cx.update(|window, _| {
+            let mut state = hover.borrow_mut();
+            if target.is_some() {
+                state.shown = true;
+            } else {
+                state.target = None;
+                state.shown = false;
+            }
+            window.refresh();
+        });
+    }));
+    window.refresh();
 }
 struct Interaction {
     targets: Vec<LinkTarget>,
     focus: Vec<FocusHandle>,
     menu_focus: [FocusHandle; 7],
-    menu_focus_pending: Rc<Cell<bool>>,
     menu: Rc<RefCell<Option<(usize, Point<Pixels>)>>>,
     bounds: Bounds<Pixels>,
     epoch: Rc<Cell<u64>>,
     dismissed: Rc<Cell<bool>>,
     tooltip_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     focused: Option<usize>,
+    hover: Rc<RefCell<HoverDestination>>,
 }
 impl IntoElement for LinkRanges {
     type Element = Self;
@@ -58,6 +101,7 @@ impl Element for LinkRanges {
         Rc<Cell<u64>>,
         Rc<Cell<bool>>,
         Rc<Cell<Option<Bounds<Pixels>>>>,
+        Rc<RefCell<HoverDestination>>,
     );
     fn id(&self) -> Option<ElementId> {
         Some(self.id.clone().into())
@@ -95,15 +139,16 @@ impl Element for LinkRanges {
                         .collect(),
                     targets,
                     menu_focus: std::array::from_fn(|_| cx.focus_handle().tab_stop(true)),
-                    menu_focus_pending: Rc::default(),
                     menu: Rc::default(),
                     bounds,
                     epoch: Rc::default(),
                     dismissed: Rc::default(),
                     tooltip_bounds: Rc::default(),
                     focused: None,
+                    hover: Rc::default(),
                 });
             if state.bounds != bounds {
+                *state.hover.borrow_mut() = HoverDestination::default();
                 state.menu.borrow_mut().take();
                 state.epoch.set(state.epoch.get().wrapping_add(1));
                 state.dismissed.set(true);
@@ -124,6 +169,9 @@ impl Element for LinkRanges {
             });
             let theme = Theme::of(cx).clone();
             let mut overlays = Vec::new();
+            if state.menu.borrow().is_some() {
+                *state.hover.borrow_mut() = HoverDestination::default();
+            }
             for (index, (range, target)) in self.links.iter().enumerate() {
                 for (part, rect) in range_rects(&self.layout, range, 0., 0.)
                     .into_iter()
@@ -142,36 +190,25 @@ impl Element for LinkRanges {
                     let keyboard_menu = menu.clone();
                     let focus = state.focus[index].clone();
                     let click_target = target.clone();
-                    let destination = target.original.clone();
-                    let tooltip_bounds = state.tooltip_bounds.clone();
                     let click_ui = self.ui.clone();
-                    let tooltip_ui = self.ui.clone();
-                    let menu_focus_pending = state.menu_focus_pending.clone();
-                    let pointer_focus_pending = menu_focus_pending.clone();
+                    let hover = state.hover.clone();
+                    let keyboard_hover = hover.clone();
+                    let hover_enabled = state.menu.borrow().is_none();
+                    let initial_menu_focus = state.menu_focus[0].clone();
+                    let pointer_menu_focus = initial_menu_focus.clone();
                     let keyboard_dismissed = state.dismissed.clone();
                     let keyboard_epoch = state.epoch.clone();
                     let hit = div()
                         .id(format!("link-{index}-{part}-{}", state.epoch.get()))
-                        // Removing the builder cancels both visible tooltips
-                        // and GPUI's delayed show task while the menu owns input.
-                        .when(state.menu.borrow().is_none(), |hit| {
-                            hit.hoverable_tooltip(move |_, cx| {
-                                let url = destination.clone();
-                                let bounds = tooltip_bounds.clone();
-                                let ui = tooltip_ui.clone();
-                                cx.new(|_| {
-                                    // A file link shows its decoded path —
-                                    // root-relative inside the workspace,
-                                    // absolute outside — not the raw href.
-                                    let shown = ui
-                                        .as_ref()
-                                        .and_then(|ui| ui.file_link(&url))
-                                        .map(|file| file.path)
-                                        .unwrap_or(url);
-                                    super::link_destination::Destination(shown, bounds)
-                                })
-                                .into()
-                            })
+                        .on_hover(move |over, window, cx| {
+                            if hover_enabled {
+                                hover_destination(
+                                    &hover,
+                                    over.then_some((index, rect)),
+                                    window,
+                                    cx,
+                                );
+                            }
                         })
                         .w(rect.size.width)
                         .h(rect.size.height)
@@ -198,7 +235,9 @@ impl Element for LinkRanges {
                         })
                         .on_mouse_down(MouseButton::Right, move |event, window, cx| {
                             *menu.borrow_mut() = Some((index, event.position));
-                            pointer_focus_pending.set(true);
+                            // Transfer focus during dispatch, before the next
+                            // accessibility frame registers its focused node.
+                            window.focus(&pointer_menu_focus, cx);
                             cx.stop_propagation();
                             window.refresh();
                         })
@@ -213,10 +252,11 @@ impl Element for LinkRanges {
                                 }
                                 "f10" if event.keystroke.modifiers.shift => {
                                     *keyboard_menu.borrow_mut() = Some((index, rect.bottom_left()));
-                                    menu_focus_pending.set(true);
+                                    window.focus(&initial_menu_focus, cx);
                                     window.refresh();
                                 }
                                 "escape" => {
+                                    *keyboard_hover.borrow_mut() = HoverDestination::default();
                                     keyboard_menu.borrow_mut().take();
                                     keyboard_dismissed.set(true);
                                     keyboard_epoch.set(keyboard_epoch.get().wrapping_add(1));
@@ -239,54 +279,69 @@ impl Element for LinkRanges {
                     overlays.push(hit);
                 }
             }
-            if state.menu.borrow().is_none() && !state.dismissed.get() {
-                if let Some(index) = focused {
-                    if let Some(rect) =
-                        range_rects(&self.layout, &self.links[index].0, 0., 0.).first()
-                    {
-                        let shown = self
-                            .ui
-                            .as_ref()
-                            .and_then(|ui| ui.file_link(&state.targets[index].original))
-                            .map(|file| file.path)
-                            .unwrap_or_else(|| state.targets[index].original.clone());
-                        let card = super::link_destination::destination_card(
-                            &shown,
-                            state.tooltip_bounds.clone(),
-                            window,
-                            cx,
-                        );
-                        let dismissed = state.dismissed.clone();
-                        let epoch = state.epoch.clone();
-                        // This disclosure is not a menu: menu_at consumes every
-                        // outside press, preventing other controls from receiving it.
-                        let mut popup = gpui::deferred(
-                            gpui::anchored()
-                                .position(rect.bottom_left())
-                                .anchor(gpui::Anchor::TopLeft)
-                                .snap_to_window_with_margin(px(8.))
-                                .child(
-                                    div()
-                                        .id("focused-link-destination")
-                                        .occlude()
-                                        .on_mouse_down_out(move |_, window, _| {
-                                            dismissed.set(true);
-                                            epoch.set(epoch.get().wrapping_add(1));
-                                            window.refresh();
-                                        })
-                                        .child(card),
-                                ),
-                        )
-                        .priority(1)
-                        .into_any_element();
-                        popup.prepaint_as_root(
-                            bounds.origin,
-                            window.viewport_size().map(AvailableSpace::Definite),
-                            window,
-                            cx,
-                        );
-                        overlays.push(popup);
-                    }
+            let hover_target = {
+                let hover = state.hover.borrow();
+                hover.shown.then_some(hover.target).flatten()
+            };
+            let disclosure = focused
+                .filter(|_| !state.dismissed.get())
+                .and_then(|index| {
+                    range_rects(&self.layout, &self.links[index].0, 0., 0.)
+                        .first()
+                        .copied()
+                        .map(|rect| (index, rect))
+                })
+                .or(hover_target);
+            if state.menu.borrow().is_none() {
+                if let Some((index, rect)) = disclosure {
+                    let shown = self
+                        .ui
+                        .as_ref()
+                        .map(|ui| ui.destination(&state.targets[index].original))
+                        .unwrap_or_else(|| state.targets[index].original.clone());
+                    let card = super::link_destination::destination_card(
+                        &shown,
+                        state.tooltip_bounds.clone(),
+                        window,
+                        cx,
+                    );
+                    let dismissed = state.dismissed.clone();
+                    let epoch = state.epoch.clone();
+                    let hover = state.hover.clone();
+                    // This disclosure is not a menu: menu_at consumes every
+                    // outside press, preventing other controls from receiving it.
+                    let mut popup = gpui::deferred(
+                        gpui_base::TooltipPositioner::new(rect)
+                            .placement(gpui_base::Placement::Top)
+                            .child(
+                                div()
+                                    .id("focused-link-destination")
+                                    .on_hover(move |over, window, cx| {
+                                        hover_destination(
+                                            &hover,
+                                            over.then_some((index, rect)),
+                                            window,
+                                            cx,
+                                        );
+                                    })
+                                    .occlude()
+                                    .on_mouse_down_out(move |_, window, _| {
+                                        dismissed.set(true);
+                                        epoch.set(epoch.get().wrapping_add(1));
+                                        window.refresh();
+                                    })
+                                    .child(card),
+                            ),
+                    )
+                    .priority(1)
+                    .into_any_element();
+                    popup.prepaint_as_root(
+                        bounds.origin,
+                        window.viewport_size().map(AvailableSpace::Definite),
+                        window,
+                        cx,
+                    );
+                    overlays.push(popup);
                 }
             }
             if let Some((index, position)) = *state.menu.borrow() {
@@ -295,8 +350,6 @@ impl Element for LinkRanges {
                 let dismiss_menu = state.menu.clone();
                 let return_focus = state.focus[index].clone();
                 let menu_focus = state.menu_focus.clone();
-                let pending = state.menu_focus_pending.clone();
-                let initial_focus = state.menu_focus[0].clone();
                 // A resolved file link swaps the web actions for rows about
                 // the file itself: "Open in RCode" opens it in the file
                 // viewer, and the system-level rows mount only when the
@@ -313,21 +366,6 @@ impl Element for LinkRanges {
                 };
                 let file_resolved = file.is_some();
                 let mut card = crate::popover::popover_card(&theme)
-                    .child(
-                        gpui::canvas(
-                            move |_, window, cx| {
-                                // Claim focus only when the deferred menu mounts. The
-                                // shell recovers focus from handles that are not mounted.
-                                if pending.replace(false) {
-                                    window.focus(&initial_focus, cx);
-                                }
-                            },
-                            |_, _, _, _| {},
-                        )
-                        .absolute()
-                        .w(px(0.))
-                        .h(px(0.)),
-                    )
                     .id("link-actions")
                     .on_key_down(move |event, window, cx| {
                         match event.keystroke.key.as_str() {
@@ -554,6 +592,7 @@ impl Element for LinkRanges {
                     state.epoch.clone(),
                     state.dismissed.clone(),
                     state.tooltip_bounds.clone(),
+                    state.hover.clone(),
                 ),
                 state,
             )
@@ -573,6 +612,7 @@ impl Element for LinkRanges {
         let epoch = paint.2.clone();
         let dismissed = paint.3.clone();
         let tooltip_bounds = paint.4.clone();
+        let hover = paint.5.clone();
         window.on_mouse_event(move |event: &ScrollWheelEvent, phase, window, _| {
             if phase == DispatchPhase::Capture
                 && !tooltip_bounds
@@ -580,12 +620,31 @@ impl Element for LinkRanges {
                     .is_some_and(|rect| rect.contains(&event.position))
             {
                 menu.borrow_mut().take();
+                *hover.borrow_mut() = HoverDestination::default();
                 epoch.set(epoch.get().wrapping_add(1));
                 dismissed.set(true);
                 window.refresh();
             }
         });
         self.child.paint(window, cx);
+        if let Some((index, _)) = paint.5.borrow().target {
+            let color = Theme::of(cx).accent;
+            for range in &self.decorations[index] {
+                for rect in range_rects(&self.layout, range, 0., 0.) {
+                    let mut x = rect.left();
+                    while x < rect.right() {
+                        window.paint_quad(gpui::fill(
+                            Bounds::new(
+                                gpui::point(x, rect.bottom() - px(2.)),
+                                gpui::size(px(1.), px(1.)),
+                            ),
+                            color,
+                        ));
+                        x += px(3.);
+                    }
+                }
+            }
+        }
         for overlay in &mut paint.0 {
             overlay.paint(window, cx);
         }
@@ -606,6 +665,35 @@ fn click_is_activation(event: &ClickEvent) -> bool {
 mod tests {
     use super::*;
     use gpui::{MouseClickEvent, MouseDownEvent, MouseUpEvent, TestAppContext, point};
+    #[gpui::test]
+    fn hover_disclosure_delays_and_cancels_when_its_target_is_cleared(cx: &mut TestAppContext) {
+        let hover = Rc::new(RefCell::new(HoverDestination::default()));
+        let cx = cx.add_empty_window();
+        let rect = Bounds::new(point(px(30.), px(80.)), gpui::size(px(90.), px(20.)));
+        cx.update(|window, cx| hover_destination(&hover, Some((0, rect)), window, cx));
+        assert!(!hover.borrow().shown);
+        cx.run_until_parked();
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(501));
+        cx.run_until_parked();
+        assert!(hover.borrow().shown);
+        cx.update(|window, cx| hover_destination(&hover, None, window, cx));
+        // Moving into the popup during the grace interval keeps it open.
+        cx.update(|window, cx| hover_destination(&hover, Some((0, rect)), window, cx));
+        cx.run_until_parked();
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(200));
+        cx.run_until_parked();
+        assert!(hover.borrow().shown);
+        cx.update(|window, cx| hover_destination(&hover, Some((1, rect)), window, cx));
+        *hover.borrow_mut() = HoverDestination::default();
+        cx.run_until_parked();
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(600));
+        cx.run_until_parked();
+        assert!(hover.borrow().target.is_none());
+        assert!(!hover.borrow().shown);
+    }
     #[test]
     fn selection_drags_and_secondary_clicks_do_not_navigate() {
         let mut event = MouseClickEvent {

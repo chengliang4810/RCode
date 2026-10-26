@@ -138,6 +138,48 @@ pub const fn ui_rems(pixels_at_default: f32) -> Rems {
     rems(pixels_at_default / 16.0)
 }
 
+/// Reading roles share the user's interface scale and Chinese fallback chain.
+/// Code and terminal metrics remain independent from these interface roles.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UiTextRole {
+    Body,
+    Primary,
+    Secondary,
+    Caption,
+    Section,
+    Heading,
+}
+
+impl UiTextRole {
+    pub const fn base_size(self) -> f32 {
+        match self {
+            Self::Body => 15.0,
+            Self::Primary => 14.0,
+            Self::Secondary | Self::Section => 12.0,
+            Self::Caption => 11.0,
+            Self::Heading => 16.0,
+        }
+    }
+
+    pub const fn base_line_height(self) -> f32 {
+        match self {
+            Self::Body => 25.5,
+            Self::Primary => 20.0,
+            Self::Secondary | Self::Section => 18.0,
+            Self::Caption => 16.0,
+            Self::Heading => 24.0,
+        }
+    }
+
+    pub const fn size(self) -> Rems {
+        ui_rems(self.base_size())
+    }
+
+    pub const fn line_height(self) -> Rems {
+        ui_rems(self.base_line_height())
+    }
+}
+
 /// Keep Latin family choices while using bundled Sarasa on Windows and native
 /// PingFang on macOS for missing Chinese glyphs, including in monospace runs.
 pub(crate) fn font(family: impl Into<SharedString>) -> gpui::Font {

@@ -1838,6 +1838,55 @@ impl Changes {
         }
     }
 
+    /// Mount the production virtualized pane over an in-memory patch. This
+    /// entry point is absent from normal builds and never starts an engine.
+    #[cfg(feature = "appshots-fixture")]
+    pub(crate) fn for_text_fixture(
+        state: Entity<AppState>,
+        patch: &str,
+        split: bool,
+        wrap: bool,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let mut changes = Self::new(state, cx);
+        changes.mode = DiffMode::from_split(split);
+        changes.wrap_lines = wrap;
+        changes.started = true;
+        let files = parse_patch(patch);
+        let additions = files.iter().map(|file| file.additions).sum();
+        let deletions = files.iter().map(|file| file.deletions).sum();
+        let diff = CheckoutDiff {
+            checkout_id: "text-surfaces".into(),
+            device_id: "fixture".into(),
+            cwd: "/text-surfaces".into(),
+            patch: patch.into(),
+            files: Vec::new(),
+            additions,
+            deletions,
+            truncated: false,
+            checksum: "text-surfaces-v1".into(),
+            updated_at: chrono::Utc::now(),
+        };
+        let (rows, ranges) = flatten_rows(&files, &[], None, changes.mode, |_| false);
+        changes.list.reset_with_uniform_height(
+            rows.len(),
+            px(diff_line_height(Theme::of(cx))),
+        );
+        changes.rows = rows;
+        changes.row_ranges = ranges;
+        changes.parsed = Some(ParsedDiff {
+            key: changes.parse_key(&diff),
+            truncated: false,
+            additions,
+            deletions,
+            file_count: files.len(),
+            horizontal: files.iter().map(FileHorizontalState::new).collect(),
+            files: Arc::new(files),
+        });
+        changes.diffs.push(diff);
+        changes
+    }
+
     /// A pane pinned to one commit's diff (a History row click) — fetches
     /// `parent vs commit` once and never offers the scope menu.
     pub fn for_commit(

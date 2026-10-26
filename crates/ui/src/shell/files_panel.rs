@@ -435,8 +435,10 @@ impl Shell {
         }
         let theme = Theme::of(cx).clone();
         let content = self.files.get(&self.panel_key(cx)).cloned();
+        let wallpaper = self.workspace_wallpaper_active(cx);
         if let Some(files) = &content {
             files.update(cx, |files, cx| {
+                files.set_wallpaper_surface(wallpaper, cx);
                 files.ensure_loaded(cx);
                 if visible {
                     files.ensure_git_status(cx);
@@ -457,7 +459,7 @@ impl Shell {
             .occlude()
             .border_l_1()
             .border_color(theme.border)
-            .bg(theme.panel_bg())
+            .bg(self.workspace_panel_bg(&theme, cx))
             .when(corner > 0.0, |el| {
                 el.rounded_tr(px(corner)).rounded_br(px(corner))
             })

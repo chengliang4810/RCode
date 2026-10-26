@@ -17,9 +17,17 @@ fn main() {
         embed_resource::compile_for(
             "../../dist/windows/rcode.rc",
             &["rcode"],
-            embed_resource::NONE,
+            &[
+                format!("RCODE_VERSION=\"{}\"", env!("CARGO_PKG_VERSION")),
+                format!(
+                    "RCODE_FILE_VERSION={},{},{},0",
+                    env!("CARGO_PKG_VERSION_MAJOR"),
+                    env!("CARGO_PKG_VERSION_MINOR"),
+                    env!("CARGO_PKG_VERSION_PATCH")
+                ),
+            ],
         )
         .manifest_required()
-        .expect("Windows app icon resource compilation failed");
+        .expect("Windows app resource compilation failed");
     }
 }

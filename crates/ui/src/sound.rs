@@ -178,6 +178,10 @@ fn play_in_background(data: &'static [u8]) {
 }
 
 fn play_bytes(data: &[u8]) -> Result<(), String> {
+    #[cfg(windows)]
+    if unsafe { windows_sys::Win32::Media::Audio::waveOutGetNumDevs() } == 0 {
+        return Ok(());
+    }
     // The system players want a file path. Exclusive creation prevents a
     // predictable-name collision (including a pre-planted symlink) from
     // redirecting the embedded bytes to another file.

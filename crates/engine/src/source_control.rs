@@ -6,6 +6,11 @@
 #[path = "source_control_review_threads.rs"]
 mod review_threads;
 
+#[path = "source_control_config.rs"]
+mod checkout_config;
+
+use checkout_config::CheckoutRemoteConfig;
+
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -1360,17 +1365,29 @@ impl GitCheckoutInspector {
             )
             .await;
         let branch_remote_key = format!("branch.{local_branch}.remote");
-        let mut remote_name = self
-            .git_optional(&checkout_root, &["config", "--get", &branch_remote_key])
+        let config = self
+            .git(&checkout_root, &["config", "--null", "--list"])
             .await
-            .filter(|remote| remote != ".");
+            .and_then(|output| CheckoutRemoteConfig::parse(&output, &local_branch));
+        let mut remote_name = match &config {
+            Some(config) => config.branch_remote.clone(),
+            None => {
+                self.git_optional(&checkout_root, &["config", "--get", &branch_remote_key])
+                    .await
+            }
+        }
+        .filter(|remote| remote != ".");
         if remote_name.is_none() {
             remote_name = upstream_ref.as_deref().and_then(remote_from_upstream);
         }
         if remote_name.is_none() {
-            remote_name = self
-                .git_optional(&checkout_root, &["config", "--get", "remote.pushDefault"])
-                .await;
+            remote_name = match &config {
+                Some(config) => config.push_default.clone(),
+                None => {
+                    self.git_optional(&checkout_root, &["config", "--get", "remote.pushDefault"])
+                        .await
+                }
+            };
         }
         if remote_name.is_none()
             && let Some(remotes) = self.git_optional(&checkout_root, &["remote"]).await
@@ -4361,7 +4378,7 @@ printf '%s\n' '[{"number":90,"title":"Host-resolved pull request","url":"https:/
             command_success("/checkout\n"),
             command_success("feature/status\n"),
             command_success("fork/published-status\n"),
-            command_success("fork\n"),
+            command_success("branch.feature/status.remote\nfork\0"),
             command_success("git@github.com:contributor/rcode.git\n"),
             command_success("fork/main\n"),
         ]);
@@ -4378,6 +4395,55 @@ printf '%s\n' '[{"number":90,"title":"Host-resolved pull request","url":"https:/
         assert_eq!(requests[0].cwd.as_deref(), Some(Path::new("/nested/path")));
         assert_eq!(requests[0].args, ["rev-parse", "--show-toplevel"]);
         assert_eq!(requests[4].args, ["remote", "get-url", "--push", "fork"]);
+    }
+
+    #[tokio::test]
+    async fn git_inspector_batches_config_without_replacing_remote_enumeration() {
+        let runner = FakeProcessRunner::with_responses([
+            command_success("/checkout\n"),
+            command_success("feature/status\n"),
+            command_failure("no upstream"),
+            command_success("core.repositoryformatversion\n0\0"),
+            command_success("origin\nupstream\n"),
+            command_success("git@github.com:contributor/rcode.git\n"),
+            command_success("origin/main\n"),
+        ]);
+        let inspector = GitCheckoutInspector::new(runner.clone());
+
+        let source = inspector.inspect(Path::new("/checkout")).await.unwrap();
+
+        assert_eq!(source.branch.remote_name.as_deref(), Some("origin"));
+        let requests = runner.requests();
+        assert_eq!(requests.len(), 7);
+        assert_eq!(requests[3].args, ["config", "--null", "--list"]);
+        assert_eq!(requests[4].args, ["remote"]);
+    }
+
+    #[tokio::test]
+    async fn git_inspector_falls_back_when_config_snapshot_is_truncated() {
+        let mut truncated = command_success("remote.pushdefault\nwrong\0").unwrap();
+        truncated.stdout_truncated = true;
+        let runner = FakeProcessRunner::with_responses([
+            command_success("/checkout\n"),
+            command_success("feature/status\n"),
+            command_failure("no upstream"),
+            Ok(truncated),
+            command_failure("no branch remote"),
+            command_success("fork\n"),
+            command_success("git@github.com:contributor/rcode.git\n"),
+            command_success("fork/main\n"),
+        ]);
+        let inspector = GitCheckoutInspector::new(runner.clone());
+
+        let source = inspector.inspect(Path::new("/checkout")).await.unwrap();
+
+        assert_eq!(source.branch.remote_name.as_deref(), Some("fork"));
+        let requests = runner.requests();
+        assert_eq!(
+            requests[4].args,
+            ["config", "--get", "branch.feature/status.remote"]
+        );
+        assert_eq!(requests[5].args, ["config", "--get", "remote.pushDefault"]);
     }
 
     #[test]

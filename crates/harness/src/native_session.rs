@@ -39,6 +39,9 @@ pub(super) async fn start(
         turn,
         history,
     } = controls;
+    let idle_sessions = conversation_id
+        .as_ref()
+        .and_then(|_| harness.idle_session_slots());
     let state = Arc::new(SessionState {
         cancel: interrupt.child_token(),
         turn,
@@ -93,6 +96,8 @@ pub(super) async fn start(
         let mut steering_open = true;
         let mut pending_prompt = None;
         let mut session_id = request.resume.clone();
+        let mut idle_slot = None;
+        let mut retirement_safe = true;
         loop {
             // User assignments have priority over completion wakes at every turn boundary.
             let mut next: Option<SteerMessage> = if active { None } else { pending_prompt.take() };
@@ -144,6 +149,7 @@ pub(super) async fn start(
                 }
             }
             if next.is_some() || wake || goal_prompt.is_some() {
+                drop(idle_slot.take());
                 current_cancel = state.cancel.child_token();
                 *state.turn_yield.lock().unwrap() = CancellationToken::new();
                 *state.expected_goal.lock().unwrap() = None;
@@ -184,6 +190,7 @@ pub(super) async fn start(
                         active = true;
                     }
                     Err(error) => {
+                        retirement_safe = false;
                         suppressed = true;
                         let _ = tx
                             .send(Ok(AgentEvent::Done {
@@ -206,6 +213,31 @@ pub(super) async fn start(
             {
                 break;
             }
+            if !active {
+                let active_goal = session_goal.as_ref().is_some_and(|store| {
+                    store.read().map_or(true, |goal| {
+                        goal.is_some_and(|goal| {
+                            goal.status == rcode_proto::goal::GoalStatus::Active
+                        })
+                    })
+                });
+                let protected = !retirement_safe
+                    || active_goal
+                    || state.turn.background_live()
+                    || manager
+                        .as_ref()
+                        .is_some_and(|tasks| tasks.has_running() || tasks.has_notifications());
+                if protected {
+                    drop(idle_slot.take());
+                } else if idle_slot.is_none()
+                    && let Some(slots) = &idle_sessions
+                {
+                    match slots.clone().try_acquire_owned() {
+                        Ok(slot) => idle_slot = Some(slot),
+                        Err(_) => break,
+                    }
+                }
+            }
             let changed = async {
                 if let Some(tasks) = &manager {
                     let _ = tasks.wait_for_completion(&state.cancel).await;
@@ -222,6 +254,7 @@ pub(super) async fn start(
                 _ = state.cancel.cancelled() => break,
                 _ = tx.closed() => { state.cancel.cancel(); break; }
                 _ = state.turn.stop_requested() => {
+                    retirement_safe = false;
                     suppressed = true;
                     pending_prompt = None;
                     while steering.try_recv().is_ok() {}
@@ -240,7 +273,7 @@ pub(super) async fn start(
                 event = streams.next(), if !streams.is_empty() => {
                     if let Some(event) = event {
                         if let Ok(AgentEvent::SessionStarted {session_id: id,..}) = &event { session_id = Some(id.clone()); }
-                        if let Ok(AgentEvent::Done { status, .. }) = &event { active = false; if *status != rcode_proto::DoneStatus::Completed { suppressed = true; } }
+                        if let Ok(AgentEvent::Done { status, .. }) = &event { active = false; if *status != rcode_proto::DoneStatus::Completed { retirement_safe = false; suppressed = true; } }
                         if tx.send(event).await.is_err() { state.cancel.cancel(); break; }
                     }
                 }

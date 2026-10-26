@@ -10,6 +10,7 @@ mod directx_renderer;
 mod dispatcher;
 mod display;
 mod events;
+mod frame_demand;
 mod keyboard;
 mod platform;
 mod system_notifications;

@@ -1640,6 +1640,88 @@ mod tests {
     use rcode_proto::{AgentEvent, ToolCall};
 
     #[test]
+    fn streaming_snapshots_preserve_history_and_concurrent_continuation() {
+        let doc = SessionDoc::init("snapshot-history").unwrap();
+        let mut writer = SegmentWriter::begin(&doc, "answer", "device", 1).unwrap();
+        let mut reasoning = String::new();
+        for step in 0..512 {
+            reasoning.push_str("山间清风，🦀与竹林。\n");
+            writer
+                .sync(&[MessagePart::Reasoning {
+                    id: "reasoning".into(),
+                    text: reasoning.clone(),
+                }])
+                .unwrap();
+            if step % 32 == 0 {
+                let version = doc.doc().oplog_vv();
+                let imported = LoroDoc::new();
+                imported.import(&doc.export_snapshot().unwrap()).unwrap();
+                assert_eq!(doc.doc().oplog_vv(), version);
+                assert_eq!(imported.oplog_vv(), version);
+                assert_eq!(
+                    SessionDoc::from_doc(imported).read_entries().unwrap(),
+                    doc.read_entries().unwrap()
+                );
+            }
+        }
+        let expected_parts = vec![
+            MessagePart::Reasoning {
+                id: "reasoning".into(),
+                text: reasoning,
+            },
+            MessagePart::Text {
+                id: "text".into(),
+                text: "完整回答，不截断历史。".into(),
+            },
+        ];
+        writer
+            .finish(&expected_parts, MessageStatus::Complete)
+            .unwrap();
+        let snapshot = doc.export_snapshot().unwrap();
+        let imported = LoroDoc::new();
+        imported.import(&snapshot).unwrap();
+        imported.set_peer_id(doc.doc().peer_id()).unwrap();
+        let restored = SessionDoc::from_doc(imported);
+        assert_eq!(restored.read_entries().unwrap()[0].parts, expected_parts);
+        assert_eq!(restored.doc().oplog_vv(), doc.doc().oplog_vv());
+        SegmentWriter::begin(&restored, "local-followup", "device", 2)
+            .unwrap()
+            .finish(
+                &[MessagePart::Text {
+                    id: "local-text".into(),
+                    text: "重开后继续。".into(),
+                }],
+                MessageStatus::Complete,
+            )
+            .unwrap();
+        let remote = LoroDoc::new();
+        remote.import(&snapshot).unwrap();
+        remote
+            .set_peer_id(doc.doc().peer_id().wrapping_add(1))
+            .unwrap();
+        let remote = SessionDoc::from_doc(remote);
+        SegmentWriter::begin(&remote, "remote-followup", "peer", 3)
+            .unwrap()
+            .finish(
+                &[MessagePart::Text {
+                    id: "remote-text".into(),
+                    text: "并发端继续。".into(),
+                }],
+                MessageStatus::Complete,
+            )
+            .unwrap();
+        let local_updates = restored.doc().export(ExportMode::all_updates()).unwrap();
+        let remote_updates = remote.doc().export(ExportMode::all_updates()).unwrap();
+        restored.doc().import(&remote_updates).unwrap();
+        remote.doc().import(&local_updates).unwrap();
+        let entries = restored.read_entries().unwrap();
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[0].parts, expected_parts);
+        assert_eq!(entries, remote.read_entries().unwrap());
+        assert_eq!(restored.doc().oplog_vv(), remote.doc().oplog_vv());
+    }
+
+    #[test]
     fn opening_tail_bounds_parts_and_preserves_continuation_ids() {
         let doc = SessionDoc::init("whale").unwrap();
         for segment in 0..4 {

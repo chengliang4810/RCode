@@ -20,6 +20,7 @@ mod providers;
 mod availability_tests;
 
 use crate::roll_text::{roll_text, rolling};
+use crate::typography::UiTextRole;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::Duration;
@@ -3375,6 +3376,7 @@ impl Pickers {
             |(suffix, _)| format!("{label} · {suffix}").into(),
         ) };
         let open = self.open_kind() == Some(kind);
+        let focus_color = theme.accent;
         let resizing = kind == PickerKind::HarnessModel && self.chip_resizing;
         // Ghost pill (the original app composer/styles.tsx `pill`): `h-8 rounded-lg px-2.5
         // gap-1.5 text-[12px] font-medium text-muted-foreground`, icons size-4,
@@ -3383,12 +3385,19 @@ impl Pickers {
             .relative()
             .child(self.measure_trigger(kind, cx))
             .id(id.clone())
-            .when(matches!(kind, PickerKind::HarnessModel | PickerKind::Effort), |el| {
-                el.debug_selector(move || base.into())
-                    .role(gpui::Role::Button)
-                    .aria_label(accessible)
-                    .aria_expanded(open)
-            })
+            .when(
+                matches!(kind, PickerKind::HarnessModel | PickerKind::Effort),
+                |el| {
+                    el.debug_selector(move || base.into())
+                        .role(gpui::Role::Button)
+                        .aria_label(accessible)
+                        .aria_expanded(open)
+                        .tab_index(0)
+                        .focus_visible(move |style| {
+                            style.bg(focus_color.opacity(0.14)).text_color(focus_color)
+                        })
+                },
+            )
             .h(px(32.0))
             .max_w(px(248.0))
             // Shrinkable under row pressure — four footer chips share one
@@ -4021,30 +4030,32 @@ impl Pickers {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let focus_color = theme.accent;
         popover::error_row(theme, message)
             .child(
-                div()
-                    .id(id)
-                    .px(px(Theme::SPACE_SM))
-                    .py(px(3.0))
-                    .rounded(px(Theme::CONTROL_RADIUS))
-                    .border_1()
-                    .border_color(theme.border)
-                    .text_color(theme.text)
-                    .cursor_pointer()
-                    .hover(|s| s.bg(theme.element_hover))
-                    .on_click(cx.listener(move |this, _, _, cx| match kind {
-                        PickerKind::Branch | PickerKind::Checkout => this.ensure_refs(true, cx),
-                        PickerKind::HarnessModel => {
-                            this.harnesses = Loadable::Idle;
-                            this.models.clear();
-                            this.model_refresh_errors.clear();
-                            this.catalog_rev += 1;
-                            this.ensure_harnesses(false, cx);
-                        }
-                        PickerKind::Space | PickerKind::Effort => {}
-                    }))
-                    .child(crate::l10n::localizer().text(TextKey::ActionRetry)),
+                popover::btn_ghost(
+                    theme,
+                    crate::l10n::localizer().text(TextKey::ActionRetry),
+                    format!("{id}-hover"),
+                )
+                .id(id)
+                .role(gpui::Role::Button)
+                .aria_label(crate::l10n::localizer().text(TextKey::ActionRetry))
+                .tab_index(0)
+                .focus_visible(move |style| {
+                    style.bg(focus_color.opacity(0.14)).text_color(focus_color)
+                })
+                .on_click(cx.listener(move |this, _, _, cx| match kind {
+                    PickerKind::Branch | PickerKind::Checkout => this.ensure_refs(true, cx),
+                    PickerKind::HarnessModel => {
+                        this.harnesses = Loadable::Idle;
+                        this.models.clear();
+                        this.model_refresh_errors.clear();
+                        this.catalog_rev += 1;
+                        this.ensure_harnesses(false, cx);
+                    }
+                    PickerKind::Space | PickerKind::Effort => {}
+                })),
             )
             .into_any_element()
     }
@@ -4693,7 +4704,8 @@ impl Pickers {
                 .child(
                     self.render_model_name(ix, row, cx)
                         .max_w_full()
-                        .text_size(crate::typography::ui_rems(12.5))
+                        .text_size(UiTextRole::Primary.size())
+                        .line_height(UiTextRole::Primary.line_height())
                         .font_weight(gpui::FontWeight::MEDIUM)
                         .text_color(theme.text),
                 )
@@ -4718,7 +4730,8 @@ impl Pickers {
                 .child(
                     self.render_model_name(ix, row, cx)
                         .w_full()
-                        .text_size(crate::typography::ui_rems(12.5))
+                        .text_size(UiTextRole::Primary.size())
+                        .line_height(UiTextRole::Primary.line_height())
                         .font_weight(gpui::FontWeight::MEDIUM)
                         .text_color(theme.text),
                 )

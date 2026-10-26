@@ -151,7 +151,7 @@ impl Render for CommandProcesses {
         if self.rows.is_empty() {
             return div().into_any_element();
         }
-        let theme = Theme::of(cx).clone();
+        let theme = Theme::of(cx).for_popup();
         let l = crate::l10n::localizer();
         let rows = self
             .rows
@@ -262,7 +262,10 @@ impl Render for CommandProcesses {
             .collect::<Vec<_>>();
         div()
             .flex_none()
-            .px(px(12.0))
+            .mt(px(4.0))
+            .border_t_1()
+            .border_color(theme.border)
+            .px(px(9.0))
             .py(px(6.0))
             .text_color(theme.text)
             .text_size(crate::typography::ui_rems(12.0))

@@ -42,6 +42,9 @@ use serde::{Deserialize, Serialize};
 
 pub use gpui::AnimationExt;
 
+mod properties;
+pub use properties::{Presence, PresenceSample, PropertySpring, SpringSample, SpringSpec};
+
 // ---------------------------------------------------------------------------
 // Pulse clock — throttled drive for the repeating loaders
 // ---------------------------------------------------------------------------
@@ -367,6 +370,19 @@ pub const EASE_IN_OUT: CubicBezier = CubicBezier::new(0.42, 0.0, 0.58, 1.0);
 // ---------------------------------------------------------------------------
 // Motion specs (the catalog)
 // ---------------------------------------------------------------------------
+
+/// Semantic feedback presets. Existing entrances keep their established timing;
+/// new controls opt into these by purpose rather than sharing one duration.
+pub const FEEDBACK_EASE_OUT: CubicBezier = CubicBezier::new(0.165, 0.84, 0.44, 1.0);
+pub const FEEDBACK_EASE_SNAP: CubicBezier = CubicBezier::new(0.32, 0.72, 0.0, 1.0);
+pub const FEEDBACK_FAST: MotionSpec = MotionSpec::new(60, FEEDBACK_EASE_OUT);
+pub const FEEDBACK_SNAP: MotionSpec = MotionSpec::new(120, FEEDBACK_EASE_SNAP);
+pub const FEEDBACK_BASE: MotionSpec = MotionSpec::new(200, FEEDBACK_EASE_OUT);
+pub const FEEDBACK_SHEET: MotionSpec = MotionSpec::new(300, FEEDBACK_EASE_OUT);
+pub const FEEDBACK_SLOW: MotionSpec = MotionSpec::new(450, FEEDBACK_EASE_OUT);
+pub const CHIP_IN: MotionSpec = FEEDBACK_BASE;
+pub const ATTACHMENT_OUT: MotionSpec =
+    MotionSpec::new(130, CubicBezier::new(0.55, 0.055, 0.675, 0.19));
 
 /// One catalog entry: duration + optional delay + curve. The delay is folded into
 /// the gpui animation timeline (gpui `Animation` has no native delay): the

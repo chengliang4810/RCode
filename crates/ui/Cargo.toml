@@ -13,7 +13,7 @@ compact-picker-fixture = ["gpui_platform/test-support"]
 # a nested Wayland compositor has stopped requesting idle frames.
 browser-fixture = ["gpui/bench"]
 windows-render-fixture = []
-appshots-fixture = ["gpui_platform/test-support"]
+appshots-fixture = ["gpui_platform/test-support", "dep:tempfile"]
 pull-request-fixture = ["gpui_platform/test-support"]
 resource-profile = ["gpui/bench", "gpui_platform/test-support"]
 
@@ -66,6 +66,7 @@ name = "compact-picker-fixture"
 required-features = ["compact-picker-fixture"]
 
 [dependencies]
+tempfile = { workspace = true, optional = true }
 # Display text and the language it is in. The transcript's own words come
 # from here rather than being written at the call site.
 rcode-presentation.workspace = true
@@ -155,8 +156,24 @@ webview2-com = "0.38"
 windows = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Direct2D_Common", "Win32_Graphics_DirectComposition", "Win32_System_Com", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging"] }
 raw-window-handle = "0.6"
 reqwest.workspace = true
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Media_Audio", "Win32_Security", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging"] }
 
 [[example]]
 name = "history-window-fixture"
+required-features = ["appshots-fixture"]
+
+[[example]]
+name = "thinking-preview-fixture"
+required-features = ["appshots-fixture"]
+
+[[example]]
+name = "link-style-fixture"
+required-features = ["appshots-fixture"]
+
+[[example]]
+name = "visual-feedback-fixture"
+required-features = ["appshots-fixture"]
+
+[[example]]
+name = "text-surfaces-fixture"
 required-features = ["appshots-fixture"]

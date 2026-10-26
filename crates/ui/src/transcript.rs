@@ -377,8 +377,8 @@ pub struct ToolItem {
     /// combined "Ran N commands" accordion, opening/closing with the same
     /// tween) and `Note` (compact mode's folded narration) are synthesized
     /// in [`rows_for_entry`], never from a doc tool part. A `Thought`'s text
-    /// is the `detail`; `resolved == false` means it is still streaming (the
-    /// chip then defaults open).
+    /// is the `detail`; `resolved == false` means it is still streaming. The
+    /// header previews its live text; its detail opens only on user input.
     pub kind: ToolItemKind,
     /// Image files the call read, wrote or printed (as reported; relative
     /// paths resolve against the chat cwd). Expanding the chip previews them.
@@ -704,28 +704,10 @@ fn thought_block_lines(block: &Block, indent: usize, out: &mut Vec<Vec<InlineRun
 
 /// A reasoning part as a tool-group chip: "Thought process" header over the
 /// thought's markdown flattened into styled detail lines (analytic height —
-/// the group's fold tween needs it; see [`thought_lines`]). Capped like tool
-/// outputs, with the counted tail. `live` = the part is still streaming
-/// (chip defaults open).
-fn thought_item(part_id: &str, tree: &BlockTree, live: bool) -> ToolItem {
-    let mut lines = thought_lines(tree);
-    let truncated_by = lines.len().saturating_sub(OUTPUT_DETAIL_MAX_LINES);
-    if truncated_by > 0 {
-        // Keep the TAIL while streaming (the fresh thinking is the signal);
-        // settled thoughts keep the head like tool outputs do.
-        if live {
-            lines.drain(..truncated_by);
-            // The cut can land on a block separator — drop the orphan blank.
-            while lines
-                .first()
-                .is_some_and(|l| l.iter().all(|r| r.text.trim().is_empty()))
-            {
-                lines.remove(0);
-            }
-        } else {
-            lines.truncate(OUTPUT_DETAIL_MAX_LINES);
-        }
-    }
+/// the group's fold tween needs it; see [`thought_lines`]). All lines remain
+/// available inside a bounded scrolling detail. `live` marks the streaming tail.
+fn thought_item(part_id: &str, text: &str, tree: &BlockTree, live: bool) -> ToolItem {
+    let lines = thought_lines(tree);
     ToolItem {
         part_id: part_id.into(),
         call: ToolCall::Unknown {
@@ -736,8 +718,9 @@ fn thought_item(part_id: &str, tree: &BlockTree, live: bool) -> ToolItem {
         resolved: !live,
         detail: (!lines.is_empty()).then(|| {
             Arc::new(ToolDetail::Thought {
-                lines,
-                truncated_by,
+                lines: Arc::new(lines),
+                truncated_by: 0,
+                preview: reasoning_preview(text, live).into(),
             })
         }),
         invocation: None,
@@ -758,7 +741,31 @@ fn thought_item(part_id: &str, tree: &BlockTree, live: bool) -> ToolItem {
 /// like a thought's. `live` = the part is the streaming tail — unresolved,
 /// so the collapsed header keeps its working shimmer until the reply lands.
 fn note_item(part_id: &str, tree: &BlockTree, live: bool) -> ToolItem {
-    let mut item = thought_item(part_id, tree, live);
+    let mut item = thought_item(part_id, "", tree, live);
+    // Folded narration keeps its existing output-style preview limit.
+    if let Some(detail) = item.detail.as_mut()
+        && let ToolDetail::Thought {
+            lines,
+            truncated_by,
+            ..
+        } = Arc::make_mut(detail)
+    {
+        let lines = Arc::make_mut(lines);
+        *truncated_by = lines.len().saturating_sub(OUTPUT_DETAIL_MAX_LINES);
+        if *truncated_by > 0 {
+            if live {
+                lines.drain(..*truncated_by);
+                while lines
+                    .first()
+                    .is_some_and(|line| line.iter().all(|run| run.text.trim().is_empty()))
+                {
+                    lines.remove(0);
+                }
+            } else {
+                lines.truncate(OUTPUT_DETAIL_MAX_LINES);
+            }
+        }
+    }
     item.call = ToolCall::Unknown {
         name: "Note".into(),
         input: None,
@@ -780,8 +787,10 @@ pub enum ToolDetail {
     /// fixed-height row each, so the height stays analytic like `Output`
     /// while inline markers render as real styling ([`thought_lines`]).
     Thought {
-        lines: Vec<Vec<InlineRun>>,
+        lines: Arc<Vec<Vec<InlineRun>>>,
         truncated_by: usize,
+        /// Derived from source lines so Markdown soft breaks do not delay previews.
+        preview: SharedString,
     },
     /// A file diff, in the changes pane's model: hunks with 3 lines of
     /// context, dual line numbers, and (for recognized languages) syntax
@@ -801,6 +810,9 @@ pub enum ToolDetail {
 
 /// Max verbatim output lines per chip before the counted tail row.
 pub const OUTPUT_DETAIL_MAX_LINES: usize = 24;
+
+/// The thought viewport is bounded independently of its complete contents.
+pub const THOUGHT_DETAIL_VISIBLE_LINES: usize = 24;
 
 /// Max diff lines an inline tool-diff detail renders — the detail is one
 /// stacked element inside its transcript row, so it must stay bounded
@@ -1219,6 +1231,7 @@ fn tool_fingerprint(tools: &[ToolItem], auto_open: bool) -> u64 {
             Some(ToolDetail::Thought {
                 lines,
                 truncated_by,
+                preview,
             }) => {
                 // Byte-exact plus style bits: a live mend can restyle runs
                 // without changing the flattened length, and the row must
@@ -1226,7 +1239,9 @@ fn tool_fingerprint(tools: &[ToolItem], auto_open: bool) -> u64 {
                 acc.push(4);
                 acc.extend_from_slice(&(lines.len() as u32).to_le_bytes());
                 acc.extend_from_slice(&(*truncated_by as u32).to_le_bytes());
-                for line in lines {
+                acc.extend_from_slice(preview.as_bytes());
+                acc.push(0);
+                for line in lines.iter() {
                     for run in line {
                         acc.extend_from_slice(run.text.as_bytes());
                         acc.push(
@@ -1511,6 +1526,12 @@ pub fn rows_for_entry(
                 subagent_tail,
                 ..
             } => {
+                // Questions have their own InputChip; do not repeat them in
+                // the work group or include them in its tool count.
+                if matches!(call, ToolCall::Unknown { name, .. } if matches!(name.as_str(), "Ask" | "AskUserQuestion"))
+                {
+                    continue;
+                }
                 let item = ToolItem {
                     part_id: part.id().to_owned(),
                     call: call.clone(),
@@ -1563,7 +1584,7 @@ pub fn rows_for_entry(
                 // streaming, hanging inline markers mended for display, the
                 // settled cache once complete.
                 let tree = parse(&format!("{}#{}", entry.id, part_id), text);
-                let item = thought_item(part_id, &tree, live);
+                let item = thought_item(part_id, text, &tree, live);
                 if compact {
                     compact_group_pos.get_or_insert(rows.len());
                 } else if pending_group.first().is_some_and(is_agent_tool) {
@@ -1761,7 +1782,9 @@ pub fn rows_for_entry(
                     }
                     // Tools and thoughts are grouped by the outer arms;
                     // nothing reaches here.
-                    MessagePart::Tool { .. } | MessagePart::Reasoning { .. } | MessagePart::Usage { .. } => {}
+                    MessagePart::Tool { .. }
+                    | MessagePart::Reasoning { .. }
+                    | MessagePart::Usage { .. } => {}
                 }
             }
         }
@@ -2247,8 +2270,10 @@ pub fn detail_height(detail: &ToolDetail) -> f32 {
         ToolDetail::Thought {
             lines,
             truncated_by,
+            ..
         } => {
-            let rows = lines.len() + usize::from(*truncated_by > 0);
+            let rows =
+                lines.len().min(THOUGHT_DETAIL_VISIBLE_LINES) + usize::from(*truncated_by > 0);
             rows as f32 * OUTPUT_LINE_HEIGHT + OUTPUT_BODY_PAD
         }
         ToolDetail::Diff { file, .. } => crate::changes::body_height(file),
@@ -2641,35 +2666,52 @@ impl TranscriptPreparation {
                 remove,
                 ..
             } => {
-                let replaced: HashSet<_> = upsert.iter().map(|u| u.entry.id.as_str())
-                    .chain(remove.iter().map(String::as_str)).collect();
+                let replaced: HashSet<_> = upsert
+                    .iter()
+                    .map(|u| u.entry.id.as_str())
+                    .chain(remove.iter().map(String::as_str))
+                    .collect();
                 // An upsert may only reposition an entry after a removal.
                 // Its settled markdown stays valid unless the parts changed.
                 let previous: HashMap<_, _> = if upsert.is_empty() {
                     HashMap::new()
                 } else {
-                    self.entries.iter().map(|entry| (entry.id.as_str(), entry)).collect()
+                    self.entries
+                        .iter()
+                        .map(|entry| (entry.id.as_str(), entry))
+                        .collect()
                 };
-                let changed_parts: HashSet<_> = upsert.iter()
-                    .filter(|u| previous.get(u.entry.id.as_str())
-                        .is_none_or(|previous| previous.parts != u.entry.parts))
+                let changed_parts: HashSet<_> = upsert
+                    .iter()
+                    .filter(|u| {
+                        previous
+                            .get(u.entry.id.as_str())
+                            .is_none_or(|previous| previous.parts != u.entry.parts)
+                    })
                     .map(|u| u.entry.id.as_str())
-                    .chain(remove.iter().map(String::as_str)).collect();
+                    .chain(remove.iter().map(String::as_str))
+                    .collect();
                 if !changed_parts.is_empty() {
                     self.tree_cache.retain(|key, _| {
-                        key.split_once('#').is_none_or(|(entry, _)| !changed_parts.contains(entry))
+                        key.split_once('#')
+                            .is_none_or(|(entry, _)| !changed_parts.contains(entry))
                     });
                 }
-                let live_keys: HashSet<_> = upsert.iter().flat_map(|u| {
-                    u.entry.parts.iter().filter_map(move |part| match part {
-                        MessagePart::Text { id, .. } | MessagePart::Reasoning { id, .. } =>
-                            Some(format!("{}#{id}", u.entry.id)),
-                        _ => None,
+                let live_keys: HashSet<_> = upsert
+                    .iter()
+                    .flat_map(|u| {
+                        u.entry.parts.iter().filter_map(move |part| match part {
+                            MessagePart::Text { id, .. } | MessagePart::Reasoning { id, .. } => {
+                                Some(format!("{}#{id}", u.entry.id))
+                            }
+                            _ => None,
+                        })
                     })
-                }).collect();
+                    .collect();
                 if !replaced.is_empty() {
                     self.live_parsers.retain(|key, _| {
-                        key.split_once('#').is_none_or(|(entry, _)| !replaced.contains(entry))
+                        key.split_once('#')
+                            .is_none_or(|(entry, _)| !replaced.contains(entry))
                             || live_keys.contains(key)
                     });
                 }
@@ -3996,7 +4038,14 @@ impl Transcript {
     pub(crate) fn distance_from_bottom(&self) -> f32 {
         let max = f32::from(self.list.max_offset_for_scrollbar().y);
         let cur = f32::from(self.list.scroll_px_offset_for_scrollbar().y);
-        (max + cur).max(0.0)
+        // A short, bottom-aligned chat can have a negative first-row offset
+        // while its anchor is being materialized. The blank space above it
+        // is alignment space, not scrollable content below the viewport.
+        if max <= 0.0 {
+            0.0
+        } else {
+            (max + cur).max(0.0)
+        }
     }
 
     /// Whether a user scroll should re-engage the bottom pin: inside the 70px
@@ -4008,27 +4057,53 @@ impl Transcript {
     }
 
     fn request_older_history(&mut self, cx: &mut Context<Self>) {
-        if self.doc_override.is_some() { return; }
+        if self.doc_override.is_some() {
+            return;
+        }
         self.materialize_scroll_anchor();
-        self.state.update(cx, |state, cx| state.load_older_transcript(cx));
+        self.state
+            .update(cx, |state, cx| state.load_older_transcript(cx));
     }
 
     fn render_history_loader(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if self.doc_override.is_some() || self.list.logical_scroll_top().item_ix > 2 { return None; }
+        if self.doc_override.is_some() || self.list.logical_scroll_top().item_ix > 2 {
+            return None;
+        }
         let state = self.state.read(cx);
-        let has_older = state.selected_chat.as_ref().and_then(|chat| state.transcript_windows.get(chat)).is_some_and(|window| window.has_older);
-        if !has_older { return None; }
+        let has_older = state
+            .selected_chat
+            .as_ref()
+            .and_then(|chat| state.transcript_windows.get(chat))
+            .is_some_and(|window| window.has_older);
+        if !has_older {
+            return None;
+        }
         let theme = Theme::of(cx).clone();
-        let label = crate::l10n::localizer().text(rcode_presentation::TextKey::ConversationLoadEarlier);
-        Some(div().absolute().top(px(4.0)).right(px(12.0)).child(
-            crate::settings::widgets::text_action(&theme, crate::settings::widgets::ActionTone::Quiet, label.clone())
-                .id("transcript-load-earlier").role(gpui::Role::Button).tab_index(0).aria_label(label)
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.pinned = false;
-                    this.release_own_turn_hold();
-                    this.request_older_history(cx);
-                }))
-        ).into_any_element())
+        let label =
+            crate::l10n::localizer().text(rcode_presentation::TextKey::ConversationLoadEarlier);
+        Some(
+            div()
+                .absolute()
+                .top(px(4.0))
+                .right(px(12.0))
+                .child(
+                    crate::settings::widgets::text_action(
+                        &theme,
+                        crate::settings::widgets::ActionTone::Quiet,
+                        label.clone(),
+                    )
+                    .id("transcript-load-earlier")
+                    .role(gpui::Role::Button)
+                    .tab_index(0)
+                    .aria_label(label)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.pinned = false;
+                        this.release_own_turn_hold();
+                        this.request_older_history(cx);
+                    })),
+                )
+                .into_any_element(),
+        )
     }
 
     fn handle_scroll(&mut self, _event: &ListScrollEvent, cx: &mut Context<Self>) {
@@ -4054,7 +4129,9 @@ impl Transcript {
         cx.defer(move |cx| {
             this.update(cx, |this: &mut Transcript, cx| {
                 this.discard_pending_viewport();
-                if this.list.logical_scroll_top().item_ix < 16 { this.request_older_history(cx); }
+                if this.list.logical_scroll_top().item_ix < 16 {
+                    this.request_older_history(cx);
+                }
                 // Input owns the viewport immediately, including wheel-down
                 // after background streaming. A held turn can be stale while
                 // frame callbacks are paused; reasserting its old prompt here
@@ -4659,7 +4736,9 @@ impl Transcript {
     /// Whether the shell should float the "Scroll to bottom" pill (scrolled
     /// more than [`SCROLL_BUTTON_THRESHOLD_PX`] off the end, unpinned).
     pub fn jump_button_shown(&self) -> bool {
-        self.show_jump_button
+        // Layout can reach the end without another wheel event (for example
+        // after a resize or a fold). Do not retain a stale visible pill there.
+        self.show_jump_button && self.distance_from_bottom() > AT_BOTTOM_PX
     }
 
     /// The scroll-to-bottom pill's click: glide back to the end and re-pin.
@@ -4859,8 +4938,12 @@ impl Transcript {
             self.state.read(cx).transcript_revision,
         );
         let history_window = if self.doc_override.is_none() {
-            selected.as_ref().and_then(|id| self.state.read(cx).transcript_windows.get(id).cloned())
-        } else { None };
+            selected
+                .as_ref()
+                .and_then(|id| self.state.read(cx).transcript_windows.get(id).cloned())
+        } else {
+            None
+        };
         let history_changed = self.last_history_window != history_window;
         if self.last_source.as_ref() == Some(&source) && !history_changed {
             return;
@@ -4868,9 +4951,20 @@ impl Transcript {
         self.last_source = Some(source);
 
         let attached = selected != self.chat_id;
-        let history_anchor = if !attached && !self.pinned && self.last_history_window.as_ref().and_then(|window|window.start.as_ref()) != history_window.as_ref().and_then(|window|window.start.as_ref()) {
+        let history_anchor = if !attached
+            && !self.pinned
+            && self
+                .last_history_window
+                .as_ref()
+                .and_then(|window| window.start.as_ref())
+                != history_window
+                    .as_ref()
+                    .and_then(|window| window.start.as_ref())
+        {
             ViewportAnchor::capture(&self.rows, self.list.logical_scroll_top())
-        } else { None };
+        } else {
+            None
+        };
         self.last_history_window = history_window;
         // Arm the replay baseline before classifying tool arrivals. Selection
         // and replay may arrive in one sync; a retained same-chat entity can
@@ -4999,18 +5093,25 @@ impl Transcript {
                 statistics,
             )
         };
-        self.turn_usage_controls.retain(|id, _| statistics.turns.get(id.as_ref()).is_some_and(|stats| stats.total_tokens().is_some()));
+        self.turn_usage_controls.retain(|id, _| {
+            statistics
+                .turns
+                .get(id.as_ref())
+                .is_some_and(|stats| stats.total_tokens().is_some())
+        });
         for (id, stats) in &statistics.turns {
             if let Some(data) = crate::usage_stats::StatData::usage(stats, true) {
                 let key: SharedString = id.clone().into();
                 if let Some(control) = self.turn_usage_controls.get(&key) {
                     control.update(cx, |control, cx| control.set_data(data, cx));
                 } else {
-                    self.turn_usage_controls.insert(key, cx.new(|cx| crate::usage_stats::StatControl::new(data, cx)));
+                    self.turn_usage_controls.insert(
+                        key,
+                        cx.new(|cx| crate::usage_stats::StatControl::new(data, cx)),
+                    );
                 }
             }
         }
-
 
         let baseline = self
             .chat_id
@@ -5290,7 +5391,9 @@ impl Transcript {
                     cx.notify();
                 }
                 self.promote_materialized_queued_turn(attached, cx);
-                if history_changed { cx.notify(); }
+                if history_changed {
+                    cx.notify();
+                }
                 return;
             }
             Some((old_range, count)) => {
@@ -5506,12 +5609,17 @@ impl Transcript {
             .await;
             let fetched = match reply {
                 Ok(value) => {
-                    cx.background_executor().spawn(async move {
-                        let text = value.get("text").and_then(|t| t.as_str()).unwrap_or_default();
-                        blob_detail(text, is_diff)
-                            .map(|d| BlobFetch::Ready(Arc::new(d)))
-                            .unwrap_or(BlobFetch::Failed)
-                    }).await
+                    cx.background_executor()
+                        .spawn(async move {
+                            let text = value
+                                .get("text")
+                                .and_then(|t| t.as_str())
+                                .unwrap_or_default();
+                            blob_detail(text, is_diff)
+                                .map(|d| BlobFetch::Ready(Arc::new(d)))
+                                .unwrap_or(BlobFetch::Failed)
+                        })
+                        .await
                 }
                 Err(_) => BlobFetch::Failed,
             };
@@ -8367,14 +8475,10 @@ impl Transcript {
             .zip(&detail_folds)
             .zip(tools.iter())
             .map(|(((detail, invocation), fold), tool)| {
-                // A STREAMING thought chip defaults open (the live thinking
-                // is the point); settled chips default closed. A user toggle
-                // overrides either way — and compact mode overrides all of
-                // it: nothing inside the fold opens itself.
-                let default_open =
-                    tool.kind == ToolItemKind::Thought && !tool.resolved && !self.compact_mode;
+                // Streaming thoughts preview their text in the header. Detail
+                // panels, including thoughts, require an explicit user toggle.
                 (detail.is_some() || invocation.is_some() || chip_has_images(tool))
-                    && fold.open.unwrap_or(default_open)
+                    && fold.open.unwrap_or(false)
             })
             .collect();
         // Image previews exist only while their chip's body is mounted (open,
@@ -8688,6 +8792,7 @@ impl Transcript {
                         .toggled_at
                         .is_some_and(|at| at.elapsed() < FOLD_TWEEN_WINDOW);
                 let toggle_key = key.clone();
+                let header_selector = key.clone();
                 let mut card = div()
                     .my(px((base_row_height - CHIP_CARD_HEIGHT) / 2.0))
                     .when(collapses, |el| el.ml(px(ACTIVITY_TEXT_GAP)))
@@ -8705,6 +8810,15 @@ impl Transcript {
                     .child(
                         div()
                             .id(key.clone())
+                            .debug_selector(move || format!("{header_selector}-header"))
+                            .when(tool.kind == ToolItemKind::Thought, |header| {
+                                header
+                                    .role(gpui::Role::Button)
+                                    .aria_expanded(open)
+                                    .aria_label(crate::l10n::localizer().text(
+                                        rcode_presentation::TextKey::ConversationThoughtProcess,
+                                    ))
+                            })
                             .h(px(if collapses {
                                 CHIP_CARD_HEIGHT
                             } else {
@@ -9611,26 +9725,100 @@ fn detail_body(
         ToolDetail::Thought {
             lines,
             truncated_by,
-        } => body
-            .py(px(6.0))
-            .text_size(px(TOOL_TEXT_SIZE))
-            .children(lines.iter().enumerate().map(|(line_ix, line)| {
-                let row = div()
-                    .h(px(OUTPUT_LINE_HEIGHT))
+            ..
+        } => {
+            let viewport_rows =
+                lines.len().min(THOUGHT_DETAIL_VISIBLE_LINES) + usize::from(*truncated_by > 0);
+            let item_count = lines.len() + usize::from(*truncated_by > 0);
+            let widest_line = lines
+                .iter()
+                .enumerate()
+                .max_by_key(|(_, line)| {
+                    line.iter()
+                        .map(|run| unicode_width::UnicodeWidthStr::width(run.text.as_str()))
+                        .sum::<usize>()
+                })
+                .map(|(ix, _)| ix);
+            let lines = lines.clone();
+            let truncated_by = *truncated_by;
+            let theme = theme.clone();
+            let selection_key = selection_key.to_owned();
+            let scroll_id = format!("{selection_key}-thought-scroll");
+            let selector = scroll_id.clone();
+            body.py(px(6.0))
+                .child(
+                    gpui::uniform_list(
+                        SharedString::from(scroll_id),
+                        item_count,
+                        move |range, window, _| {
+                            range
+                                .map(|line_ix| {
+                                    let Some(line) = lines.get(line_ix) else {
+                                        return more_lines_row(truncated_by, &theme)
+                                            .into_any_element();
+                                    };
+                                    thought_detail_line(&selection_key, line_ix, line, &theme, window)
+                                })
+                                .collect()
+                        },
+                    )
+                    .debug_selector(move || selector.clone())
+                    .with_width_from_item(widest_line)
+                    .with_horizontal_sizing_behavior(
+                        gpui::ListHorizontalSizingBehavior::Unconstrained,
+                    )
+                    .on_scroll_wheel(move |event, _, cx| {
+                        if item_count > viewport_rows
+                            || event.delta.pixel_delta(px(OUTPUT_LINE_HEIGHT)).x != px(0.0)
+                        {
+                            cx.stop_propagation();
+                        }
+                    })
+                    .h(px(viewport_rows as f32 * OUTPUT_LINE_HEIGHT))
                     .w_full()
                     .min_w_0()
-                    .flex()
-                    .items_center();
-                let Some((text, runs)) = thought_line_text(line, theme) else {
-                    return row; // blank separator row
-                };
-                row.child(selectable(line_ix, text, runs))
-            }))
-            .when(*truncated_by > 0, |block| {
-                block.child(more_lines_row(*truncated_by, theme))
-            })
-            .into_any_element(),
+                    .flex_none(),
+                )
+                .into_any_element()
+        }
     }
+}
+
+/// Only visible thought rows are shaped, while the scroll range retains every line.
+fn thought_detail_line(
+    selection_key: &str,
+    line_ix: usize,
+    line: &[InlineRun],
+    theme: &Theme,
+    window: &mut Window,
+) -> AnyElement {
+    let key = SharedString::from(format!("{selection_key}-{line_ix}"));
+    let selector = key.clone();
+    let row = div()
+        .id(key.clone())
+        .debug_selector(move || selector.to_string())
+        .h(px(OUTPUT_LINE_HEIGHT))
+        .min_w_0()
+        .overflow_hidden()
+        .whitespace_nowrap()
+        .flex()
+        .items_center()
+        .text_size(px(TOOL_TEXT_SIZE));
+    let Some((text, runs)) = thought_line_text(line, theme) else {
+        return row.into_any_element();
+    };
+    let width = window
+        .text_system()
+        .shape_line(text.clone(), px(TOOL_TEXT_SIZE), &runs, None)
+        .width();
+    row.w(width)
+        .child(render::selectable_text_element(
+            key.into(),
+            text,
+            runs,
+            theme.selection,
+        ))
+        .into_any_element()
 }
 
 /// The counted-tail row under a truncated Output/Thought detail.
@@ -9699,7 +9887,7 @@ fn note_chip_detail(tool: &ToolItem) -> String {
     let Some(ToolDetail::Thought { lines, .. }) = tool.detail.as_deref() else {
         return String::new();
     };
-    for line in lines {
+    for line in lines.iter() {
         let text: String = line.iter().map(|run| run.text.as_str()).collect();
         let text = single_line(text.trim());
         if !text.is_empty() {
@@ -9707,6 +9895,26 @@ fn note_chip_detail(tool: &ToolItem) -> String {
         }
     }
     String::new()
+}
+
+/// Preview the latest nonblank source line on every streaming update. Settled
+/// thoughts use their first line, and manual expansion hides the preview.
+fn thought_chip_detail(tool: &ToolItem) -> String {
+    let Some(ToolDetail::Thought { preview, .. }) = tool.detail.as_deref() else {
+        return String::new();
+    };
+    preview.to_string()
+}
+
+fn reasoning_preview(text: &str, live: bool) -> String {
+    let mut lines = text.lines().map(str::trim).filter(|line| !line.is_empty());
+    let line = if live {
+        lines.next_back()
+    } else {
+        lines.next()
+    }
+    .unwrap_or_default();
+    single_line(&line.replace("**", ""))
 }
 
 /// The trailing tile on a chip header, when it has one.
@@ -9764,7 +9972,11 @@ fn chip_header_row(
     let (label, detail) = match tool.kind {
         ToolItemKind::Thought => (
             crate::l10n::localizer().text(rcode_presentation::TextKey::ConversationThoughtProcess),
-            String::new(),
+            if matches!(trail.as_ref(), Some(ChipTrail::Chevron { open: true })) {
+                String::new()
+            } else {
+                thought_chip_detail(tool)
+            },
         ),
         ToolItemKind::Note => (
             crate::l10n::localizer().text(rcode_presentation::TextKey::ConversationWroteANote),
@@ -9772,6 +9984,7 @@ fn chip_header_row(
         ),
         ToolItemKind::Call => tool_chip_content(&tool.call),
     };
+    let thought_preview = tool.kind == ToolItemKind::Thought && !detail.is_empty();
     let activity = !is_agent_tool(tool);
     let file_path = match &tool.call {
         ToolCall::ReadFile { path }
@@ -9858,9 +10071,18 @@ fn chip_header_row(
                     }
                 }),
         )
+        .when(thought_preview, |row| {
+            row.child(
+                div()
+                    .size(px(2.0))
+                    .flex_none()
+                    .rounded_full()
+                    .bg(theme.text_faint),
+            )
+        })
         .child(
             div()
-                .when(!activity, |detail| detail.flex_1())
+                .when(!activity || thought_preview, |detail| detail.flex_1())
                 .min_w_0()
                 .h(px(if file_path.is_some() {
                     22.0
@@ -10372,10 +10594,49 @@ fn subagent_chip(
         .into_any_element()
 }
 
+#[cfg(any(test, feature = "appshots-fixture"))]
+impl Transcript {
+    /// Isolated visual fixture using the production thought header and detail.
+    pub fn fixture_thought_preview(
+        &mut self,
+        text: &str,
+        live: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let tools = Arc::new(vec![thought_item(
+            "reasoning",
+            text,
+            &parse_full(text),
+            live,
+        )]);
+        let summary = SharedString::from(tool_group_summary(&tools));
+        self.folds.entry("thought-fixture".into()).or_default().open = Some(true);
+        self.render_tool_group(
+            &"thought-fixture".into(),
+            &tools,
+            &summary,
+            live,
+            None,
+            false,
+            &Theme::of(cx).clone(),
+            cx,
+        )
+    }
+}
+
 #[cfg(feature = "appshots-fixture")]
 impl Transcript {
-    pub fn fixture_usage_panel(&mut self, entry: &str, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(control) = self.turn_usage_controls.iter().find_map(|(id, control)| (id.as_ref() == entry).then_some(control)) {
+    pub fn fixture_usage_panel(
+        &mut self,
+        entry: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(control) = self
+            .turn_usage_controls
+            .iter()
+            .find_map(|(id, control)| (id.as_ref() == entry).then_some(control))
+        {
             control.update(cx, |control, cx| control.fixture_show(true, window, cx));
         }
     }
@@ -10786,6 +11047,96 @@ mod tests {
     }
 
     #[gpui::test]
+    fn jump_button_tracks_scrollable_content_after_wheel_and_resize(cx: &mut gpui::TestAppContext) {
+        let transcript = cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+            let state = cx.new(|_| AppState::new());
+            cx.new(|cx| Transcript::new(state, cx))
+        });
+        let list_state = transcript.update(cx, |this, _| {
+            this.rows = (0..10)
+                .map(|ix| viewport_row(&format!("row-{ix}"), "reply"))
+                .collect();
+            this.list.reset(10);
+            this.list.clone()
+        });
+        let cx = cx.add_empty_window();
+        struct TestList(ListState);
+        impl Render for TestList {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                list(self.0.clone(), |_, _, _| {
+                    div().w_full().h(px(50.0)).into_any_element()
+                })
+                .size_full()
+            }
+        }
+        let draw = |cx: &mut gpui::VisualTestContext, height| {
+            cx.draw(Point::default(), size(px(500.0), px(height)), |_, cx| {
+                cx.new(|_| TestList(list_state.clone())).into_any_element()
+            });
+        };
+        let wheel = |cx: &mut gpui::VisualTestContext, delta| {
+            cx.simulate_event(gpui::ScrollWheelEvent {
+                position: point(px(250.0), px(50.0)),
+                delta: gpui::ScrollDelta::Pixels(point(px(0.0), px(delta))),
+                ..Default::default()
+            });
+        };
+
+        // The wheel callback also materializes the anchor before checking for
+        // older history. On a short chat that offset includes top alignment
+        // space, even though the wheel did not move any content off screen.
+        draw(cx, 1_200.0);
+        for delta in [60.0, -60.0] {
+            wheel(cx, delta);
+            transcript.read_with(cx, |this, _| {
+                assert!(this.is_pinned());
+                assert!(!this.jump_button_shown());
+            });
+            draw(cx, 1_200.0);
+        }
+
+        // There is a real destination below the viewport: offer the pill.
+        list_state.scroll_to_end();
+        draw(cx, 100.0);
+        wheel(cx, 400.0);
+        transcript.read_with(cx, |this, _| {
+            assert!(!this.is_pinned());
+            assert!(this.jump_button_shown());
+        });
+
+        // A resize fits the entire chat without another input event. A cached
+        // wheel decision must no longer keep the button on screen.
+        draw(cx, 1_200.0);
+        transcript.read_with(cx, |this, _| {
+            assert_eq!(this.distance_from_bottom(), 0.0);
+            assert!(!this.jump_button_shown());
+        });
+        for delta in [60.0, -60.0, 60.0] {
+            wheel(cx, delta);
+            draw(cx, 1_200.0);
+            transcript.read_with(cx, |this, _| {
+                assert!(this.is_pinned());
+                assert!(!this.jump_button_shown());
+            });
+        }
+
+        // Materializing a short bottom-aligned chat preserves the blank
+        // space above its first row as a negative offset, including between
+        // layouts. That space must never be reported as unread content.
+        list_state.scroll_to(ListOffset {
+            item_ix: 0,
+            offset_in_item: px(-700.0),
+        });
+        transcript.update(cx, |this, _| {
+            this.show_jump_button = true;
+            assert_eq!(this.distance_from_bottom(), 0.0);
+            assert!(!this.jump_button_shown());
+        });
+    }
+
+    #[gpui::test]
     fn departing_transcript_is_retained_only_until_hidden(cx: &mut gpui::TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
         cx.update(|cx| {
@@ -11088,55 +11439,104 @@ mod tests {
     fn background_preparation_keeps_unrelated_trees_and_prunes_removed_parsers() {
         let mut worker = TranscriptPreparation::default();
         let original = vec![
-            assistant("live", MessageStatus::Streaming, vec![text_part("p", "partial"), text_part("removed", "temporary")]),
-            assistant("settled", MessageStatus::Complete, vec![text_part("p", "finished")]),
+            assistant(
+                "live",
+                MessageStatus::Streaming,
+                vec![text_part("p", "partial"), text_part("removed", "temporary")],
+            ),
+            assistant(
+                "settled",
+                MessageStatus::Complete,
+                vec![text_part("p", "finished")],
+            ),
         ];
         let update = |frame| rcode_doc::TranscriptUpdate {
-            frame, context_usage: None, goal: None, replay_baseline: None,
+            frame,
+            context_usage: None,
+            goal: None,
+            replay_baseline: None,
         };
-        worker.prepare(&update(rcode_doc::TranscriptFrame::reset(&original))).unwrap();
+        worker
+            .prepare(&update(rcode_doc::TranscriptFrame::reset(&original)))
+            .unwrap();
         let settled_tree = worker.tree_cache["settled#p"].1.clone();
         assert!(worker.live_parsers.contains_key("live#p"));
         assert!(worker.live_parsers.contains_key("live#removed"));
         let mut pruned = original.clone();
         pruned[0].parts.pop();
-        worker.prepare(&update(rcode_doc::diff_transcript(&original, &pruned))).unwrap();
+        worker
+            .prepare(&update(rcode_doc::diff_transcript(&original, &pruned)))
+            .unwrap();
         assert!(worker.live_parsers.contains_key("live#p"));
         assert!(!worker.live_parsers.contains_key("live#removed"));
-        assert!(Arc::ptr_eq(&settled_tree, &worker.tree_cache["settled#p"].1));
+        assert!(Arc::ptr_eq(
+            &settled_tree,
+            &worker.tree_cache["settled#p"].1
+        ));
         let changed = vec![original[1].clone()];
-        worker.prepare(&update(rcode_doc::diff_transcript(&pruned, &changed))).unwrap();
+        worker
+            .prepare(&update(rcode_doc::diff_transcript(&pruned, &changed)))
+            .unwrap();
         assert!(worker.live_parsers.is_empty());
-        assert!(Arc::ptr_eq(&settled_tree, &worker.tree_cache["settled#p"].1));
+        assert!(Arc::ptr_eq(
+            &settled_tree,
+            &worker.tree_cache["settled#p"].1
+        ));
 
         // An unrelated upsert must not discard an already parsed finished tree.
         let mut appended = changed.clone();
-        appended.push(assistant("other", MessageStatus::Complete, vec![text_part("p", "new")]));
-        worker.prepare(&update(rcode_doc::diff_transcript(&changed, &appended))).unwrap();
-        assert!(Arc::ptr_eq(&settled_tree, &worker.tree_cache["settled#p"].1));
+        appended.push(assistant(
+            "other",
+            MessageStatus::Complete,
+            vec![text_part("p", "new")],
+        ));
+        worker
+            .prepare(&update(rcode_doc::diff_transcript(&changed, &appended)))
+            .unwrap();
+        assert!(Arc::ptr_eq(
+            &settled_tree,
+            &worker.tree_cache["settled#p"].1
+        ));
     }
 
     #[gpui::test]
     fn loading_older_history_preserves_visible_row_and_pixel_offset(cx: &mut gpui::TestAppContext) {
         with_tool_group_navigation(cx, |state, transcript, cx| {
-            let entries = |start| vec![assistant("round", MessageStatus::Complete,
-                (start..256).map(|i| text_part(&format!("part-{i}"), &format!("Result {i}"))).collect())];
+            let entries = |start| {
+                vec![assistant(
+                    "round",
+                    MessageStatus::Complete,
+                    (start..256)
+                        .map(|i| text_part(&format!("part-{i}"), &format!("Result {i}")))
+                        .collect(),
+                )]
+            };
             let publish = |start, cx: &mut gpui::App| {
                 state.update(cx, |state, _| {
                     state.transcript = entries(start);
                     state.prepared_transcripts.clear();
                     state.transcript_revision += 1;
-                    state.transcript_windows.insert("chat-a".into(), rcode_doc::TranscriptWindow {
-                        start: Some(rcode_doc::TranscriptCursor { entry: "round".into(), part: Some(format!("part-{start}")) }),
-                        has_older: start > 0, parts: 256 - start,
-                    });
+                    state.transcript_windows.insert(
+                        "chat-a".into(),
+                        rcode_doc::TranscriptWindow {
+                            start: Some(rcode_doc::TranscriptCursor {
+                                entry: "round".into(),
+                                part: Some(format!("part-{start}")),
+                            }),
+                            has_older: start > 0,
+                            parts: 256 - start,
+                        },
+                    );
                 });
                 transcript.update(cx, |this, cx| this.sync(cx));
             };
             publish(128, cx);
             let row = transcript.update(cx, |this, _| {
                 this.pinned = false;
-                this.list.scroll_to(ListOffset { item_ix: 10, offset_in_item: px(23.0) });
+                this.list.scroll_to(ListOffset {
+                    item_ix: 10,
+                    offset_in_item: px(23.0),
+                });
                 this.rows[10].id.clone()
             });
             publish(0, cx);
@@ -11144,7 +11544,10 @@ mod tests {
                 let position = this.list.logical_scroll_top();
                 assert_eq!(this.rows[position.item_ix].id, row);
                 assert_eq!(position.offset_in_item, px(23.0));
-                assert!(position.item_ix > 10, "older rows precede the retained viewport");
+                assert!(
+                    position.item_ix > 10,
+                    "older rows precede the retained viewport"
+                );
                 assert!(!this.pinned);
                 assert!(!this.last_history_window.as_ref().unwrap().has_older);
             });
@@ -12642,7 +13045,253 @@ mod tests {
     }
 
     #[test]
-    fn live_thought_streams_open_and_settles_closed() {
+    fn thought_preview_updates_without_waiting_for_a_newline() {
+        let mut previous_version = None;
+        for text in ["检", "检查", "检查项目", "第一行\n正在", "第一行\n正在检查"]
+        {
+            let entry = assistant(
+                "a1",
+                MessageStatus::Streaming,
+                vec![reasoning_part("r0", text)],
+            );
+            let rows = rows_for_entry(&entry, false, false, &mut parse);
+            let RowKind::ToolGroup { tools, .. } = &rows[0].kind else {
+                panic!("thought group")
+            };
+            assert_eq!(thought_chip_detail(&tools[0]), text.lines().last().unwrap());
+            assert_ne!(previous_version, Some(rows[0].version));
+            previous_version = Some(rows[0].version);
+        }
+        let text = "**First line**\n\nLatest thought";
+        let live = thought_item("r0", text, &parse("r0", text), true);
+        let settled = thought_item("r0", text, &parse("r0", text), false);
+        assert_eq!(thought_chip_detail(&live), "Latest thought");
+        assert_eq!(thought_chip_detail(&settled), "First line");
+    }
+
+    #[test]
+    fn thoughts_retain_the_complete_text_in_a_bounded_viewport() {
+        let text = (0..120)
+            .map(|ix| format!("Thought {ix}"))
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        for live in [true, false] {
+            let thought = thought_item("r0", &text, &parse("r0", &text), live);
+            let detail = thought.detail.as_deref().unwrap();
+            let ToolDetail::Thought {
+                lines,
+                truncated_by,
+                ..
+            } = detail
+            else {
+                panic!("thought detail")
+            };
+            assert!(lines.len() > THOUGHT_DETAIL_VISIBLE_LINES);
+            assert_eq!(*truncated_by, 0);
+            let restored: String = lines
+                .iter()
+                .flat_map(|line| line.iter().map(|run| run.text.as_str()))
+                .collect();
+            assert!(restored.contains("Thought 0"));
+            assert!(restored.contains("Thought 119"));
+            assert_eq!(
+                detail_height(detail),
+                DETAIL_SEPARATOR
+                    + OUTPUT_BODY_PAD
+                    + THOUGHT_DETAIL_VISIBLE_LINES as f32 * OUTPUT_LINE_HEIGHT
+            );
+            let note = note_item("n0", &parse("n0", &text), live);
+            let Some(ToolDetail::Thought {
+                lines,
+                truncated_by,
+                ..
+            }) = note.detail.as_deref()
+            else {
+                panic!("note detail")
+            };
+            assert!(lines.len() <= OUTPUT_DETAIL_MAX_LINES);
+            assert!(*truncated_by > 0, "narration retains its existing limit");
+        }
+    }
+
+    #[gpui::test]
+    fn streaming_thought_details_only_open_on_user_input(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let transcript = cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+            let state = cx.new(|_| AppState::new());
+            cx.new(|cx| Transcript::new(state, cx))
+        });
+        struct ThoughtGroupFixture {
+            transcript: Entity<Transcript>,
+            live: bool,
+            _changed: gpui::Subscription,
+        }
+        impl Render for ThoughtGroupFixture {
+            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                div()
+                    .w(px(700.0))
+                    .child(self.transcript.update(cx, |transcript, cx| {
+                        transcript.fixture_thought_preview("First line\n\nLive tail", self.live, cx)
+                    }))
+            }
+        }
+        let watched = transcript.clone();
+        let (fixture, visual) = cx.add_window_view(|_, cx| ThoughtGroupFixture {
+            transcript: transcript.clone(),
+            live: true,
+            _changed: cx.observe(&watched, |_, _, cx| cx.notify()),
+        });
+        visual.update(|window, cx| window.draw(cx).clear());
+        let scroll_id = "thought-fixture#d0-out-thought-scroll";
+        assert!(
+            visual.debug_bounds(scroll_id).is_none(),
+            "live thoughts must stay collapsed"
+        );
+        let header = visual
+            .debug_bounds("thought-fixture#d0-header")
+            .expect("thought header");
+        visual.simulate_click(header.center(), Default::default());
+        transcript.update(visual, |transcript, cx| {
+            let fold = transcript
+                .tool_details
+                .get_mut(&SharedString::from("thought-fixture#d0"))
+                .unwrap();
+            assert_eq!(fold.open, Some(true));
+            fold.toggled_at = None;
+            cx.notify();
+        });
+        visual.update(|window, cx| window.draw(cx).clear());
+        assert!(visual.debug_bounds(scroll_id).is_some());
+        fixture.update(visual, |fixture, cx| {
+            fixture.live = false;
+            cx.notify();
+        });
+        visual.update(|window, cx| window.draw(cx).clear());
+        assert!(
+            visual.debug_bounds(scroll_id).is_some(),
+            "completion preserves manual expansion"
+        );
+    }
+
+    #[gpui::test]
+    fn thought_viewport_scrolls_to_the_end_without_growing_or_scrolling_its_parent(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+        });
+        struct ThoughtFixture {
+            parent_scroll: gpui::ScrollHandle,
+            detail: ToolDetail,
+        }
+        impl Render for ThoughtFixture {
+            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                div()
+                    .id("thought-parent")
+                    .w(px(700.0))
+                    .h(px(600.0))
+                    .overflow_y_scroll()
+                    .track_scroll(&self.parent_scroll)
+                    .child(detail_body(
+                        &self.detail,
+                        None,
+                        "thought-probe",
+                        Theme::of(cx),
+                    ))
+                    .child(div().h(px(1000.0)).flex_none())
+            }
+        }
+        let detail = ToolDetail::Thought {
+            lines: Arc::new(
+                (0..120)
+                    .map(|ix| {
+                        vec![InlineRun {
+                            text: if ix == 0 {
+                                "wide thought ".repeat(100)
+                            } else {
+                                format!("Thought line {ix}")
+                            },
+                            style: InlineStyle::default(),
+                        }]
+                    })
+                    .collect(),
+            ),
+            truncated_by: 0,
+            preview: "".into(),
+        };
+        let parent_scroll = gpui::ScrollHandle::new();
+        let (fixture, visual) = cx.add_window_view(|_, _| ThoughtFixture {
+            parent_scroll: parent_scroll.clone(),
+            detail,
+        });
+        visual.update(|window, cx| window.draw(cx).clear());
+        let viewport = visual
+            .debug_bounds("thought-probe-thought-scroll")
+            .expect("thought viewport");
+        assert_eq!(
+            viewport.size.height,
+            px(THOUGHT_DETAIL_VISIBLE_LINES as f32 * OUTPUT_LINE_HEIGHT)
+        );
+        assert!(
+            visual.debug_bounds("thought-probe-119").is_none(),
+            "offscreen lines are virtualized"
+        );
+        let original_offset = parent_scroll.offset();
+        let wide_line = visual.debug_bounds("thought-probe-0").unwrap();
+        assert!(
+            wide_line.size.width > viewport.size.width,
+            "wide lines retain their full width"
+        );
+        visual.simulate_event(gpui::ScrollWheelEvent {
+            position: viewport.center(),
+            delta: gpui::ScrollDelta::Pixels(point(px(-300.0), px(0.0))),
+            modifiers: Default::default(),
+            touch_phase: gpui::TouchPhase::Moved,
+        });
+        visual.update(|window, cx| window.draw(cx).clear());
+        assert!(
+            visual.debug_bounds("thought-probe-0").unwrap().origin.x < wide_line.origin.x,
+            "wide thought text remains reachable by horizontal scrolling"
+        );
+        visual.simulate_event(gpui::ScrollWheelEvent {
+            position: viewport.center(),
+            delta: gpui::ScrollDelta::Pixels(point(px(10000.0), px(0.0))),
+            modifiers: Default::default(),
+            touch_phase: gpui::TouchPhase::Moved,
+        });
+        visual.update(|window, cx| window.draw(cx).clear());
+        visual.simulate_event(gpui::ScrollWheelEvent {
+            position: viewport.center(),
+            delta: gpui::ScrollDelta::Pixels(point(px(0.0), px(-10000.0))),
+            modifiers: Default::default(),
+            touch_phase: gpui::TouchPhase::Moved,
+        });
+        visual.update(|window, cx| window.draw(cx).clear());
+        let after = visual.debug_bounds("thought-probe-thought-scroll").unwrap();
+        assert_eq!(after, viewport);
+        assert_eq!(
+            parent_scroll.offset(),
+            original_offset,
+            "inner wheel must not scroll the conversation"
+        );
+        assert!(
+            visual.debug_bounds("thought-probe-119").is_some(),
+            "the final line remains reachable"
+        );
+        fixture.update(visual, |_, cx| cx.notify());
+        visual.update(|window, cx| window.draw(cx).clear());
+        assert!(
+            visual.debug_bounds("thought-probe-119").is_some(),
+            "scroll position survives a render"
+        );
+    }
+
+    #[test]
+    fn live_thought_group_exposes_its_streaming_tail() {
         let entry = assistant(
             "a1",
             MessageStatus::Streaming,
@@ -12655,8 +13304,8 @@ mod tests {
         else {
             panic!("expected a tool group");
         };
-        // The live tail auto-opens the group; the chip itself is unresolved
-        // (defaults open) until the part stops being the tail.
+        // The live tail exposes the group and its inline preview. Its detail
+        // remains closed until the user opens it.
         assert!(*auto_open);
         assert!(!tools[0].resolved);
 
@@ -13254,6 +13903,60 @@ mod tests {
                 .any(|r| r.style.code && r.text == "let x = 1;"),
             "{flat:?}"
         );
+    }
+
+    #[test]
+    fn ask_tools_only_render_the_question_card() {
+        for name in ["Ask", "AskUserQuestion"] {
+            for compact in [false, true] {
+                for status in [MessageStatus::Streaming, MessageStatus::Complete] {
+                    for resolved in [false, true] {
+                        let mut ask = tool_part("ask", "");
+                        if let MessagePart::Tool { call, .. } = &mut ask {
+                            *call = ToolCall::Unknown {
+                                name: name.into(),
+                                input: None,
+                            };
+                        }
+                        let question = MessagePart::Input {
+                            id: "input".into(),
+                            request_id: "request".into(),
+                            request: rcode_proto::InteractionRequest::Questions {
+                                questions: vec![],
+                            },
+                            resolved,
+                        };
+                        let entry = assistant("a1", status, vec![question, ask]);
+                        let rows = rows_for_entry(&entry, false, compact, &mut parse);
+                        assert_eq!(rows.len(), 1, "{name}, compact={compact}");
+                        assert!(
+                            matches!(rows[0].kind, RowKind::InputChip { resolved: value, .. } if value == resolved)
+                        );
+
+                        let mut mixed = entry.clone();
+                        mixed.parts.push(tool_part("exec", "pwd"));
+                        let rows = rows_for_entry(&mixed, false, compact, &mut parse);
+                        assert_eq!(
+                            rows.iter()
+                                .filter(|row| matches!(row.kind, RowKind::InputChip { .. }))
+                                .count(),
+                            1
+                        );
+                        for row in &rows {
+                            if let RowKind::ToolGroup { tools, summary, .. } = &row.kind {
+                                assert_eq!(tools.len(), 1);
+                                assert!(matches!(tools[0].call, ToolCall::Exec { .. }));
+                                assert_eq!(summary.as_ref(), tool_group_summary(tools));
+                            }
+                        }
+                        assert!(
+                            rows.iter()
+                                .any(|row| matches!(row.kind, RowKind::ToolGroup { .. }))
+                        );
+                    }
+                }
+            }
+        }
     }
 
     fn tool_part(id: &str, command: &str) -> MessagePart {
@@ -16814,13 +17517,21 @@ mod tests {
 impl Transcript {
     pub fn fixture_history_anchor(&self) -> (String, f32) {
         let position = self.list.logical_scroll_top();
-        (self.rows[position.item_ix.min(self.rows.len() - 1)].id.to_string(), position.offset_in_item.into())
+        (
+            self.rows[position.item_ix.min(self.rows.len() - 1)]
+                .id
+                .to_string(),
+            position.offset_in_item.into(),
+        )
     }
 
     pub fn fixture_history_page(&mut self, cx: &mut Context<Self>) -> (String, f32) {
         self.pinned = false;
         self.release_own_turn_hold();
-        self.list.scroll_to(ListOffset { item_ix: 10, offset_in_item: px(23.0) });
+        self.list.scroll_to(ListOffset {
+            item_ix: 10,
+            offset_in_item: px(23.0),
+        });
         let anchor = self.fixture_history_anchor();
         self.request_older_history(cx);
         cx.notify();

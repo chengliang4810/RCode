@@ -3173,7 +3173,6 @@ dependencies = [
 [[package]]
 name = "gpui"
 version = "0.2.2"
-source = "git+https://github.com/zeronsh/zui?rev=361ff20b919fdfb80199ee6d9aed725300cb7d54#361ff20b919fdfb80199ee6d9aed725300cb7d54"
 dependencies = [
  "accesskit",
  "anyhow",
@@ -4898,8 +4897,6 @@ dependencies = [
 [[package]]
 name = "loro-internal"
 version = "1.13.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6fec47acf8db115b7146da5e1d5b18d0cf58032e6012c0c1ee3ec3442d1e936f"
 dependencies = [
  "append-only-bytes",
  "arref",
@@ -9193,8 +9190,6 @@ dependencies = [
 [[package]]
 name = "taffy"
 version = "0.12.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "340a09581f29809fc0df82a3955501dc7f2a21f887e5d1c13dbe288fe1c0bef4"
 dependencies = [
  "arrayvec",
  "grid",

@@ -1,0 +1,14 @@
+[package]
+name = "rcode-taffy-regressions"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[features]
+default = ["std"]
+std = ["taffy/std"]
+
+[dependencies]
+taffy = { path = "..", default-features = false, features = ["alloc", "taffy_tree", "flexbox"] }

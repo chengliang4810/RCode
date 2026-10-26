@@ -31,6 +31,20 @@ const TERM_LINE_HEIGHT_RATIO: f32 = TERM_LINE_HEIGHT / TERM_FONT_SIZE;
 /// Inner padding of the grid area.
 pub const TERM_PADDING: f32 = 12.0;
 
+fn terminal_font(theme: &Theme) -> gpui::Font {
+    let mut mono = font(theme.font_terminal.clone());
+    mono.features = gpui::FontFeatures(std::sync::Arc::new(vec![
+        ("liga".into(), 0),
+        ("calt".into(), 0),
+        ("dlig".into(), 0),
+    ]));
+    mono
+}
+
+fn cursor_columns(row: &[CellSnapshot], col: usize) -> f32 {
+    if row.get(col).is_some_and(|cell| cell.wide) { 2.0 } else { 1.0 }
+}
+
 /// Keyboard input coalescing window before a `WriteTerminal` flush.
 pub const COALESCE_MS: u64 = 12;
 /// Debounce for `ResizeTerminal` after viewport-driven size changes.
@@ -369,6 +383,31 @@ impl TerminalElement {
     }
 }
 
+struct TerminalRow {
+    columns: usize,
+    segments: Vec<(usize, ShapedLine)>,
+}
+
+impl TerminalRow {
+    /// Font fallback can draw a keycap wider than its VT column. Pinning the
+    /// next glyph only fixes its origin; each segment also needs a grid mask
+    /// so its ink cannot cover a neighbour's text or selection background.
+    fn slot_bounds(
+        &self,
+        segment: usize,
+        origin: gpui::Point<Pixels>,
+        cell_w: Pixels,
+        line_h: Pixels,
+    ) -> Bounds<Pixels> {
+        let start = self.segments[segment].0;
+        let end = self.segments.get(segment + 1).map_or(self.columns, |next| next.0);
+        Bounds::new(
+            point(origin.x + cell_w * start as f32, origin.y),
+            size(cell_w * end.saturating_sub(start) as f32, line_h),
+        )
+    }
+}
+
 pub struct TerminalPrepaint {
     bg_quads: Vec<PaintQuad>,
     /// Selection wash. Painted after [`Self::bg_quads`] and before the glyphs:
@@ -377,7 +416,7 @@ pub struct TerminalPrepaint {
     sel_quads: Vec<PaintQuad>,
     /// Per row, the shaped segments and the grid COLUMN each one starts at.
     /// Not one line per row: see [`shape_row`].
-    lines: Vec<Vec<(usize, ShapedLine)>>,
+    lines: Vec<TerminalRow>,
     /// Grid cell advance, so paint can place segments by column.
     cell_w: Pixels,
     /// Grid row height, so paint places rows on the same baselines prepaint
@@ -437,12 +476,7 @@ impl gpui::Element for TerminalElement {
         // to the pty (the command runs), only the painted run lost a cell.
         // The landing page disables the same three features on its ASCII art
         // for the same reason.
-        let mut mono = font(theme.font_terminal.clone());
-        mono.features = gpui::FontFeatures(std::sync::Arc::new(vec![
-            ("liga".into(), 0),
-            ("calt".into(), 0),
-            ("dlig".into(), 0),
-        ]));
+        let mono = terminal_font(&theme);
         // Font probe: measure the actual advance of the resolved mono font so
         // cols/rows track real glyph metrics, not a guessed aspect ratio.
         let font_size = px(theme.terminal_font_size);
@@ -542,16 +576,21 @@ impl gpui::Element for TerminalElement {
                     _ => {}
                 }
             }
-            lines.push(shape_row(row, &theme, &mono, font_size, window));
+            lines.push(TerminalRow {
+                columns: row.len(),
+                segments: shape_row(row, &theme, &mono, font_size, window.text_system()),
+            });
         }
 
         let cursor = snapshot.cursor.map(|c| {
+            let columns = snapshot.lines.get(c.row)
+                .map_or(1.0, |row| cursor_columns(row, c.col));
             let cursor_bounds = Bounds::new(
                 point(
                     origin.x + cell_w * c.col as f32,
                     origin.y + line_h * c.row as f32,
                 ),
-                size(cell_w, line_h),
+                size(cell_w * columns, line_h),
             );
             if self.focused {
                 // Translucent block: the glyph underneath stays legible.
@@ -594,17 +633,20 @@ impl gpui::Element for TerminalElement {
                 window.paint_quad(quad);
             }
             let cell_w = prepaint.cell_w;
-            for (ix, segments) in prepaint.lines.iter().enumerate() {
+            for (ix, row) in prepaint.lines.iter().enumerate() {
                 let y = origin.y + line_h * ix as f32;
-                for (col, line) in segments {
-                    let _ = line.paint(
-                        point(origin.x + cell_w * *col as f32, y),
-                        line_h,
-                        gpui::TextAlign::Left,
-                        None,
-                        window,
-                        cx,
-                    );
+                for (segment, (col, line)) in row.segments.iter().enumerate() {
+                    let slot = row.slot_bounds(segment, point(origin.x, y), cell_w, line_h);
+                    window.with_content_mask(Some(gpui::ContentMask { bounds: slot }), |window| {
+                        let _ = line.paint(
+                            point(origin.x + cell_w * *col as f32, y),
+                            line_h,
+                            gpui::TextAlign::Left,
+                            None,
+                            window,
+                            cx,
+                        );
+                    });
                 }
             }
             if let Some(cursor) = prepaint.cursor.take() {
@@ -630,13 +672,14 @@ impl gpui::Element for TerminalElement {
 /// So: runs of ASCII shape together (guaranteed cell-width in a mono font),
 /// and every other glyph is its own segment pinned at its own column. Wide
 /// spacers are still skipped — the wide glyph covers both columns, and the
-/// NEXT segment re-pins regardless.
+/// NEXT segment re-pins regardless. Paint also clips each segment to its VT
+/// column span; a fallback emoji can be wider than even a two-column slot.
 fn shape_row(
     row: &[CellSnapshot],
     theme: &Theme,
     mono: &gpui::Font,
     font_size: Pixels,
-    window: &Window,
+    text_system: &gpui::WindowTextSystem,
 ) -> Vec<(usize, ShapedLine)> {
     fn flush(
         segments: &mut Vec<(usize, ShapedLine)>,
@@ -644,12 +687,12 @@ fn shape_row(
         runs: &mut Vec<TextRun>,
         seg_col: usize,
         font_size: Pixels,
-        window: &Window,
+        text_system: &gpui::WindowTextSystem,
     ) {
         if text.is_empty() {
             return;
         }
-        let shaped = window.text_system().shape_line(
+        let shaped = text_system.shape_line(
             SharedString::from(std::mem::take(text)),
             font_size,
             runs,
@@ -670,7 +713,7 @@ fn shape_row(
         }
         let ch = if cell.hidden { ' ' } else { cell.ch };
         // Anything that can leave the mono font gets its own pinned segment.
-        let pinned = !ch.is_ascii() || cell.wide;
+        let pinned = !ch.is_ascii() || cell.wide || cell.zerowidth.is_some();
         if pinned {
             flush(
                 &mut segments,
@@ -678,7 +721,7 @@ fn shape_row(
                 &mut runs,
                 seg_col,
                 font_size,
-                window,
+                text_system,
             );
         }
         if text.is_empty() {
@@ -705,8 +748,12 @@ fn shape_row(
             thickness: px(1.0),
             wavy: false,
         });
-        let len = ch.len_utf8();
+        let start = text.len();
         text.push(ch);
+        if !cell.hidden {
+            text.extend(cell.zerowidth.as_deref().unwrap_or(&[]).iter().copied());
+        }
+        let len = text.len() - start;
         match runs.last_mut() {
             Some(last)
                 if last.color == color && last.font == cell_font && last.underline == underline =>
@@ -729,7 +776,7 @@ fn shape_row(
                 &mut runs,
                 seg_col,
                 font_size,
-                window,
+                text_system,
             );
         }
     }
@@ -739,7 +786,7 @@ fn shape_row(
         &mut runs,
         seg_col,
         font_size,
-        window,
+        text_system,
     );
     segments
 }
@@ -747,6 +794,92 @@ fn shape_row(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Native font metrics complement the panel's simulated-event test: the
+    /// fallback/combining segments must stay pinned to emulator columns, while
+    /// normal and bold ASCII keep the measured mono advance.
+    #[test]
+    fn native_terminal_font_geometry() {
+        let (_native, text_system) = crate::typography::native_text_system();
+        let mut theme = Theme::dark();
+        theme.font_terminal = "Geist Mono".into();
+        let mono = terminal_font(&theme);
+        let mut emulator = super::super::emulator::Emulator::new(160, 3);
+        emulator.feed("ab -> -- \x1b[1mBold123\x1b[0m 中文Ｂ🙂e\u{301} 1\u{fe0f}\u{20e3}Z".as_bytes());
+        let row = emulator.line(0);
+        for size in [8.0, 12.5, 13.0, 20.0, 32.0] {
+            let font_size = px(size);
+            let cell_w = text_system.em_advance(text_system.resolve_font(&mono), font_size).unwrap();
+            let segments = shape_row(&row, &theme, &mono, font_size, &text_system);
+            let painted: String = segments.iter().map(|(_, line)| line.text.as_ref()).collect();
+            assert_eq!(painted.trim_end(), emulator.row_text(0));
+            for (col, cell) in row.iter().enumerate().filter(|(_, cell)| !cell.wide_spacer) {
+                if !cell.ch.is_ascii() || cell.wide || cell.zerowidth.is_some() {
+                    let mut expected = cell.ch.to_string();
+                    expected.extend(cell.zerowidth.as_deref().unwrap_or(&[]).iter().copied());
+                    assert!(segments.iter().any(|(start, line)| *start == col && line.text.as_ref() == expected));
+                }
+            }
+            for (_, line) in &segments {
+                if line.text.is_ascii() {
+                    let expected = f32::from(cell_w) * line.text.len() as f32;
+                    assert!((f32::from(line.width()) - expected).abs() < 0.02 * expected.max(1.0));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn block_cursor_covers_the_full_wide_glyph() {
+        let mut emulator = super::super::emulator::Emulator::new(20, 3);
+        emulator.feed("A中🙂Z\x1b[1;3H".as_bytes());
+        // Alacritty normalizes a cursor on the spacer onto the glyph's head.
+        let cursor = emulator.cursor().unwrap();
+        assert_eq!(cursor.col, 1);
+        assert_eq!(cursor_columns(&emulator.line(0), cursor.col), 2.0);
+        emulator.feed(b"\x1b[1;6H");
+        assert_eq!(cursor_columns(&emulator.line(0), emulator.cursor().unwrap().col), 1.0);
+    }
+
+    #[test]
+    fn native_terminal_keycap_stays_inside_its_vt_slot_before_adjacent_z() {
+        let (_native, text_system) = crate::typography::native_text_system();
+        let mut theme = Theme::dark();
+        theme.font_terminal = "Geist Mono".into();
+        let mono = terminal_font(&theme);
+        let mut emulator = super::super::emulator::Emulator::new(16, 3);
+        emulator.feed("1\u{fe0f}\u{20e3}Z".as_bytes());
+        assert_eq!(emulator.line(0)[1].ch, 'Z');
+        assert_eq!(emulator.cursor().unwrap().col, 2);
+        emulator.start_selection(
+            super::super::emulator::SelectionType::Simple,
+            emulator.grid_point(0, 0),
+            Side::Left,
+        );
+        emulator.update_selection(emulator.grid_point(0, 0), Side::Right);
+        assert_eq!(emulator.selection_text().as_deref(), Some("1\u{fe0f}\u{20e3}"));
+        assert!(!emulator.line(0)[1].selected);
+        for size in [8.0, 13.0, 20.0, 32.0] {
+            let cell_w = text_system.em_advance(text_system.resolve_font(&mono), px(size)).unwrap();
+            let row = TerminalRow {
+                columns: emulator.cols(),
+                segments: shape_row(&emulator.line(0), &theme, &mono, px(size), &text_system),
+            };
+            assert_eq!(row.segments[0].0, 0);
+            assert_eq!(row.segments[0].1.text.as_ref(), "1\u{fe0f}\u{20e3}");
+            #[cfg(windows)]
+            assert!(row.segments[0].1.width() > cell_w, "native keycap requires the VT slot mask");
+            assert_eq!(row.segments[1].0, 1);
+            assert!(row.segments[1].1.text.starts_with('Z'));
+            let origin = point(px(12.0), px(24.0));
+            let line_h = px(size * TERM_LINE_HEIGHT_RATIO);
+            let keycap = row.slot_bounds(0, origin, cell_w, line_h);
+            let next = row.slot_bounds(1, origin, cell_w, line_h);
+            assert_eq!(keycap.size.width, cell_w);
+            assert_eq!(keycap.right(), next.left());
+            assert_eq!(keycap.bottom(), origin.y + line_h);
+        }
+    }
 
     fn mods() -> Modifiers {
         Modifiers::default()

@@ -111,6 +111,13 @@ impl DirectManipulationHandler {
         }
     }
 
+    pub fn needs_frame(&self) -> bool {
+        !self.pending_events.borrow().is_empty()
+            || unsafe { self.viewport.GetStatus() }.map_or(true, |status| {
+                status == DIRECTMANIPULATION_RUNNING || status == DIRECTMANIPULATION_INERTIA
+            })
+    }
+
     pub fn drain_events(&self) -> Vec<PlatformInput> {
         std::mem::take(&mut *self.pending_events.borrow_mut())
     }

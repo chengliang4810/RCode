@@ -61,6 +61,7 @@ pub fn edge_faded(band: f32, top: bool, bottom: bool, child: impl IntoElement) -
         right: false,
         scroll_y: None,
         overflow_y: None,
+        distance_y: None,
         scroll_x: None,
         smooth_overflow_x: false,
         grow_x: false,
@@ -80,6 +81,7 @@ pub struct EdgeFaded {
     right: bool,
     scroll_y: Option<ScrollHandle>,
     overflow_y: Option<Box<dyn Fn(&App) -> (bool, bool)>>,
+    distance_y: Option<Box<dyn Fn(&App) -> (f32, f32)>>,
     scroll_x: Option<ScrollHandle>,
     smooth_overflow_x: bool,
     grow_x: bool,
@@ -117,7 +119,8 @@ impl EdgeFaded {
     /// the final frame of a content shrink (rows removed while scrolled):
     /// prepaint clamps the offset to fit, nothing re-renders, and a fade with
     /// no overflow sticks on screen (user report). `top`/`bottom` become
-    /// enables; the handle decides per frame.
+    /// enables; the handle decides per frame. Each band grows continuously
+    /// with the actual content hidden beyond that edge, up to its full size.
     pub fn fade_overflow_y(mut self, handle: &ScrollHandle) -> Self {
         self.scroll_y = Some(handle.clone());
         self
@@ -130,6 +133,15 @@ impl EdgeFaded {
         overflow: impl Fn(&App) -> (bool, bool) + 'static,
     ) -> Self {
         self.overflow_y = Some(Box::new(overflow));
+        self
+    }
+
+    /// Continuous vertical bands for a virtual/custom list. Return the pixel
+    /// distances hidden above and below, after prepaint has clamped the list.
+    /// Unlike the boolean variant this can reveal only a fraction of a band
+    /// when the list is a fraction of a pixel away from its edge.
+    pub fn fade_scroll_y_with(mut self, distances: impl Fn(&App) -> (f32, f32) + 'static) -> Self {
+        self.distance_y = Some(Box::new(distances));
         self
     }
 
@@ -220,16 +232,27 @@ impl Element for EdgeFaded {
         cx: &mut App,
     ) {
         let (mut top, mut bottom) = (self.top, self.bottom);
+        let mut vertical_distances = self.distance_y.as_ref().map(|distances| distances(cx));
         if let Some(scroll) = &self.scroll_y {
             let scrolled = -f32::from(scroll.offset().y);
-            let max_scroll = f32::from(scroll.max_offset().y);
-            top &= scrolled > 1.0;
-            bottom &= scrolled < max_scroll - 1.0;
+            let max_scroll = f32::from(scroll.max_offset().y).max(0.0);
+            let scrolled = scrolled.clamp(0.0, max_scroll);
+            vertical_distances = Some((scrolled, max_scroll - scrolled));
         }
         if let Some(overflow) = &self.overflow_y {
             let (overflow_top, overflow_bottom) = overflow(cx);
             top &= overflow_top;
             bottom &= overflow_bottom;
+        }
+        let (mut band_top, mut band_bottom) = (self.band_top, self.band_bottom);
+        if let Some((hidden_top, hidden_bottom)) = vertical_distances {
+            band_top = Some(scroll_fade_band(hidden_top, band_top.unwrap_or(self.band)));
+            band_bottom = Some(scroll_fade_band(
+                hidden_bottom,
+                band_bottom.unwrap_or(self.band),
+            ));
+            top &= band_top.is_some_and(|band| band > 0.0);
+            bottom &= band_bottom.is_some_and(|band| band > 0.0);
         }
         let (mut left, mut right) = (self.left, self.right);
         let mut outset_right = 0.0;
@@ -239,10 +262,12 @@ impl Element for EdgeFaded {
         {
             let hidden_left = (-f32::from(scroll.offset().x)).max(0.0);
             let hidden_right = (f32::from(scroll.max_offset().x) - hidden_left).max(0.0);
-            left &= hidden_left > 0.5;
-            right &= hidden_right > 0.5;
-            band_left = Some(px(hidden_left.min(self.band)));
-            band_right = Some(px(hidden_right.min(self.band)));
+            let left_band = scroll_fade_band(hidden_left, self.band);
+            let right_band = scroll_fade_band(hidden_right, self.band);
+            left &= left_band > 0.0;
+            right &= right_band > 0.0;
+            band_left = Some(px(left_band));
+            band_right = Some(px(right_band));
         } else if let Some(scroll) = &self.scroll_x {
             let scrolled = -f32::from(scroll.offset().x);
             let max_scroll = f32::from(scroll.max_offset().x);
@@ -266,8 +291,8 @@ impl Element for EdgeFaded {
             EdgeFade {
                 bounds,
                 band: px(self.band),
-                band_top: self.band_top.map(px),
-                band_bottom: self.band_bottom.map(px),
+                band_top: band_top.map(px),
+                band_bottom: band_bottom.map(px),
                 band_left,
                 band_right,
                 top,
@@ -302,6 +327,14 @@ fn label_fade_outset(overflow: f32, band: f32) -> f32 {
     let progress = (overflow / band).clamp(0.0, 1.0);
     let eased = progress * progress * (3.0 - 2.0 * progress);
     band * (1.0 - eased)
+}
+
+fn scroll_fade_band(hidden: f32, band: f32) -> f32 {
+    if hidden.is_finite() && band.is_finite() {
+        hidden.max(0.0).min(band.max(0.0))
+    } else {
+        0.0
+    }
 }
 
 #[cfg(test)]
@@ -521,6 +554,18 @@ mod tests {
             assert!(previous - edge_alpha < 0.02);
             previous = edge_alpha;
         }
+    }
+
+    #[test]
+    fn scroll_bands_follow_real_subpixel_distance_and_clear_at_the_edge() {
+        assert_eq!(scroll_fade_band(0.0, 24.0), 0.0);
+        assert_eq!(scroll_fade_band(0.1, 24.0), 0.1);
+        assert_eq!(scroll_fade_band(1.0, 24.0), 1.0);
+        assert_eq!(scroll_fade_band(12.5, 24.0), 12.5);
+        assert_eq!(scroll_fade_band(80.0, 24.0), 24.0);
+        assert_eq!(scroll_fade_band(-0.2, 24.0), 0.0);
+        assert_eq!(scroll_fade_band(f32::NAN, 24.0), 0.0);
+        assert_eq!(scroll_fade_band(10.0, -1.0), 0.0);
     }
 }
 

@@ -26,6 +26,8 @@ use windows_numerics::Vector2;
 use crate::*;
 use gpui::*;
 
+mod font_data;
+
 #[derive(Debug)]
 struct FontInfo {
     font_family_h: HSTRING,
@@ -354,29 +356,13 @@ impl DirectWriteState {
         fonts: Vec<Cow<'static, [u8]>>,
     ) -> Result<()> {
         for font_data in fonts {
-            match font_data {
-                Cow::Borrowed(data) => unsafe {
-                    let font_file = components
-                        .in_memory_loader
-                        .CreateInMemoryFontFileReference(
-                            &components.factory,
-                            data.as_ptr().cast(),
-                            data.len() as _,
-                            None,
-                        )?;
-                    components.builder.AddFontFile(&font_file)?;
-                },
-                Cow::Owned(data) => unsafe {
-                    let font_file = components
-                        .in_memory_loader
-                        .CreateInMemoryFontFileReference(
-                            &components.factory,
-                            data.as_ptr().cast(),
-                            data.len() as _,
-                            None,
-                        )?;
-                    components.builder.AddFontFile(&font_file)?;
-                },
+            let font_file = font_data::create_font_file(
+                &components.factory,
+                &components.in_memory_loader,
+                font_data,
+            )?;
+            unsafe {
+                components.builder.AddFontFile(&font_file)?;
             }
         }
         let set = unsafe { components.builder.CreateFontSet()? };
@@ -586,15 +572,6 @@ impl DirectWriteState {
                 layout
             };
 
-            let (ascent, descent) = {
-                let mut first_metrics = [DWRITE_LINE_METRICS::default(); 4];
-                let mut line_count = 0u32;
-                text_layout.GetLineMetrics(Some(&mut first_metrics), &mut line_count)?;
-                (
-                    px(first_metrics[0].baseline),
-                    px(first_metrics[0].height - first_metrics[0].baseline),
-                )
-            };
             let mut break_ligatures = true;
             for run in &font_runs[1..] {
                 let font_info = &self.fonts[run.font_id.0];
@@ -622,6 +599,26 @@ impl DirectWriteState {
 
                 break_ligatures = !break_ligatures;
             }
+
+            apply_emoji_keycap_ranges(
+                &text_layout,
+                text_wide,
+                font_size.as_f32(),
+                &self.system_font_collection,
+            )
+            .log_err();
+
+            // Fallback/emoji ranges can change the tallest face. Read metrics
+            // only after the complete font assignment, matching Draw below.
+            let (ascent, descent) = {
+                let mut first_metrics = [DWRITE_LINE_METRICS::default(); 4];
+                let mut line_count = 0u32;
+                text_layout.GetLineMetrics(Some(&mut first_metrics), &mut line_count)?;
+                (
+                    px(first_metrics[0].baseline),
+                    px(first_metrics[0].height - first_metrics[0].baseline),
+                )
+            };
 
             let mut runs = Vec::new();
             let mut renderer_context = RendererContext {
@@ -796,7 +793,7 @@ impl DirectWriteState {
                 .GetGlyphIndices(&raw const codepoints, 1, &raw mut glyph_indices)
                 .log_err()
         }
-        .map(|_| GlyphId(glyph_indices as u32))
+        .and_then(|_| (glyph_indices != 0).then_some(GlyphId(glyph_indices as u32)))
     }
 
     fn rasterize_glyph(
@@ -1364,6 +1361,56 @@ struct GlyphLayerTextureParams {
 }
 
 struct TextRendererWrapper(IDWriteTextRenderer);
+
+/// Only explicit emoji-presentation keycaps. Ordinary digits and VS15 text
+/// presentation retain the requested face. UTF-16 offsets match DirectWrite's
+/// text ranges even when supplementary characters precede a keycap.
+fn emoji_keycap_ranges(text: &[u16]) -> impl Iterator<Item = DWRITE_TEXT_RANGE> + '_ {
+    text.windows(3).enumerate().filter_map(|(index, units)| {
+        (matches!(units[0], 0x23 | 0x2a | 0x30..=0x39) && units[1] == 0xfe0f && units[2] == 0x20e3)
+            .then_some(DWRITE_TEXT_RANGE {
+                startPosition: index as u32,
+                length: 3,
+            })
+    })
+}
+
+/// DirectWrite's nominal fallback keeps the base digit in Sarasa/Geist and
+/// maps U+20E3 separately to Segoe UI Symbol. Even VS16 then cannot form the
+/// color keycap ligature. Resolve that explicit sequence in Windows' existing
+/// emoji face as a unit; all surrounding text and CJK fallbacks stay intact.
+fn apply_emoji_keycap_ranges(
+    layout: &IDWriteTextLayout,
+    text: &[u16],
+    font_size: f32,
+    system_collection: &IDWriteFontCollection1,
+) -> Result<()> {
+    let mut ranges = emoji_keycap_ranges(text).peekable();
+    if ranges.peek().is_none() {
+        return Ok(());
+    }
+    unsafe {
+        let family = HSTRING::from("Segoe UI Emoji");
+        let fonts = system_collection.GetFontSet()?.GetMatchingFonts(
+            &family,
+            DWRITE_FONT_WEIGHT_NORMAL,
+            DWRITE_FONT_STRETCH_NORMAL,
+            DWRITE_FONT_STYLE_NORMAL,
+        )?;
+        if fonts.GetFontCount() == 0 {
+            // Keep normal platform fallback if the optional face is absent.
+            return Ok(());
+        }
+        for range in ranges {
+            layout.SetFontCollection(system_collection, range)?;
+            layout.SetFontFamilyName(&family, range)?;
+            // Decoration boundaries use alternating next_up() sizes above to
+            // break Latin ligatures. They must not split this emoji cluster.
+            layout.SetFontSize(font_size, range)?;
+        }
+    }
+    Ok(())
+}
 
 impl TextRendererWrapper {
     fn new(locale_str: HSTRING) -> Self {
@@ -1986,3 +2033,6 @@ mod tests {
         assert_eq!(next, None);
     }
 }
+
+#[cfg(test)]
+mod native_tests;

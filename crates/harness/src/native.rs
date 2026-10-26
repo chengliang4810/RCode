@@ -66,6 +66,8 @@ use crate::{CancellationToken, Harness, HarnessError, RunControls};
 /// [`AgentRunner`], which is what makes one conversation per run independent of
 /// every other (doc §10). A host keeps one of these in its harness registry for
 /// the life of the process.
+const MAX_IDLE_NATIVE_SESSIONS: usize = 12;
+
 #[derive(Clone)]
 pub struct NativeHarness {
     /// The tools every run of this harness gets. See [`tools_for`].
@@ -100,9 +102,14 @@ pub struct NativeHarness {
     /// Each run keeps its snapshot while later runs see settings changes.
     mcp: Arc<rcode_mcp::McpClientPool>,
     prompt_sessions: Arc<crate::prompts::PromptSessions>,
+    idle_sessions: Arc<tokio::sync::Semaphore>,
 }
 
 impl NativeHarness {
+    pub(super) fn idle_session_slots(&self) -> Option<Arc<tokio::sync::Semaphore>> {
+        self.data_dir.as_ref().map(|_| self.idle_sessions.clone())
+    }
+
     fn command_process_registry(&self) -> Arc<rcode_agent::processes::ProcessRegistry> {
         self.command_processes.get_or_init(|| {
             let registry = Arc::new(rcode_agent::processes::ProcessRegistry::open(self.data_dir.as_deref()));
@@ -165,6 +172,7 @@ impl NativeHarness {
             command_processes: Arc::default(),
             mcp: Arc::default(),
             prompt_sessions: Arc::default(),
+            idle_sessions: Arc::new(tokio::sync::Semaphore::new(MAX_IDLE_NATIVE_SESSIONS)),
         }
     }
 
@@ -259,6 +267,7 @@ impl NativeHarness {
             command_processes: Arc::default(),
             mcp: Arc::default(),
             prompt_sessions: Arc::default(),
+            idle_sessions: Arc::new(tokio::sync::Semaphore::new(MAX_IDLE_NATIVE_SESSIONS)),
         }
     }
 
@@ -285,6 +294,7 @@ impl NativeHarness {
             command_processes: Arc::default(),
             mcp: Arc::default(),
             prompt_sessions: Arc::default(),
+            idle_sessions: Arc::new(tokio::sync::Semaphore::new(MAX_IDLE_NATIVE_SESSIONS)),
         }
     }
 }

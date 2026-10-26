@@ -28,6 +28,7 @@ use crate::{
     icons::{self, icon},
     syntax_cache::{DocumentHighlightKey, SyntaxHighlightCache},
     theme::Theme,
+    typography::UiTextRole,
 };
 use rcode_presentation::TextKey;
 
@@ -2370,11 +2371,22 @@ impl FilesSurface {
                 .documents
                 .get(path)
                 .is_some_and(FileDocument::can_save);
+        let saving = self
+            .preview
+            .documents
+            .get(path)
+            .is_some_and(|document| matches!(document.phase, DocumentPhase::Saving));
         let save_status =
             self.preview
                 .documents
                 .get(path)
                 .and_then(|document| match &document.phase {
+                    DocumentPhase::Saving => Some((
+                        crate::l10n::localizer().text(TextKey::ConversationQueueSaving),
+                        theme.text_muted,
+                        false,
+                        None,
+                    )),
                     DocumentPhase::SaveFailed(error) => Some((
                         crate::l10n::localizer().text(TextKey::FilesSaveFailedLabel),
                         theme.danger_muted,
@@ -2510,18 +2522,34 @@ impl FilesSurface {
                         .rounded(px(crate::surface_chrome::CONTROL_RADIUS))
                         .flex()
                         .items_center()
+                        .gap(px(6.0))
                         .flex_none()
                         .font_family(theme.font_sans.clone())
-                        .text_size(px(11.0))
+                        .text_size(UiTextRole::Caption.size())
+                        .line_height(UiTextRole::Caption.line_height())
                         .text_color(color)
+                        .when(saving, |element| {
+                            element.child(crate::loaders::mini_mono_spinner(
+                                "files-save-progress",
+                                2.0,
+                                theme.text_muted,
+                                cx.entity_id(),
+                                cx,
+                            ))
+                        })
                         .when(retry, |element| {
+                            let focus_color = theme.accent;
                             element
                                 .cursor_pointer()
                                 .role(gpui::Role::Button)
+                                .tab_index(0)
                                 .aria_label(
                                     crate::l10n::localizer().text(TextKey::FilesSaveFileAria),
                                 )
                                 .hover(|style| style.bg(crate::theme::wash(0.14)))
+                                .focus_visible(move |style| {
+                                    style.bg(focus_color.opacity(0.14)).text_color(focus_color)
+                                })
                                 .on_mouse_down(gpui::MouseButton::Left, |_, window, _| {
                                     window.prevent_default()
                                 })
@@ -4093,6 +4121,213 @@ impl FilesSurface {
             DocumentPhase::Saving
         };
         self.preview.documents.insert("test.rs".into(), document);
+    }
+}
+
+/// Isolated native QA uses the actual editor/document lifecycle, without a
+/// files transport. A save can only remain pending or fail in this fixture.
+#[cfg(any(test, feature = "appshots-fixture"))]
+impl FilesSurface {
+    pub(crate) fn fixture_seed_feedback_document(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let path = "src/字体反馈.rs";
+        let source = "// 中文 English 2026：标点（全角）与 (ASCII) 🙂\nlet saved = 1;\n";
+        let mut document = FileDocument::loading(DocumentKey {
+            chat_id: self.chat_id.clone(),
+            checkout_id: self
+                .request_context
+                .as_ref()
+                .and_then(|context| context.checkout_id.clone()),
+            path: path.into(),
+        });
+        document.set_loaded(rcode_proto::WorkspaceFileText {
+            checkout_id: "fixture-checkout".into(),
+            path: path.into(),
+            text: Some(source.into()),
+            content_hash: Some("fixture-original-hash".into()),
+            size: source.len() as u64,
+            modified_at: None,
+            encoding: rcode_proto::WorkspaceTextEncoding::Utf8,
+            line_ending: Some(rcode_proto::WorkspaceLineEnding::Lf),
+            read_only_reason: None,
+            truncated: false,
+        });
+        self.presentation = super::FilesPresentation::Editor;
+        self.editor_path = Some(path.into());
+        self.preview.active = Some(path.into());
+        self.preview.documents.insert(path.into(), document);
+        let theme = Theme::of(cx).clone();
+        let editor = self
+            .ensure_editor(path, &theme, window, cx)
+            .expect("fixture editor");
+        editor.update(cx, |editor, cx| {
+            editor.set_selected_range(source.len()..source.len(), cx);
+            editor.replace("\n// 未保存的测试编辑 Bold 123，🙂\n", window, cx);
+        });
+        self.sync_preview_list();
+        cx.notify();
+    }
+
+    pub(crate) fn fixture_begin_feedback_save(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(path) = self.preview.active.clone() else {
+            return false;
+        };
+        let Some(document) = self.preview.documents.get_mut(&path) else {
+            return false;
+        };
+        let Some(editor) = &document.editor else {
+            return false;
+        };
+        let text = editor.read(cx).value().to_string();
+        let started = document.begin_save(text).is_some();
+        cx.notify();
+        started
+    }
+
+    pub(crate) fn fixture_fail_feedback_save(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(path) = self.preview.active.clone() else {
+            return false;
+        };
+        let Some(document) = self.preview.documents.get_mut(&path) else {
+            return false;
+        };
+        let Some(revision) = document.pending_save.as_ref().map(|save| save.revision) else {
+            return false;
+        };
+        let failed = document.fail_save(revision, "隔离测试：文件服务不可用");
+        cx.notify();
+        failed
+    }
+
+    pub(crate) fn fixture_feedback_save_status(&self) -> String {
+        self.preview
+            .active
+            .as_ref()
+            .and_then(|path| self.preview.documents.get(path))
+            .map(|document| {
+                format!(
+                    "{:?} · dirty={} · pending={}",
+                    document.phase,
+                    document.is_dirty(),
+                    document.pending_save.is_some()
+                )
+            })
+            .unwrap_or_else(|| "No document".into())
+    }
+}
+
+#[cfg(test)]
+mod feedback_lifecycle_tests {
+    use super::*;
+    use gpui::TestAppContext;
+
+    #[gpui::test]
+    fn pending_save_and_failure_preserve_real_editor_contents_and_retry_state(
+        cx: &mut TestAppContext,
+    ) {
+        let (files, cx) = super::super::test_support::setup(cx);
+        files.update_in(cx, |files, window, cx| {
+            files.fixture_seed_feedback_document(window, cx)
+        });
+        cx.run_until_parked();
+        let original = files.read_with(cx, |files, cx| {
+            let document = &files.preview.documents["src/字体反馈.rs"];
+            assert!(document.is_dirty());
+            assert!(document.can_save());
+            assert!(!files.preview.autosave_enabled);
+            document
+                .editor
+                .as_ref()
+                .unwrap()
+                .read(cx)
+                .value()
+                .to_string()
+        });
+        files.update(cx, |files, cx| {
+            assert!(files.fixture_begin_feedback_save(cx));
+            let document = &files.preview.documents["src/字体反馈.rs"];
+            assert_eq!(document.phase, DocumentPhase::Saving);
+            assert_eq!(document.pending_save.as_ref().unwrap().text, original);
+            assert!(!document.can_save());
+            assert!(!document.can_autosave());
+        });
+        cx.update(|window, cx| window.draw(cx).clear());
+        files.update(cx, |files, cx| {
+            assert!(files.fixture_fail_feedback_save(cx));
+            let document = &files.preview.documents["src/字体反馈.rs"];
+            assert!(matches!(document.phase, DocumentPhase::SaveFailed(_)));
+            assert!(document.pending_save.is_none());
+            assert!(document.is_dirty());
+            assert!(document.can_save());
+            assert!(!document.can_autosave());
+            assert_eq!(
+                document.saved_hash.as_deref(),
+                Some("fixture-original-hash")
+            );
+            assert_eq!(
+                document.editor.as_ref().unwrap().read(cx).value().as_ref(),
+                original
+            );
+            // The actual retry action fails truthfully with no transport. It
+            // must retain the dirty editor and must not claim a saved state.
+            files.save_document("src/字体反馈.rs".into(), cx);
+            let document = &files.preview.documents["src/字体反馈.rs"];
+            assert!(matches!(document.phase, DocumentPhase::SaveFailed(_)));
+            assert!(document.is_dirty());
+            assert!(document.pending_save.is_none());
+        });
+        cx.update(|window, cx| window.draw(cx).clear());
+    }
+
+    #[gpui::test]
+    fn edits_during_pending_save_survive_failure_and_enter_the_next_attempt(
+        cx: &mut TestAppContext,
+    ) {
+        let (files, cx) = super::super::test_support::setup(cx);
+        files.update_in(cx, |files, window, cx| {
+            files.fixture_seed_feedback_document(window, cx)
+        });
+        cx.run_until_parked();
+        let pending_revision = files.update(cx, |files, cx| {
+            assert!(files.fixture_begin_feedback_save(cx));
+            files.preview.documents["src/字体反馈.rs"]
+                .pending_save
+                .as_ref()
+                .unwrap()
+                .revision
+        });
+        files.update_in(cx, |files, window, cx| {
+            let editor = files.preview.documents["src/字体反馈.rs"]
+                .editor
+                .clone()
+                .unwrap();
+            editor.update(cx, |editor, cx| {
+                let end = editor.value().len();
+                editor.set_selected_range(end..end, cx);
+                editor.replace("// 保存中继续编辑 中文 🙂\n", window, cx);
+            });
+        });
+        cx.run_until_parked();
+        files.update(cx, |files, cx| {
+            let document = files.preview.documents.get_mut("src/字体反馈.rs").unwrap();
+            assert!(document.revision > pending_revision);
+            assert!(!document.fail_save(pending_revision.wrapping_add(99), "stale response"));
+            assert_eq!(document.phase, DocumentPhase::Saving);
+            assert!(files.fixture_fail_feedback_save(cx));
+            assert!(files.fixture_begin_feedback_save(cx));
+            let document = &files.preview.documents["src/字体反馈.rs"];
+            let next = document.pending_save.as_ref().unwrap();
+            assert!(next.revision > pending_revision);
+            assert!(next.text.ends_with("// 保存中继续编辑 中文 🙂\n"));
+            assert_eq!(document.saved_revision, 0);
+            assert_eq!(
+                document.saved_hash.as_deref(),
+                Some("fixture-original-hash")
+            );
+        });
     }
 }
 

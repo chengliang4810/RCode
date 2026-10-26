@@ -39,12 +39,15 @@ publish = false
 # Keep bundled CJK faces process-local and include their custom collection.
 [patch."https://github.com/zeronsh/zui"]
 gpui_windows = { path = "vendor/gpui_windows" }
+gpui = { path = "vendor/gpui" }
 
 # Keep stacksafe 0.1.x while using maintained procedural-macro diagnostics.
 [patch.crates-io]
 stacksafe-macro = { path = "vendor/stacksafe-macro" }
 # Preserve Loro's data model while applying container memory-safety fixes.
 sized-chunks = { path = "vendor/sized-chunks" }
+taffy = { path = "vendor/taffy" }
+loro-internal = { path = "vendor/loro-internal" }
 
 [workspace.dependencies]
 rcode-veil = { path = "crates/veil" }

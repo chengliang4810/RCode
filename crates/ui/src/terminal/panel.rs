@@ -427,6 +427,8 @@ pub struct TerminalPanel {
     /// than a permanently painted rail beside the panel: the terminal owns
     /// the cursor.
     bar: MenuScrollbarState,
+    #[cfg(feature = "appshots-fixture")]
+    fixture_seed: Option<Vec<u8>>,
     _observe: Subscription,
 }
 
@@ -451,6 +453,8 @@ impl TerminalPanel {
             selection_scroll_task: None,
             rail_tab_key: None,
             bar: MenuScrollbarState::default(),
+            #[cfg(feature = "appshots-fixture")]
+            fixture_seed: None,
             _observe: observe,
         }
     }
@@ -459,6 +463,23 @@ impl TerminalPanel {
     pub fn new_embedded(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
         let mut panel = Self::new(state, cx);
         panel.embedded = true;
+        panel
+    }
+
+    /// The production panel with VT-fed content and no PTY or RPC lifecycle.
+    #[cfg(feature = "appshots-fixture")]
+    pub(crate) fn for_text_fixture(
+        state: Entity<AppState>,
+        bytes: &[u8],
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let mut panel = Self::new(state, cx);
+        let chat = panel.selected_chat(cx);
+        panel.reserve_tab_for_chat(chat, "中文 English · VT", cx);
+        // Feed only after the first real font measurement/resizing, so the
+        // initial selection survives and output wraps to the displayed grid.
+        panel.fixture_seed = Some(bytes.to_vec());
+        panel.open = true;
         panel
     }
 
@@ -1087,6 +1108,8 @@ impl TerminalPanel {
         let (cols, rows) = (geometry.cols, geometry.rows);
         let chat = self.selected_chat(cx);
         let engine = self.engine(cx);
+        #[cfg(feature = "appshots-fixture")]
+        let fixture_seed = self.fixture_seed.take();
         let Some(tabs) = self.chats.get_mut(&chat) else {
             return;
         };
@@ -1094,10 +1117,20 @@ impl TerminalPanel {
         let Some(tab) = tabs.tabs.get_mut(active) else {
             return;
         };
-        if tab.emulator.cols() == cols as usize && tab.emulator.rows() == rows as usize {
+        let resized = tab.emulator.cols() != cols as usize || tab.emulator.rows() != rows as usize;
+        if resized {
+            tab.emulator.resize(cols, rows);
+        }
+        #[cfg(feature = "appshots-fixture")]
+        if let Some(bytes) = fixture_seed {
+            let emulator = &mut tab.emulator;
+            emulator.feed(&bytes);
+            emulator.start_selection(SelectionType::Simple, emulator.grid_point(1, 3), Side::Left);
+            emulator.update_selection(emulator.grid_point(1, 18), Side::Right);
+        }
+        if !resized {
             return;
         }
-        tab.emulator.resize(cols, rows);
         let key = tab.key;
         let target = tab.target_device_id.clone();
         if let (Some(engine), Some(tab)) = (engine, self.tab_mut(&chat, key)) {
@@ -1931,6 +1964,56 @@ impl Render for TerminalPanel {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[gpui::test]
+    fn pointer_selection_uses_the_painted_mixed_width_grid(cx: &mut gpui::TestAppContext) {
+        use gpui::{AppContext, Modifiers, point};
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+        });
+        let (panel, cx) = cx.add_window_view(|_, cx| {
+            let state = cx.new(|_| {
+                let mut state = AppState::new();
+                state.selected_chat = Some("grid-fixture".into());
+                state
+            });
+            let mut panel = TerminalPanel::new(state, cx);
+            panel.reserve_tab_for_chat("grid-fixture".into(), "grid", cx);
+            panel
+        });
+        for size in [8.0, 13.0, 20.0, 32.0] {
+            cx.update(|window, cx| {
+                cx.global_mut::<Theme>().terminal_font_size = size;
+                window.draw(cx).clear();
+            });
+            panel.update(cx, |panel, cx| {
+                panel.with_active_emulator(cx, |emulator| {
+                    emulator.feed("\x1b[2J\x1b[HA中文Ｂ🙂Z".as_bytes());
+                });
+                cx.notify();
+            });
+            cx.update(|window, cx| window.draw(cx).clear());
+            let geometry = panel.read_with(cx, |panel, _| panel.geometry.unwrap());
+            let position = |column: f32| point(
+                geometry.origin.x + px(geometry.cell_w * column),
+                geometry.origin.y + px(geometry.line_h * 0.5),
+            );
+            cx.simulate_mouse_down(position(1.1), MouseButton::Left, Modifiers::default());
+            cx.simulate_mouse_move(position(8.9), Some(MouseButton::Left), Modifiers::default());
+            cx.simulate_mouse_up(position(8.9), MouseButton::Left, Modifiers::default());
+            panel.read_with(cx, |panel, cx| {
+                let emulator = &panel.active_tab(cx).unwrap().emulator;
+                assert_eq!(emulator.selection_text().as_deref(), Some("中文Ｂ🙂"));
+                let snapshot = panel.active_grid_snapshot(cx).unwrap();
+                assert_eq!(snapshot.cursor, Some(CursorSnapshot { row: 0, col: 10 }));
+                assert!(snapshot.lines[0][1..9].iter().all(|cell| cell.selected));
+                assert!(!snapshot.lines[0][0].selected);
+                assert!(!snapshot.lines[0][9].selected);
+                assert!(panel.selection_drag.is_none());
+            });
+        }
+    }
 
     #[gpui::test]
     fn slow_trackpad_scroll_accumulates_per_terminal(cx: &mut gpui::TestAppContext) {

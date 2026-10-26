@@ -9,6 +9,9 @@ use std::sync::{
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_util::sync::CancellationToken;
 
+#[path = "support/native_idle.rs"]
+mod native_idle;
+
 struct HomeGuard(&'static str, Option<std::ffi::OsString>);
 impl Drop for HomeGuard {
     fn drop(&mut self) {
@@ -92,6 +95,10 @@ async fn scenario(stop_parent: bool, manual: bool) {
                 let parent_blocked = parent_blocked.clone();
                 jobs.spawn(async move {
                 let mut socket=socket; let request=read_request(&mut socket).await;
+                if request["messages"].to_string().contains(native_idle::FILL_MARKER) {
+                    reply(&mut socket,json!({"content":"Warm slot ready"}),"stop").await;
+                    return;
+                }
                 let main=request["tools"].as_array().unwrap().iter().any(|tool|tool["function"]["name"]=="Agent");
                 if main {
                     let step=calls.fetch_add(1,Ordering::SeqCst);
@@ -127,6 +134,7 @@ async fn scenario(stop_parent: bool, manual: bool) {
         None,
     )
     .unwrap();
+    native_idle::fill(&core, project.path()).await;
     core.workspace
         .create_chat("background-chat", None, Some(&core.device_id), None, None)
         .unwrap();

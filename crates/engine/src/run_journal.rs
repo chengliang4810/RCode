@@ -20,6 +20,8 @@ use serde::{Deserialize, Serialize};
 
 use rcode_proto::AgentEvent;
 
+const OPEN_FILE_CAP: usize = if cfg!(windows) { 512 } else { 16 };
+
 #[derive(Debug, thiserror::Error)]
 pub enum JournalError {
     #[error("io: {0}")]
@@ -100,11 +102,6 @@ impl RunJournal {
     pub fn append(&self, chat_id: &str, event: &AgentEvent) -> Result<u64, JournalError> {
         let mut files = self.lock();
         if !files.contains_key(chat_id) {
-            // Bound the open-fd set: entries were never removed, so every chat
-            // ever run held a descriptor for the process lifetime. Dropping is
-            // safe — the next append reopens and rescans the tail. The cap
-            // comfortably exceeds concurrent runs, so eviction stays rare.
-            const OPEN_FILE_CAP: usize = 16;
             if files.len() >= OPEN_FILE_CAP {
                 files.clear();
             }
@@ -141,6 +138,9 @@ impl RunJournal {
         journal.file.flush()?;
         journal.needs_newline = false;
         journal.next_seq = seq + 1;
+        if matches!(event, AgentEvent::Done { .. }) {
+            files.remove(chat_id);
+        }
         Ok(seq)
     }
 
@@ -466,6 +466,116 @@ mod tests {
             error: None,
             session_id: None,
         }
+    }
+
+    #[test]
+    fn terminal_statuses_release_cached_handles_and_resume_sequence() {
+        let directory = tempfile::tempdir().unwrap();
+        let journal = RunJournal::open(directory.path()).unwrap();
+        for (index, status) in [
+            DoneStatus::Completed,
+            DoneStatus::Interrupted,
+            DoneStatus::Errored,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let chat = format!("terminal-{index}");
+            assert_eq!(journal.append(&chat, &text("first")).unwrap(), 1);
+            let terminal = AgentEvent::Done {
+                status,
+                result: None,
+                error: None,
+                session_id: None,
+            };
+            assert_eq!(journal.append(&chat, &terminal).unwrap(), 2);
+            assert!(!journal.lock().contains_key(&chat));
+            assert_eq!(journal.append(&chat, &text("continued")).unwrap(), 3);
+            let replay = journal.replay(&chat, 2).unwrap();
+            assert_eq!(replay.len(), 1);
+            assert_eq!(replay[0].0, 3);
+        }
+    }
+
+    #[test]
+    fn active_journal_cache_covers_bounded_concurrency_and_drains_on_done() {
+        let directory = tempfile::tempdir().unwrap();
+        let journal = RunJournal::open(directory.path()).unwrap();
+        let count = OPEN_FILE_CAP.min(500);
+        for round in 1..=3 {
+            for index in 0..count {
+                let chat = format!("active-{index}");
+                assert_eq!(journal.append(&chat, &text("delta")).unwrap(), round);
+            }
+            assert_eq!(journal.lock().len(), count);
+        }
+        for index in 0..count {
+            let chat = format!("active-{index}");
+            assert_eq!(journal.append(&chat, &done()).unwrap(), 4);
+            let replay = journal.replay(&chat, 0).unwrap();
+            assert_eq!(replay.len(), 4);
+            assert!(
+                replay
+                    .iter()
+                    .enumerate()
+                    .all(|(index, (sequence, _))| *sequence == index as u64 + 1)
+            );
+        }
+        assert!(journal.lock().is_empty());
+    }
+
+    #[test]
+    fn cache_overflow_keeps_descriptor_bound_and_reopens_at_the_tail() {
+        let directory = tempfile::tempdir().unwrap();
+        let journal = RunJournal::open(directory.path()).unwrap();
+        for index in 0..=OPEN_FILE_CAP {
+            let chat = format!("overflow-{index}");
+            assert_eq!(journal.append(&chat, &text("first")).unwrap(), 1);
+            assert!(journal.lock().len() <= OPEN_FILE_CAP);
+        }
+        assert_eq!(journal.append("overflow-0", &text("second")).unwrap(), 2);
+        assert_eq!(journal.append("overflow-0", &done()).unwrap(), 3);
+        assert!(!journal.lock().contains_key("overflow-0"));
+        assert_eq!(journal.replay("overflow-0", 0).unwrap().len(), 3);
+    }
+
+    #[test]
+    fn subagent_done_does_not_release_the_parent_journal() {
+        let directory = tempfile::tempdir().unwrap();
+        let journal = RunJournal::open(directory.path()).unwrap();
+        let event = AgentEvent::Subagent {
+            parent_tool_use_id: "tool".into(),
+            event: Box::new(done()),
+        };
+        assert_eq!(journal.append("parent", &event).unwrap(), 1);
+        assert!(journal.lock().contains_key("parent"));
+        assert_eq!(journal.append("parent", &done()).unwrap(), 2);
+        assert!(!journal.lock().contains_key("parent"));
+    }
+
+    #[test]
+    fn concurrent_appenders_preserve_sequence_before_terminal_close() {
+        let directory = tempfile::tempdir().unwrap();
+        let journal = std::sync::Arc::new(RunJournal::open(directory.path()).unwrap());
+        let workers: Vec<_> = (0..8)
+            .map(|_| {
+                let journal = journal.clone();
+                std::thread::spawn(move || {
+                    (0..64)
+                        .map(|_| journal.append("shared", &text("delta")).unwrap())
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        let mut sequences: Vec<_> = workers
+            .into_iter()
+            .flat_map(|worker| worker.join().unwrap())
+            .collect();
+        sequences.sort_unstable();
+        assert_eq!(sequences, (1..=512).collect::<Vec<_>>());
+        assert_eq!(journal.append("shared", &done()).unwrap(), 513);
+        assert!(journal.lock().is_empty());
+        assert_eq!(journal.replay("shared", 0).unwrap().len(), 513);
     }
 
     #[test]

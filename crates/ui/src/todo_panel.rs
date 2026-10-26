@@ -261,17 +261,15 @@ impl TodoCache {
 // Rendering
 // ---------------------------------------------------------------------------
 
-const HEADER_HEIGHT: f32 = 32.0;
-const ROW_PAD_X: f32 = 8.0;
+const HEADER_HEIGHT: f32 = Theme::CONTROL_HEIGHT;
+const ROW_PAD_X: f32 = Theme::SPACE_SM;
 /// Rows sit in the queue tray's surface, so they share its concentric radius.
 const ROW_RADIUS: f32 = crate::queue::ROW_RADIUS;
-const TEXT_SIZE: f32 = 12.5;
-const TEXT_LINE: f32 = 17.0;
 const GLYPH_SLOT: f32 = 14.0;
 const ACTION_SIZE: f32 = 24.0;
 /// One step narrower than the queue tray, which is itself inset from the
 /// composer; stacked above a queue the todo tray steps in once more.
-const SIDE_INSET: f32 = 16.0;
+const SIDE_INSET: f32 = Theme::SPACE_LG;
 
 impl Composer {
     /// The checklist tray, hidden when absent, fully completed or dismissed.
@@ -312,7 +310,9 @@ impl Composer {
         // Dismissable whenever the turn is idle, finished or not.
         let header = self.todo_header(&chat_id, &items, summary, expanded, !live, &theme, cx);
 
-        let surface = crate::queue::queue_panel_surface(&theme, cx.has_active_drag())
+        let surface = crate::queue::queue_panel_surface(
+            &theme, cx.has_active_drag(), self.wallpaper_surface,
+        )
             .when(has_goal, |surface| surface.pb(px(4.0)).rounded_b(px(crate::queue::PANEL_RADIUS)))
             .child(header);
         let surface = if expanded {
@@ -370,11 +370,13 @@ impl Composer {
                 // Cancel the column gap and tuck the tray behind what follows
                 // (the queue tray, or the composer itself).
                 .mb(px(if has_goal { 0.0 } else { -(Theme::SPACE_SM + QUEUE_COMPOSER_OVERLAP) }))
-                .child(crate::frost::frosted(
-                    crate::queue::PANEL_RADIUS,
-                    crate::frost::MENU_BLUR,
-                    surface,
-                ))
+                .child(
+                    crate::frost::frosted(
+                        crate::queue::PANEL_RADIUS,
+                        crate::frost::MENU_BLUR,
+                        surface,
+                    ).with_wallpaper(self.wallpaper_surface),
+                )
                 .into_any_element(),
         )
     }
@@ -421,7 +423,7 @@ impl Composer {
                 .aria_label(label.clone())
                 .flex_1()
                 .min_w_0()
-                .h(px(HEADER_HEIGHT))
+                .h(crate::typography::ui_rems(HEADER_HEIGHT))
                 .px(px(ROW_PAD_X))
                 .rounded(px(ROW_RADIUS))
                 .flex()
@@ -459,7 +461,8 @@ impl Composer {
                         .flex()
                         .items_baseline()
                         .gap(px(6.0))
-                        .text_size(px(TEXT_SIZE))
+                        .text_size(crate::typography::UiTextRole::Section.size())
+                        .line_height(crate::typography::UiTextRole::Section.line_height())
                         .child(
                             div()
                                 .font_weight(gpui::FontWeight::MEDIUM)
@@ -482,7 +485,8 @@ impl Composer {
                                 .flex_1()
                                 .min_w_0()
                                 .truncate()
-                                .text_size(px(TEXT_SIZE))
+                                .text_size(crate::typography::UiTextRole::Primary.size())
+                                .line_height(crate::typography::UiTextRole::Primary.line_height())
                                 .text_color(color)
                                 .child(text),
                         )
@@ -626,7 +630,8 @@ impl Composer {
             )
             .child(
                 div()
-                    .text_size(px(11.5))
+                    .text_size(crate::typography::UiTextRole::Secondary.size())
+                    .line_height(crate::typography::UiTextRole::Secondary.line_height())
                     .text_color(theme.text_faint)
                     .child(text),
             )
@@ -652,7 +657,7 @@ fn todo_item_row(
     };
     div()
         .id(SharedString::from(format!("todo-item-{ix}")))
-        .min_h(px(26.0))
+        .min_h(crate::typography::ui_rems(Theme::CONTROL_HEIGHT))
         .px(px(ROW_PAD_X))
         .py(px(4.0))
         .flex()
@@ -661,7 +666,7 @@ fn todo_item_row(
         .child(
             div()
                 .w(px(GLYPH_SLOT))
-                .h(px(TEXT_LINE))
+                .h(crate::typography::UiTextRole::Primary.line_height())
                 .flex_none()
                 .flex()
                 .items_center()
@@ -672,8 +677,8 @@ fn todo_item_row(
             div()
                 .flex_1()
                 .min_w_0()
-                .text_size(px(TEXT_SIZE))
-                .line_height(px(TEXT_LINE))
+                .text_size(crate::typography::UiTextRole::Primary.size())
+                .line_height(crate::typography::UiTextRole::Primary.line_height())
                 .font_weight(weight)
                 .text_color(color)
                 .child(SharedString::from(item.text.clone())),

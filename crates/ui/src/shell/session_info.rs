@@ -57,9 +57,10 @@ fn info_row(theme: &Theme, glyph: AnyElement, label: SharedString) -> gpui::Div 
         .flex_row()
         .items_center()
         .gap(px(8.0))
-        .min_h(px(popover::PICKER_ROW_HEIGHT))
+        .min_h(crate::typography::ui_rems(Theme::CONTROL_HEIGHT))
         .px(px(9.0))
-        .text_size(crate::typography::ui_rems(13.0))
+        .text_size(crate::typography::UiTextRole::Primary.size())
+        .line_height(crate::typography::UiTextRole::Primary.line_height())
         .text_color(theme.text)
         .child(popover::picker_icon_slot(glyph))
         .child(div().flex_1().min_w_0().truncate().child(label))
@@ -256,6 +257,7 @@ impl Shell {
             return None;
         }
         let theme = Theme::of(cx).for_popup();
+        let wallpaper = self.conversation_wallpaper_active(cx);
         let (chat, project, branch) = {
             let state = self.state.read(cx);
             let chat = state.selected_chat_row()?.clone();
@@ -305,7 +307,8 @@ impl Shell {
                     let stat = |text: String, color: gpui::Hsla| {
                         div()
                             .font_family(theme.font_mono.clone())
-                            .text_size(px(11.0))
+                            .text_size(crate::typography::UiTextRole::Caption.size())
+                            .line_height(crate::typography::UiTextRole::Caption.line_height())
                             .text_color(color)
                             .child(SharedString::from(text))
                     };
@@ -351,7 +354,8 @@ impl Shell {
             .flex_col()
             .gap(px(popover::MENU_GAP))
             .child(project_row)
-            .children(branch_row);
+            .children(branch_row)
+            .child(self.command_processes.clone());
 
         // The session card keeps its height; only the lanes under it give.
         let card = div()
@@ -363,11 +367,19 @@ impl Shell {
             .overflow_hidden()
             .border_1()
             .border_color(theme.border)
-            .bg(popover::surface_bg(&theme))
-            .when(!docked && !theme.is_frost(), |card| card.shadow_lg())
+            .bg(crate::frost::WallpaperSurface::Card.background(
+                &theme,
+                wallpaper,
+                popover::surface_bg(&theme),
+            ))
+            .when(!docked && !theme.is_frost() && !wallpaper, |card| {
+                card.shadow_lg()
+            })
             .child(body);
-        let frosted =
-            |card| crate::frost::frosted(popover::CARD_RADIUS, crate::frost::MENU_BLUR, card);
+        let frosted = |card| {
+            crate::frost::frosted(popover::CARD_RADIUS, crate::frost::MENU_BLUR, card)
+                .with_wallpaper(wallpaper)
+        };
 
         // Docked, the card slides in from the right beside the column;
         // floating, it drops in from just above. Either way it is placed from

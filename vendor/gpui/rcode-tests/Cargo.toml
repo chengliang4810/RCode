@@ -1,0 +1,10 @@
+[package]
+name = "rcode-gpui-arena-regressions"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+log = "0.4"

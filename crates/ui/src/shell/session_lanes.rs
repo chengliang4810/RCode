@@ -265,7 +265,8 @@ fn harness_mark(harness: rcode_proto::HarnessId, theme: &Theme) -> gpui::Svg {
 fn time_label(text: SharedString, theme: &Theme) -> gpui::Div {
     div()
         .flex_none()
-        .text_size(crate::typography::ui_rems(11.0))
+        .text_size(crate::typography::UiTextRole::Caption.size())
+        .line_height(crate::typography::UiTextRole::Caption.line_height())
         .text_color(theme.text_muted)
         .child(text)
 }
@@ -278,7 +279,10 @@ fn row_title(id: String, title: SharedString) -> AnyElement {
         .child(sidebar_faded_label(
             id.into(),
             true,
-            div().line_height(px(17.0)).child(title),
+            div()
+                .text_size(crate::typography::UiTextRole::Primary.size())
+                .line_height(crate::typography::UiTextRole::Primary.line_height())
+                .child(title),
         ))
         .into_any_element()
 }
@@ -346,6 +350,7 @@ impl Shell {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let wallpaper = self.conversation_wallpaper_active(cx);
         let now = Utc::now();
         self.session_lanes.follow(&chat.id);
         let (side_chats, subagents) = {
@@ -542,8 +547,14 @@ impl Shell {
             .overflow_hidden()
             .border_1()
             .border_color(theme.border)
-            .bg(popover::surface_bg(theme))
-            .when(floating && !theme.is_frost(), |card| card.shadow_lg())
+            .bg(crate::frost::WallpaperSurface::Card.background(
+                theme,
+                wallpaper,
+                popover::surface_bg(theme),
+            ))
+            .when(floating && !theme.is_frost() && !wallpaper, |card| {
+                card.shadow_lg()
+            })
             .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
                 if this.session_lanes.bar.set_list_hovered(*hovered) {
                     cx.notify();
@@ -741,7 +752,8 @@ impl Shell {
             .child(popover::picker_icon_slot(div().into_any_element()))
             .child(
                 div()
-                    .text_size(crate::typography::ui_rems(12.0))
+                    .text_size(crate::typography::UiTextRole::Secondary.size())
+                    .line_height(crate::typography::UiTextRole::Secondary.line_height())
                     .text_color(theme.text_muted)
                     .child(crate::l10n::localizer().format_count(
                         TextKey::FilesShowMore,
