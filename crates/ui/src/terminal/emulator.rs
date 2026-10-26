@@ -116,9 +116,12 @@ fn map_color(color: AnsiColor) -> CellColor {
 }
 
 /// One rendered cell: char + colors + the flags paint cares about.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct CellSnapshot {
     pub ch: char,
+    /// Combining marks, variation selectors and joiners belonging to `ch`.
+    /// They do not consume grid columns, but must reach the native shaper.
+    pub zerowidth: Option<std::sync::Arc<[char]>>,
     pub fg: CellColor,
     pub bg: CellColor,
     pub bold: bool,
@@ -373,6 +376,7 @@ impl Emulator {
                 let cell = &row[Column(col)];
                 CellSnapshot {
                     ch: cell.c,
+                    zerowidth: cell.zerowidth().map(std::sync::Arc::from),
                     fg: map_color(cell.fg),
                     bg: map_color(cell.bg),
                     bold: cell.flags.intersects(Flags::BOLD),
@@ -420,12 +424,11 @@ impl Emulator {
     /// Test/diagnostic helper: a viewport row as trimmed text (wide-char
     /// spacers skipped).
     pub fn row_text(&self, viewport_row: usize) -> String {
-        let mut text: String = self
-            .line(viewport_row)
-            .iter()
-            .filter(|c| !c.wide_spacer)
-            .map(|c| c.ch)
-            .collect();
+        let mut text = String::new();
+        for cell in self.line(viewport_row).iter().filter(|cell| !cell.wide_spacer) {
+            text.push(cell.ch);
+            text.extend(cell.zerowidth.as_deref().unwrap_or(&[]).iter().copied());
+        }
         while text.ends_with(' ') {
             text.pop();
         }
@@ -488,7 +491,7 @@ mod tests {
         // After reset: defaults.
         assert_eq!(line[4].fg, CellColor::Foreground);
         // Bold + blue background segment starts at col 10 ("red plain " = 10).
-        let bold_cell = line[10];
+        let bold_cell = &line[10];
         assert!(bold_cell.bold);
         assert_eq!(bold_cell.bg, CellColor::Indexed(4));
     }
@@ -507,13 +510,13 @@ mod tests {
     fn inverse_and_hidden_resolve_in_display_colors() {
         let mut e = emu(10, 2);
         e.feed(b"\x1b[7mI\x1b[0m\x1b[8mH");
-        let inv = e.line(0)[0];
+        let inv = e.line(0)[0].clone();
         assert!(inv.inverse);
         assert_eq!(
             inv.display_colors(),
             (CellColor::Background, CellColor::Foreground)
         );
-        let hid = e.line(0)[1];
+        let hid = e.line(0)[1].clone();
         assert!(hid.hidden);
         let (fg, bg) = hid.display_colors();
         assert_eq!(fg, bg, "hidden text paints foreground as background");
@@ -705,6 +708,33 @@ mod tests {
         assert_eq!(line[2].ch, 'w');
         assert_eq!(e.row_text(0), "宽w");
         assert_eq!(e.cursor(), Some(CursorSnapshot { row: 0, col: 3 }));
+    }
+
+    #[test]
+    fn combining_marks_and_emoji_modifiers_survive_the_paint_snapshot() {
+        let mut e = emu(40, 3);
+        let sample = "e\u{301} 1\u{fe0f}\u{20e3} 👩\u{200d}💻";
+        e.feed(sample.as_bytes());
+        assert_eq!(e.row_text(0), sample);
+        let row = e.line(0);
+        assert_eq!(row[0].zerowidth.as_deref(), Some(&['\u{301}'][..]));
+        assert_eq!(row[2].zerowidth.as_deref(), Some(&['\u{fe0f}', '\u{20e3}'][..]));
+        e.start_selection(SelectionType::Lines, e.grid_point(0, 0), Side::Left);
+        assert_eq!(e.selection_text(), Some(format!("{sample}\n")));
+    }
+
+    #[test]
+    fn mixed_width_selection_and_cursor_share_the_emulator_columns() {
+        let mut e = emu(40, 3);
+        e.feed("A中文Ｂ🙂Z".as_bytes());
+        assert_eq!(e.cursor(), Some(CursorSnapshot { row: 0, col: 10 }));
+        e.start_selection(SelectionType::Simple, e.grid_point(0, 1), Side::Left);
+        e.update_selection(e.grid_point(0, 8), Side::Right);
+        assert_eq!(e.selection_text().as_deref(), Some("中文Ｂ🙂"));
+        let row = e.line(0);
+        assert!(!row[0].selected);
+        assert!(row[1..9].iter().all(|cell| cell.selected));
+        assert!(!row[9].selected);
     }
 
     /// Viewport row → grid line, which is the translation every selection
