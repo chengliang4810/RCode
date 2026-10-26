@@ -833,8 +833,17 @@ impl Theme {
     pub const BUBBLE_RADIUS: f32 = 16.0;
     /// Panel / card corner radius.
     pub const PANEL_RADIUS: f32 = 10.0;
+    /// Outer input/queue surface. The dock derives its smaller radius from
+    /// the same value, keeping the fill, border and blur mask concentric.
+    pub const COMPOSER_RADIUS: f32 = 22.0;
+    /// Floating cards share a shell and inset rather than separate recipes.
+    pub const POPOVER_RADIUS: f32 = 12.0;
+    pub const SURFACE_INSET: f32 = 4.0;
     /// Small control radius (buttons, chips).
     pub const CONTROL_RADIUS: f32 = 6.0;
+    /// Shared visual height for one-line interface controls and detail rows.
+    /// Consumers with text should use `ui_rems` so the row follows UI scaling.
+    pub const CONTROL_HEIGHT: f32 = 32.0;
     /// Base spacing steps.
     pub const SPACE_XS: f32 = 4.0;
     pub const SPACE_SM: f32 = 8.0;

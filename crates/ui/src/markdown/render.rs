@@ -31,10 +31,10 @@ use super::veil::{RowVeil, apply_veil, slice_spans};
 
 /// Gap between markdown blocks inside one message (the original app mdBlockGap).
 pub const MD_BLOCK_GAP: f32 = 12.0;
-/// Body text shares a 16px baseline across assistant prose and user messages.
+/// Assistant prose shares the interface's body reading role.
 /// Inline code inherits this size from its surrounding paragraph.
-pub const MD_TEXT_SIZE: f32 = 16.0;
-pub const MD_LINE_HEIGHT: f32 = MD_TEXT_SIZE * 1.75;
+pub const MD_TEXT_SIZE: f32 = crate::typography::UiTextRole::Body.base_size();
+pub const MD_LINE_HEIGHT: f32 = crate::typography::UiTextRole::Body.base_line_height();
 /// Default code block metrics; the rendered size comes from the theme.
 pub const CODE_TEXT_SIZE: f32 = 12.5;
 pub const CODE_LINE_HEIGHT: f32 = 18.0;
@@ -693,7 +693,7 @@ pub fn render_block(
                     div()
                         .flex_none()
                         .min_w(px(18.0))
-                        .h(px(MD_LINE_HEIGHT))
+                        .h(crate::typography::ui_rems(MD_LINE_HEIGHT))
                         .flex()
                         .items_center()
                         .child(
@@ -755,7 +755,7 @@ pub fn render_block(
                             .flex_none()
                             .min_w(px(18.0))
                             // Center the disc on the first text line's cap band.
-                            .h(px(MD_LINE_HEIGHT))
+                            .h(crate::typography::ui_rems(MD_LINE_HEIGHT))
                             .flex()
                             .items_center()
                             .child(
@@ -1060,7 +1060,7 @@ fn render_table(
                     .as_ref()
                     .filter(|ui| ui.source_session.is_some())
                     .map(|_| {
-                        super::link_presentation::present(&flat, px(560.), px(MD_TEXT_SIZE), window)
+                        super::link_presentation::present(&flat, px(560.), cell_font_size, window)
                     });
                 let flat = measured.as_ref().unwrap_or(&flat);
                 // Cell sources are single-line; guard anyway (same byte count,
@@ -1072,7 +1072,7 @@ fn render_table(
                 };
                 let width = f32::from(
                     text_system
-                        .shape_line(line, px(MD_TEXT_SIZE), &flat.runs, None)
+                        .shape_line(line, cell_font_size, &flat.runs, None)
                         .width(),
                 );
                 if width > *natural {
