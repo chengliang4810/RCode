@@ -17359,7 +17359,9 @@ mod settings_modal_regressions {
             adjustment: Default::default(),
         });
         init_settings_test(saved, dir.path(), cx);
-        cx.update(|cx| motion::init(motion::ReduceMotion::On, false, cx));
+        // Pin the geometry fixture without starting native OS preference reads
+        // on the deterministic test scheduler (Linux's portal uses D-Bus).
+        cx.update(|cx| motion::set_reduced_motion(cx, true));
         let (shell, cx) = cx.add_window_view(|_, cx| test_shell(dir.path(), cx));
         cx.simulate_resize(gpui::size(px(1200.0), px(800.0)));
         shell.update(cx, |shell, cx| {
