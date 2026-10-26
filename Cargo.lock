@@ -3173,7 +3173,6 @@ dependencies = [
 [[package]]
 name = "gpui"
 version = "0.2.2"
-source = "git+https://github.com/zeronsh/zui?rev=361ff20b919fdfb80199ee6d9aed725300cb7d54#361ff20b919fdfb80199ee6d9aed725300cb7d54"
 dependencies = [
  "accesskit",
  "anyhow",

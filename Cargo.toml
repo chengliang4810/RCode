@@ -39,6 +39,7 @@ publish = false
 # Keep bundled CJK faces process-local and include their custom collection.
 [patch."https://github.com/zeronsh/zui"]
 gpui_windows = { path = "vendor/gpui_windows" }
+gpui = { path = "vendor/gpui" }
 
 # Keep stacksafe 0.1.x while using maintained procedural-macro diagnostics.
 [patch.crates-io]
