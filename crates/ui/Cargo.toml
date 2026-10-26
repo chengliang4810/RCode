@@ -13,7 +13,7 @@ compact-picker-fixture = ["gpui_platform/test-support"]
 # a nested Wayland compositor has stopped requesting idle frames.
 browser-fixture = ["gpui/bench"]
 windows-render-fixture = []
-appshots-fixture = ["gpui_platform/test-support"]
+appshots-fixture = ["gpui_platform/test-support", "dep:tempfile"]
 pull-request-fixture = ["gpui_platform/test-support"]
 resource-profile = ["gpui/bench", "gpui_platform/test-support"]
 
@@ -66,6 +66,7 @@ name = "compact-picker-fixture"
 required-features = ["compact-picker-fixture"]
 
 [dependencies]
+tempfile = { workspace = true, optional = true }
 # Display text and the language it is in. The transcript's own words come
 # from here rather than being written at the call site.
 rcode-presentation.workspace = true
@@ -167,4 +168,12 @@ required-features = ["appshots-fixture"]
 
 [[example]]
 name = "link-style-fixture"
+required-features = ["appshots-fixture"]
+
+[[example]]
+name = "visual-feedback-fixture"
+required-features = ["appshots-fixture"]
+
+[[example]]
+name = "text-surfaces-fixture"
 required-features = ["appshots-fixture"]

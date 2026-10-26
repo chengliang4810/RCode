@@ -72,6 +72,8 @@ pub mod state;
 pub(crate) mod surface_chrome;
 pub mod syntax_cache;
 pub mod terminal;
+#[cfg(feature = "appshots-fixture")]
+pub mod text_surfaces_fixture;
 pub mod theme;
 pub mod theme_library;
 pub mod toast;
@@ -79,6 +81,8 @@ mod todo_panel;
 pub(crate) mod tool_images;
 pub mod transcript;
 pub mod typography;
+#[cfg(feature = "appshots-fixture")]
+pub mod visual_feedback_fixture;
 pub mod visuals;
 mod workspace_links;
 
