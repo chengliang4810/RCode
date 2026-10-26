@@ -162,5 +162,9 @@ name = "history-window-fixture"
 required-features = ["appshots-fixture"]
 
 [[example]]
+name = "thinking-preview-fixture"
+required-features = ["appshots-fixture"]
+
+[[example]]
 name = "link-style-fixture"
 required-features = ["appshots-fixture"]
