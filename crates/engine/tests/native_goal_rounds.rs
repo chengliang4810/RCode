@@ -5,6 +5,9 @@ use serde_json::{Value, json};
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+#[path = "support/native_idle.rs"]
+mod native_idle;
+
 struct HomeGuard(&'static str, Option<std::ffi::OsString>);
 impl Drop for HomeGuard {
     fn drop(&mut self) {
@@ -61,9 +64,14 @@ async fn native_goal_iterations_are_separate_durable_assistant_turns_with_shared
     let address = listener.local_addr().unwrap();
     let server = tokio::spawn(async move {
         let mut requests = vec![];
-        for phase in 0..6 {
+        let mut phase = 0;
+        while phase < 6 {
             let (mut socket, _) = listener.accept().await.unwrap();
             let request = read_request(&mut socket).await;
+            if request["messages"].to_string().contains(native_idle::FILL_MARKER) {
+                reply(&mut socket, json!({"content":"Warm slot ready"}), "stop").await;
+                continue;
+            }
             let verify = phase % 2 == 1;
             let no_tools = request
                 .get("tools")
@@ -89,6 +97,7 @@ async fn native_goal_iterations_are_separate_durable_assistant_turns_with_shared
                 format!("Goal checkpoint {}", phase / 2 + 1)
             };
             reply(&mut socket, json!({"content":text}), "stop").await;
+            phase += 1;
         }
         requests
     });
@@ -105,6 +114,7 @@ async fn native_goal_iterations_are_separate_durable_assistant_turns_with_shared
         None,
     )
     .unwrap();
+    native_idle::fill(&core, project.path()).await;
     core.workspace
         .create_chat("goal-rounds", None, Some(&core.device_id), None, None)
         .unwrap();
