@@ -2260,9 +2260,10 @@ pub(super) fn sidebar_disclosure_header(
             "sidebar-disclosure-label".into(),
             false,
             div()
-                .text_size(crate::typography::ui_rems(12.0))
+                .text_size(crate::typography::UiTextRole::Section.size())
+                .line_height(crate::typography::UiTextRole::Section.line_height())
                 .font_weight(gpui::FontWeight::MEDIUM)
-                .text_color(theme.text_muted.opacity(0.5))
+                .text_color(theme.text_muted)
                 .child(label),
         ))
         .children(count.map(|count| sidebar_count_badge(theme, count)))
@@ -2273,7 +2274,7 @@ pub(super) fn sidebar_disclosure_header(
 
 /// Section header glyphs (chevron, `+`, `…`) share the label's muted tone.
 pub(super) fn sidebar_header_glyph(theme: &Theme) -> gpui::Hsla {
-    theme.text_muted.opacity(0.5)
+    theme.text_muted
 }
 
 /// A collapsed section's session count, cut like the sidebar's pull-request
@@ -2281,16 +2282,17 @@ pub(super) fn sidebar_header_glyph(theme: &Theme) -> gpui::Hsla {
 fn sidebar_count_badge(theme: &Theme, count: usize) -> gpui::Div {
     div()
         .flex_none()
-        .h(px(16.0))
+        .min_h(crate::typography::UiTextRole::Caption.line_height())
         .px(px(4.0))
         .flex()
         .items_center()
         .rounded(px(4.0))
         .bg(crate::theme::ink(0.06))
-        .text_size(px(10.0))
+        .text_size(crate::typography::UiTextRole::Caption.size())
+        .line_height(crate::typography::UiTextRole::Caption.line_height())
         .font_weight(gpui::FontWeight::MEDIUM)
         .font_family(theme.font_mono.clone())
-        .text_color(theme.text_muted.opacity(0.7))
+        .text_color(theme.text_muted)
         .child(SharedString::from(count.to_string()))
 }
 
@@ -4416,20 +4418,17 @@ impl Shell {
             .id("spaces-filter")
             .flex_1()
             .min_w_0()
-            .h(px(29.0))
+            .h(crate::typography::ui_rems(Theme::CONTROL_HEIGHT))
             .flex()
             .flex_row()
             .items_center()
             .gap(px(Theme::SPACE_SM))
             .rounded(px(8.0))
             .px(px(Theme::SPACE_SM))
-            .text_size(crate::typography::ui_rems(13.0))
+            .text_size(crate::typography::UiTextRole::Primary.size())
+            .line_height(crate::typography::UiTextRole::Primary.line_height())
             .font_weight(gpui::FontWeight::MEDIUM)
-            .text_color(motion::hover_blend(
-                "spaces-filter",
-                theme.text.opacity(0.8),
-                theme.text,
-            ))
+            .text_color(motion::hover_blend("spaces-filter", theme.text, theme.text))
             .bg(if open {
                 theme.glass_hover()
             } else {
@@ -5092,6 +5091,7 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> SidebarSessionRows {
         let now = Utc::now();
+        let text_scale = self.settings.ui_font_size.pixels() / 16.0;
         let filter = self.settings.space_filter.clone();
         let profile_key = self.active_sidebar_pin_profile_key(cx);
         let saved_pins = self.active_sidebar_pins(cx);
@@ -5143,11 +5143,12 @@ impl Shell {
         self.sidebar_pinned_heights = pinned_rows
             .iter()
             .map(|row| {
-                sidebar_row_height(
+                sidebar_row_height_at_scale(
                     self.settings.sidebar_compact,
                     self.settings.sidebar_show_project_label,
                     row.branch.is_some(),
                     row.change_request.is_some(),
+                    text_scale,
                 )
             })
             .collect();
@@ -5233,11 +5234,12 @@ impl Shell {
                         .map_or_else(|| "regular".into(), |(key, _)| format!("regular:{key}"))
                 };
                 drag.source_index = index;
-                drag.row_height = sidebar_row_height(
+                drag.row_height = sidebar_row_height_at_scale(
                     self.settings.sidebar_compact,
                     self.settings.sidebar_show_project_label,
                     rows[index].branch.is_some(),
                     rows[index].change_request.is_some(),
+                    text_scale,
                 );
                 // Move the vacant slot to the destination instead of keeping two
                 // holes. Sample layout and paint with the same reversible easing.
@@ -5361,11 +5363,12 @@ impl Shell {
                     .sidebar_show_harness
                     .then(|| chat.config.as_ref().map(|c| c.harness))
                     .flatten();
-                let height = sidebar_row_height(
+                let height = sidebar_row_height_at_scale(
                     self.settings.sidebar_compact,
                     self.settings.sidebar_show_project_label,
                     branch.is_some(),
                     change_request.is_some(),
+                    text_scale,
                 );
                 // Only rows a jump slot can reach wear a chip; row 10 onward
                 // keeps its time-ago.
@@ -5884,23 +5887,24 @@ impl Shell {
         let shown = self.archived_shown.max(INITIAL);
         let visible_count = total.min(shown);
         let has_more = total > shown;
-        // "Show more" matches the row slot: compact rows are 29px, so the
-        // button shrinks with them instead of towering over the list.
+        // "Show more" follows the same scaled slot as compact session rows.
+        let text_scale = self.settings.ui_font_size.pixels() / 16.0;
         let more_height = if self.settings.sidebar_compact {
-            super::sidebar_row_height(true, true, false, false)
+            sidebar_row_height_at_scale(true, true, false, false, text_scale)
         } else {
-            36.0
+            Theme::CONTROL_HEIGHT * text_scale
         };
         let body_height = SIDEBAR_DISCLOSURE_BODY_INSET
             + rows
                 .iter()
                 .take(shown)
                 .map(|row| {
-                    sidebar_row_height(
+                    sidebar_row_height_at_scale(
                         self.settings.sidebar_compact,
                         self.settings.sidebar_show_project_label,
                         row.branch.is_some(),
                         row.change_request.is_some(),
+                        text_scale,
                     )
                 })
                 .sum::<f32>()
@@ -5996,8 +6000,9 @@ impl Shell {
                         .gap(px(10.0))
                         .px(px(Theme::SPACE_SM))
                         .rounded(px(6.0))
-                        .text_size(crate::typography::ui_rems(13.0))
-                        .text_color(theme.text_muted.opacity(0.55))
+                        .text_size(crate::typography::UiTextRole::Secondary.size())
+                        .line_height(crate::typography::UiTextRole::Secondary.line_height())
+                        .text_color(theme.text_muted)
                         .cursor_pointer()
                         .hover(|s| s.bg(theme.glass_hover()).text_color(theme.text))
                         .on_click(cx.listener(move |this, _, _, cx| {

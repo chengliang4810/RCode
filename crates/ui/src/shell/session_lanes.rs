@@ -265,7 +265,8 @@ fn harness_mark(harness: rcode_proto::HarnessId, theme: &Theme) -> gpui::Svg {
 fn time_label(text: SharedString, theme: &Theme) -> gpui::Div {
     div()
         .flex_none()
-        .text_size(crate::typography::ui_rems(11.0))
+        .text_size(crate::typography::UiTextRole::Caption.size())
+        .line_height(crate::typography::UiTextRole::Caption.line_height())
         .text_color(theme.text_muted)
         .child(text)
 }
@@ -278,7 +279,10 @@ fn row_title(id: String, title: SharedString) -> AnyElement {
         .child(sidebar_faded_label(
             id.into(),
             true,
-            div().line_height(px(17.0)).child(title),
+            div()
+                .text_size(crate::typography::UiTextRole::Primary.size())
+                .line_height(crate::typography::UiTextRole::Primary.line_height())
+                .child(title),
         ))
         .into_any_element()
 }
@@ -741,7 +745,8 @@ impl Shell {
             .child(popover::picker_icon_slot(div().into_any_element()))
             .child(
                 div()
-                    .text_size(crate::typography::ui_rems(12.0))
+                    .text_size(crate::typography::UiTextRole::Secondary.size())
+                    .line_height(crate::typography::UiTextRole::Secondary.line_height())
                     .text_color(theme.text_muted)
                     .child(crate::l10n::localizer().format_count(
                         TextKey::FilesShowMore,

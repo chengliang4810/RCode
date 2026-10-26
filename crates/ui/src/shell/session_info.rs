@@ -57,9 +57,10 @@ fn info_row(theme: &Theme, glyph: AnyElement, label: SharedString) -> gpui::Div 
         .flex_row()
         .items_center()
         .gap(px(8.0))
-        .min_h(px(popover::PICKER_ROW_HEIGHT))
+        .min_h(crate::typography::ui_rems(Theme::CONTROL_HEIGHT))
         .px(px(9.0))
-        .text_size(crate::typography::ui_rems(13.0))
+        .text_size(crate::typography::UiTextRole::Primary.size())
+        .line_height(crate::typography::UiTextRole::Primary.line_height())
         .text_color(theme.text)
         .child(popover::picker_icon_slot(glyph))
         .child(div().flex_1().min_w_0().truncate().child(label))
@@ -305,7 +306,8 @@ impl Shell {
                     let stat = |text: String, color: gpui::Hsla| {
                         div()
                             .font_family(theme.font_mono.clone())
-                            .text_size(px(11.0))
+                            .text_size(crate::typography::UiTextRole::Caption.size())
+                            .line_height(crate::typography::UiTextRole::Caption.line_height())
                             .text_color(color)
                             .child(SharedString::from(text))
                     };

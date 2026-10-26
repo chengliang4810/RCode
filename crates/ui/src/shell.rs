@@ -1029,32 +1029,46 @@ fn sidebar_key_order_changed(old: &[(String, f32)], new: &[(String, f32)]) -> bo
 /// Keeping this calculation beside the renderer's metrics prevents disclosure
 /// clips when view options alter the row structure.
 pub(super) fn chat_row_height(shows_branch: bool, shows_pull_request: bool) -> f32 {
-    let mut metadata_height: f32 = 0.0;
-    if shows_branch {
-        metadata_height = metadata_height.max(14.0);
-    }
-    if shows_pull_request {
-        metadata_height = metadata_height.max(16.0);
-    }
-    if metadata_height == 0.0 {
-        45.0
-    } else {
-        47.0 + metadata_height
-    }
+    sidebar_row_height_at_scale(false, true, shows_branch, shows_pull_request, 1.0)
 }
 fn sidebar_row_height(compact: bool, show_label: bool, branch: bool, pr: bool) -> f32 {
-    if compact {
-        29.0
-    } else {
-        chat_row_height(branch, pr) - if show_label { 0.0 } else { 16.0 }
+    sidebar_row_height_at_scale(compact, show_label, branch, pr, 1.0)
+}
+
+/// Rendered rows, disclosure clips and drag slots consume the same metrics.
+/// Only text scales; padding and PR artwork keep their logical-pixel size.
+fn sidebar_row_height_at_scale(
+    compact: bool,
+    show_label: bool,
+    branch: bool,
+    pr: bool,
+    scale: f32,
+) -> f32 {
+    use crate::typography::UiTextRole;
+    // PR and running-subagent badges keep a fixed 16px logical height,
+    // including in compact rows and in the project/status header line.
+    let primary_height = (UiTextRole::Primary.base_line_height() * scale).max(16.0);
+    let caption_height = (UiTextRole::Caption.base_line_height() * scale).max(16.0);
+    let mut height = 12.0 + primary_height;
+    if !compact && show_label {
+        height += 2.0 + caption_height;
     }
+    if !compact && (branch || pr) {
+        let branch_height = if branch {
+            caption_height
+        } else {
+            0.0
+        };
+        height += 2.0 + branch_height.max(if pr { 16.0 } else { 0.0 });
+    }
+    height
 }
 
 /// Flex gap between sidebar list items.
 const SIDEBAR_LIST_GAP: f32 = 2.0;
 /// Fixed vertical slot occupied by one active sidebar card.
 #[cfg(test)]
-const SIDEBAR_SESSION_SLOT: f32 = 61.0 + SIDEBAR_LIST_GAP;
+const SIDEBAR_SESSION_SLOT: f32 = 68.0 + SIDEBAR_LIST_GAP;
 const SIDEBAR_DRAG_SCROLL_BAND: f32 = 48.0;
 const SIDEBAR_DRAG_SCROLL_MAX: f32 = 12.0;
 const SIDEBAR_DRAG_SCROLL_FRAME_MS: u64 = 16;
@@ -7873,7 +7887,7 @@ impl Shell {
         } else if archived {
             text.opacity(0.55)
         } else {
-            text.opacity(0.8)
+            text
         };
         div()
             .id(SharedString::from(row_id.clone()))
@@ -7882,11 +7896,12 @@ impl Shell {
                 let row_id = row_id.clone();
                 move || row_id.clone()
             })
-            .h(px(sidebar_row_height(
+            .h(px(sidebar_row_height_at_scale(
                 compact,
                 show_label,
                 branch.is_some(),
                 change_request.is_some(),
+                self.settings.ui_font_size.pixels() / 16.0,
             )))
             .flex()
             .flex_col()
@@ -8068,8 +8083,8 @@ impl Shell {
                             format!("chat-device-{content_id}").into(),
                             true,
                             div()
-                                .text_size(crate::typography::ui_rems(11.0))
-                                .line_height(px(14.0))
+                                .text_size(crate::typography::UiTextRole::Caption.size())
+                                .line_height(crate::typography::UiTextRole::Caption.line_height())
                                 .text_color(subline)
                                 .child(popover::search_highlight(space_name, search_query, theme)),
                         ))
@@ -8120,8 +8135,8 @@ impl Shell {
                             format!("chat-title-{content_id}").into(),
                             true,
                             div()
-                                .text_size(crate::typography::ui_rems(13.0))
-                                .line_height(px(17.0))
+                                .text_size(crate::typography::UiTextRole::Primary.size())
+                                .line_height(crate::typography::UiTextRole::Primary.line_height())
                                 .child(popover::search_highlight(title, search_query, theme)),
                         )
                         .into_any_element(),
@@ -8276,8 +8291,10 @@ impl Shell {
                                 format!("chat-branch-{content_id}").into(),
                                 false,
                                 div()
-                                    .text_size(crate::typography::ui_rems(11.0))
-                                    .line_height(px(14.0))
+                                    .text_size(crate::typography::UiTextRole::Caption.size())
+                                    .line_height(
+                                        crate::typography::UiTextRole::Caption.line_height(),
+                                    )
                                     .text_color(subline)
                                     .child(popover::search_highlight(branch, search_query, theme)),
                             ))
@@ -9576,7 +9593,7 @@ impl Shell {
             .flex_row()
             .items_center()
             .gap(px(Theme::SPACE_SM))
-            .text_size(crate::typography::ui_rems(13.0))
+            .text_size(crate::typography::UiTextRole::Primary.size())
             .font_weight(gpui::FontWeight::MEDIUM)
             .text_color(if open {
                 theme.text
@@ -9631,7 +9648,9 @@ impl Shell {
             .child(sidebar_faded_label(
                 "user-menu-label".into(),
                 false,
-                div().line_height(px(17.0)).child(user_line),
+                div()
+                    .line_height(crate::typography::UiTextRole::Primary.line_height())
+                    .child(user_line),
             ));
         if self.user_menu.get().is_some() {
             let closing = self.user_menu.closing_since();
@@ -12421,7 +12440,7 @@ impl Render for Shell {
             })
             .text_color(text)
             .font(crate::typography::font(font))
-            .text_size(crate::typography::ui_rems(14.0))
+            .text_size(crate::typography::UiTextRole::Primary.size())
             .on_drag_move::<SidebarSessionDrag>(cx.listener(Self::contain_pinned_session_drag))
             .on_drop::<SidebarSessionDrag>(cx.listener(|this, _, _, cx| {
                 this.cancel_sidebar_session_transfer(cx);
@@ -13947,10 +13966,44 @@ mod tests {
 
     #[test]
     fn sidebar_chat_height_tracks_visible_metadata() {
-        assert_eq!(chat_row_height(false, false), 45.0);
-        assert_eq!(chat_row_height(true, false), 61.0);
-        assert_eq!(chat_row_height(false, true), 63.0);
-        assert_eq!(chat_row_height(true, true), 63.0);
+        assert_eq!(chat_row_height(false, false), 50.0);
+        assert_eq!(chat_row_height(true, false), 68.0);
+        assert_eq!(chat_row_height(false, true), 68.0);
+        assert_eq!(chat_row_height(true, true), 68.0);
+    }
+
+    #[test]
+    fn sidebar_scaled_rows_reserve_text_and_fixed_pr_artwork() {
+        // Small text may shrink; PR and running-subagent badges remain 16px.
+        assert_eq!(
+            sidebar_row_height_at_scale(false, true, true, false, 0.75),
+            64.0
+        );
+        assert_eq!(
+            sidebar_row_height_at_scale(false, true, false, true, 0.75),
+            64.0
+        );
+        assert_eq!(
+            sidebar_row_height_at_scale(false, true, true, true, 0.75),
+            64.0
+        );
+        // At the largest UI size the text, rather than the badge, drives the row.
+        assert_eq!(
+            sidebar_row_height_at_scale(false, true, true, false, 1.25),
+            81.0
+        );
+        assert_eq!(
+            sidebar_row_height_at_scale(false, true, false, true, 1.25),
+            77.0
+        );
+        for scale in [0.75, 0.875, 1.0, 1.125, 1.25] {
+            let compact = sidebar_row_height_at_scale(true, false, false, false, scale);
+            assert_eq!(compact, 12.0 + (20.0 * scale).max(16.0));
+            assert_eq!(
+                compact,
+                sidebar_row_height_at_scale(true, true, true, true, scale)
+            );
+        }
     }
 
     #[test]
