@@ -300,14 +300,16 @@ fn queue_hidden_attachments_label(labels: &[String], shown: usize) -> Option<Str
 /// workspace paths and chats dropped on it reach the conversation's drop zone
 /// beneath (and land in this composer); otherwise it keeps clicks and hover
 /// from falling through to the transcript behind it.
-pub(crate) fn queue_panel_surface(theme: &Theme, dragging: bool) -> gpui::Div {
+pub(crate) fn queue_panel_surface(theme: &Theme, dragging: bool, wallpaper: bool) -> gpui::Div {
     div()
         .when(!dragging, |el| el.occlude())
         .rounded_t(px(PANEL_RADIUS))
-        .bg(theme.composer_surface_bg())
+        .bg(crate::frost::WallpaperSurface::Input.background(
+            theme, wallpaper, theme.composer_surface_bg(),
+        ))
         .border_1()
         .border_color(theme.border)
-        .when(!theme.is_frost(), |el| el.shadow_lg())
+        .when(!theme.is_frost() && !wallpaper, |el| el.shadow_lg())
         // GPUI clips children to rectangles, so inset the rows to keep their
         // hover and editing backgrounds inside the tray's rounded corners.
         // The composer covers the bottom overlap; the same inset shows above it.
@@ -469,7 +471,7 @@ impl Composer {
             lifted,
         );
 
-        let panel = queue_panel_surface(&theme, cx.has_active_drag())
+        let panel = queue_panel_surface(&theme, cx.has_active_drag(), self.wallpaper_surface)
             .when(self.state.read(cx).goal.is_some(), |panel| panel.pb(px(4.0)).rounded_b(px(PANEL_RADIUS)))
             .debug_selector(|| "message-queue-panel".into())
             .on_scroll_wheel(cx.listener(|_, _, _, cx| cx.notify()))
@@ -510,7 +512,9 @@ impl Composer {
                 cx.listener(|this, _, _, cx| this.cancel_queue_drag(cx)),
             )
             .child(rows);
-        Some(crate::frost::frosted(PANEL_RADIUS, crate::frost::MENU_BLUR, panel).into_any_element())
+        Some(crate::frost::frosted(PANEL_RADIUS, crate::frost::MENU_BLUR, panel)
+            .with_wallpaper(self.wallpaper_surface)
+            .into_any_element())
     }
 
     /// One queued message: a quiet queue marker, the text, edit controls, and
@@ -2577,7 +2581,7 @@ mod scroll_tests {
                 )
                 .child(
                     div().absolute().bottom_0().w_full().child(
-                        queue_panel_surface(Theme::of(cx), false).child(queue_rows(
+                        queue_panel_surface(Theme::of(cx), false, false).child(queue_rows(
                             &self.queue,
                             px(180.0),
                             (0..self.count)
@@ -2623,7 +2627,7 @@ mod scroll_tests {
                 )
                 .child(
                     div().absolute().bottom_0().w_full().child(
-                        queue_panel_surface(Theme::of(cx), dragging)
+                        queue_panel_surface(Theme::of(cx), dragging, false)
                             .debug_selector(|| "tray".into())
                             .h(px(120.0)),
                     ),

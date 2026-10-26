@@ -111,16 +111,22 @@ fn background_preview_size(
     viewport: gpui::Size<Pixels>,
     sidebar_width: f32,
     sidebar_collapsed: bool,
+    scope: crate::settings::WallpaperScope,
 ) -> gpui::Size<Pixels> {
+    let new_thread_only = scope == crate::settings::WallpaperScope::NewThread;
     let hero_width = (f32::from(viewport.width)
-        - if sidebar_collapsed {
+        - if sidebar_collapsed || !new_thread_only {
             0.0
         } else {
             sidebar_width
         })
     .max(1.0);
-    let hero_height =
-        crate::shell::new_thread_background_height(f32::from(viewport.height)).max(1.0);
+    let hero_height = if new_thread_only {
+        crate::shell::new_thread_background_height(f32::from(viewport.height))
+    } else {
+        f32::from(viewport.height)
+    }
+    .max(1.0);
     let max_width = (f32::from(viewport.width) - 84.0).clamp(1.0, 556.0);
     let scale = (max_width / hero_width).min(258.0 / hero_height);
     gpui::size(px(hero_width * scale), px(hero_height * scale))
@@ -329,6 +335,7 @@ pub struct AppearancePage {
     effort_theme_select: widgets::SelectState,
     surface_select: widgets::SelectState,
     background_effect_select: widgets::SelectState,
+    background_scope_select: widgets::SelectState,
     reduce_motion_select: widgets::SelectState,
     import_dialog: Option<ImportDialog>,
     background_adjustment_dialog: Option<BackgroundAdjustmentDialog>,
@@ -745,6 +752,7 @@ impl AppearancePage {
             effort_theme_select: widgets::SelectState::default(),
             surface_select: widgets::SelectState::default(),
             background_effect_select: widgets::SelectState::default(),
+            background_scope_select: widgets::SelectState::default(),
             reduce_motion_select: widgets::SelectState::default(),
             import_dialog: None,
             background_adjustment_dialog: None,
@@ -2896,8 +2904,12 @@ impl AppearancePage {
             })
             .flatten();
         let ready = source.is_some();
-        let preview_size =
-            background_preview_size(viewport, settings.sidebar_width, settings.sidebar_collapsed);
+        let preview_size = background_preview_size(
+            viewport,
+            settings.sidebar_width,
+            settings.sidebar_collapsed,
+            settings.wallpaper_scope,
+        );
         if let Some(dialog) = self.background_adjustment_dialog.as_mut() {
             dialog.source = source.clone();
         }
@@ -4189,6 +4201,43 @@ impl Render for AppearancePage {
                 .into_any_element(),
         );
         if background_available {
+            use crate::settings::WallpaperScope;
+            let scope = crate::settings::current(cx).wallpaper_scope;
+            let scope_control = widgets::select(
+                "wallpaper-scope",
+                localizer.text(TextKey::SettingsAppearanceBackgroundScope),
+                &theme,
+                |page: &mut Self| &mut page.background_scope_select,
+            )
+            .options(
+                WallpaperScope::ALL
+                    .into_iter()
+                    .map(|scope| widgets::SelectOption::new(scope.label())),
+                WallpaperScope::ALL
+                    .into_iter()
+                    .position(|candidate| candidate == scope)
+                    .unwrap_or_default(),
+            )
+            .width(220.0)
+            .on_select(|_, ix, _, cx| {
+                crate::settings::set_wallpaper_scope(WallpaperScope::ALL[ix], cx);
+                cx.notify();
+            })
+            .render(&self.background_scope_select, cx);
+            settings_rows.push(
+                widgets::card_row(&theme, false)
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(160.0))
+                            .child(widgets::row_title(
+                                &theme,
+                                localizer.text(TextKey::SettingsAppearanceBackgroundScope),
+                            )),
+                    )
+                    .child(scope_control)
+                    .into_any_element(),
+            );
             use crate::settings::NewThreadBackgroundEffect;
             let effect_control = widgets::select(
                 "new-thread-background-effect",
@@ -4680,13 +4729,38 @@ mod tests {
     }
 
     #[test]
+    fn background_preview_keeps_workspace_crop_when_scope_or_panels_change() {
+        let viewport = gpui::size(px(1440.0), px(900.0));
+        let mut previous = None;
+        for scope in [
+            crate::settings::WallpaperScope::Conversation,
+            crate::settings::WallpaperScope::ConversationAndSidebar,
+            crate::settings::WallpaperScope::Workspace,
+        ] {
+            for collapsed in [false, true] {
+                let preview = background_preview_size(viewport, 260.0, collapsed, scope);
+                assert!((f32::from(preview.width) / f32::from(preview.height) - 1.6).abs() < 0.00001);
+                if let Some(previous) = previous {
+                    assert_eq!(preview, previous);
+                }
+                previous = Some(preview);
+            }
+        }
+    }
+
+    #[test]
     fn background_preview_matches_the_runtime_hero_aspect_ratio() {
         for viewport in [
             gpui::size(px(1440.0), px(900.0)),
             gpui::size(px(800.0), px(1200.0)),
         ] {
             for collapsed in [false, true] {
-                let preview = background_preview_size(viewport, 260.0, collapsed);
+                let preview = background_preview_size(
+                    viewport,
+                    260.0,
+                    collapsed,
+                    crate::settings::WallpaperScope::NewThread,
+                );
                 let hero_width = f32::from(viewport.width) - if collapsed { 0.0 } else { 260.0 };
                 let hero_height =
                     crate::shell::new_thread_background_height(f32::from(viewport.height));

@@ -257,6 +257,7 @@ impl Shell {
             return None;
         }
         let theme = Theme::of(cx).for_popup();
+        let wallpaper = self.conversation_wallpaper_active(cx);
         let (chat, project, branch) = {
             let state = self.state.read(cx);
             let chat = state.selected_chat_row()?.clone();
@@ -366,11 +367,19 @@ impl Shell {
             .overflow_hidden()
             .border_1()
             .border_color(theme.border)
-            .bg(popover::surface_bg(&theme))
-            .when(!docked && !theme.is_frost(), |card| card.shadow_lg())
+            .bg(crate::frost::WallpaperSurface::Card.background(
+                &theme,
+                wallpaper,
+                popover::surface_bg(&theme),
+            ))
+            .when(!docked && !theme.is_frost() && !wallpaper, |card| {
+                card.shadow_lg()
+            })
             .child(body);
-        let frosted =
-            |card| crate::frost::frosted(popover::CARD_RADIUS, crate::frost::MENU_BLUR, card);
+        let frosted = |card| {
+            crate::frost::frosted(popover::CARD_RADIUS, crate::frost::MENU_BLUR, card)
+                .with_wallpaper(wallpaper)
+        };
 
         // Docked, the card slides in from the right beside the column;
         // floating, it drops in from just above. Either way it is placed from

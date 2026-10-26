@@ -350,6 +350,7 @@ impl Shell {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let wallpaper = self.conversation_wallpaper_active(cx);
         let now = Utc::now();
         self.session_lanes.follow(&chat.id);
         let (side_chats, subagents) = {
@@ -546,8 +547,14 @@ impl Shell {
             .overflow_hidden()
             .border_1()
             .border_color(theme.border)
-            .bg(popover::surface_bg(theme))
-            .when(floating && !theme.is_frost(), |card| card.shadow_lg())
+            .bg(crate::frost::WallpaperSurface::Card.background(
+                theme,
+                wallpaper,
+                popover::surface_bg(theme),
+            ))
+            .when(floating && !theme.is_frost() && !wallpaper, |card| {
+                card.shadow_lg()
+            })
             .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
                 if this.session_lanes.bar.set_list_hovered(*hovered) {
                     cx.notify();

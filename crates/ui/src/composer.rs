@@ -5640,6 +5640,7 @@ fn slash_error_message(err: &RpcError, skill: bool) -> SharedString {
 }
 
 pub struct Composer {
+    pub(crate) wallpaper_surface: bool,
     pub(crate) state: Entity<AppState>,
     pub(crate) input: Entity<ComposerInput>,
     /// Draft displaced while a queued message occupies the composer.
@@ -5812,6 +5813,21 @@ pub struct Composer {
 impl EventEmitter<ComposerEvent> for Composer {}
 
 impl Composer {
+    pub(crate) fn set_wallpaper_surface(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        if self.wallpaper_surface != enabled {
+            self.wallpaper_surface = enabled;
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn input_surface_bg(&self, theme: &Theme) -> gpui::Hsla {
+        crate::frost::WallpaperSurface::Input.background(
+            theme,
+            self.wallpaper_surface,
+            theme.composer_surface_bg(),
+        )
+    }
+
     pub(crate) fn set_dock_frame(
         &mut self,
         frame: crate::composer_dock::DockFrame,
@@ -6049,6 +6065,7 @@ impl Composer {
             #[cfg(test)]
             model_bounds: Default::default(),
             dock_frame: None,
+            wallpaper_surface: false,
             dock_reflow: Default::default(),
             dock_height_changed: false,
             dock_clearance_correction: 0.0,
@@ -9673,8 +9690,8 @@ impl Composer {
                 .rounded(px(COMPOSER_RADIUS))
                 .border_1()
                 .border_color(theme.border)
-                .bg(theme.composer_surface_bg())
-                .when(!theme.is_frost(), |el| el.shadow_lg())
+                .bg(self.input_surface_bg(&theme))
+                .when(!theme.is_frost() && !self.wallpaper_surface, |el| el.shadow_lg())
                 .flex()
                 .flex_col()
                 .child(
@@ -9781,7 +9798,9 @@ impl Composer {
                                 .on_click(cx.listener(|this, _, _, cx| this.wizard_advance(cx))),
                         ),
                 );
-        crate::frost::frosted(COMPOSER_RADIUS, crate::frost::MENU_BLUR, panel).into_any_element()
+        crate::frost::frosted(COMPOSER_RADIUS, crate::frost::MENU_BLUR, panel)
+            .with_wallpaper(self.wallpaper_surface)
+            .into_any_element()
     }
 
     fn render_send_button(
@@ -10518,8 +10537,8 @@ impl Render for Composer {
             .rounded(px(surface_radius))
             .border_1()
             .border_color(pill_border)
-            .bg(theme.composer_surface_bg())
-            .when(!theme.is_frost(), |el| el.shadow_lg());
+            .bg(self.input_surface_bg(&theme))
+            .when(!theme.is_frost() && !self.wallpaper_surface, |el| el.shadow_lg());
         // The pill's bottom edge is stationary on screen (the composer sits at
         // the bottom of the shell column; growth moves the TOP edge), so the
         // controls pin to the bottom and only the text glides with the reveal
@@ -10718,7 +10737,10 @@ impl Render for Composer {
             .id("composer-surface")
             .flex_none()
             .debug_selector(|| "composer-surface".into())
-            .child(crate::frost::frosted(surface_radius, 16.0, body))
+            .child(
+                crate::frost::frosted(surface_radius, 16.0, body)
+                    .with_wallpaper(self.wallpaper_surface),
+            )
             .child({
                 let measured = self.surface_bounds.clone();
                 // All prepaint completes before any paint. The background

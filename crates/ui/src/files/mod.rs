@@ -296,6 +296,7 @@ struct EditorContextMenu {
 }
 
 pub struct FilesSurface {
+    wallpaper_surface: bool,
     memory_directory: Option<String>,
     surface_id: gpui::EntityId,
     interaction_generation: u64,
@@ -396,6 +397,13 @@ impl Render for FilesSurface {
 }
 
 impl FilesSurface {
+    pub(crate) fn set_wallpaper_surface(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        if self.wallpaper_surface != enabled {
+            self.wallpaper_surface = enabled;
+            cx.notify();
+        }
+    }
+
     fn render_explorer(
         &mut self,
         theme: &crate::theme::Theme,
@@ -680,6 +688,7 @@ impl FilesSurface {
                 .ok();
         });
         let mut surface = Self {
+            wallpaper_surface: false,
             surface_id: cx.entity_id(),
             interaction_generation: 0,
             effective_checkout_id: None,
@@ -1299,7 +1308,10 @@ impl FilesSurface {
         use gpui::Focusable;
         let include_ignored = self.tree.include_ignored();
         let search_focus = self.search.focus_handle(cx);
-        toolbar(theme)
+        let header = toolbar(theme)
+            .when(self.wallpaper_surface, |header| header.bg(
+                crate::frost::WallpaperSurface::Toolbar.background(theme, true, theme.surface),
+            ))
             .id("files-explorer-header")
             .debug_selector(|| "files-explorer-header".into())
             .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
@@ -1310,6 +1322,9 @@ impl FilesSurface {
             }))
             .child(
                 crate::surface_chrome::input()
+                    .when(self.wallpaper_surface, |input| input.bg(
+                        crate::frost::WallpaperSurface::Card.background(theme, true, theme.input_bg),
+                    ))
                     .id("files-search")
                     .debug_selector(|| "files-search".into())
                     .overflow_hidden()
@@ -1365,7 +1380,14 @@ impl FilesSurface {
                     }),
                 ),
             )
-            .into_any_element()
+            .into_any_element();
+        if self.wallpaper_surface {
+            crate::frost::frosted(0.0, crate::frost::MENU_BLUR, header)
+                .with_wallpaper(true)
+                .into_any_element()
+        } else {
+            header
+        }
     }
 }
 
@@ -1403,6 +1425,11 @@ mod explorer_tests {
         assert_eq!(header.size.height, px(crate::surface_chrome::HEADER_HEIGHT));
         let bounds = cx.debug_bounds("files-search").unwrap();
         assert!(bounds.top() >= header.top() && bounds.bottom() <= header.bottom());
+        for wallpaper in [true, false, true] {
+            files.update(cx, |files, cx| files.set_wallpaper_surface(wallpaper, cx));
+            cx.update(|window, cx| window.draw(cx).clear());
+            assert_eq!(cx.debug_bounds("files-search"), Some(bounds));
+        }
         // Click the field padding, not just the input's text hitbox.
         let padding = gpui::point(bounds.left() + px(2.0), bounds.center().y);
         cx.simulate_click(padding, Modifiers::default());

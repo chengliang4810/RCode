@@ -143,6 +143,34 @@ pub enum NewThreadBackgroundEffect {
     Scanlines,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum WallpaperScope {
+    NewThread,
+    Conversation,
+    ConversationAndSidebar,
+    #[default]
+    Workspace,
+}
+
+impl WallpaperScope {
+    pub const ALL: [Self; 4] = [
+        Self::NewThread,
+        Self::Conversation,
+        Self::ConversationAndSidebar,
+        Self::Workspace,
+    ];
+
+    pub fn label(self) -> String {
+        crate::l10n::localizer().text(match self {
+            Self::NewThread => TextKey::SettingsAppearanceBackgroundScopeNewThread,
+            Self::Conversation => TextKey::SettingsAppearanceBackgroundScopeConversation,
+            Self::ConversationAndSidebar => TextKey::SettingsAppearanceBackgroundScopeSidebar,
+            Self::Workspace => TextKey::SettingsAppearanceBackgroundScopeWorkspace,
+        })
+    }
+}
+
 impl NewThreadBackgroundEffect {
     pub const ALL: [Self; 5] = [
         Self::None,
@@ -763,6 +791,14 @@ pub fn set_new_thread_background_effect(effect: NewThreadBackgroundEffect, cx: &
     }
 }
 
+pub fn set_wallpaper_scope(scope: WallpaperScope, cx: &mut App) {
+    if update(SavePolicy::Immediate, cx, |settings| {
+        settings.wallpaper_scope = scope;
+    }) {
+        cx.refresh_windows();
+    }
+}
+
 pub fn set_new_thread_background_adjustment(
     adjustment: NewThreadBackgroundAdjustment,
     cx: &mut App,
@@ -1309,9 +1345,11 @@ pub struct UiSettings {
     pub accent: rcode_theme::AccentSelection,
     /// Glass policy, independent from the selected appearance, theme, and accent.
     pub surface: rcode_theme::SurfacePreference,
-    /// Optional device-local artwork behind the blank new-thread composer.
+    /// Optional device-local artwork, shared by the selected workspace regions.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub new_thread_composer_background: Option<NewThreadComposerBackground>,
+    /// Missing in older settings: default to the whole workspace, excluding Settings.
+    pub wallpaper_scope: WallpaperScope,
     /// Device-local folder used by the random wallpaper shortcut.
     pub wallpaper_folder: Option<PathBuf>,
     pub wallpaper_source: Option<PathBuf>,
@@ -1414,6 +1452,7 @@ impl Default for UiSettings {
             accent: rcode_theme::AccentSelection::default(),
             surface: rcode_theme::SurfacePreference::default(),
             new_thread_composer_background: None,
+            wallpaper_scope: WallpaperScope::default(),
             wallpaper_folder: None,
             wallpaper_source: None,
             wallpaper_history: Vec::new(),
@@ -2038,6 +2077,7 @@ impl UiSettings {
             accent,
             surface,
             new_thread_composer_background,
+            wallpaper_scope,
             wallpaper_folder,
             wallpaper_source,
             wallpaper_history,
@@ -2783,10 +2823,26 @@ mod tests {
         .unwrap();
 
         let loaded = UiSettings::load(dir.path());
+        assert_eq!(loaded.wallpaper_scope, WallpaperScope::Workspace);
         assert_eq!(
             loaded.new_thread_composer_background.unwrap().adjustment,
             NewThreadBackgroundAdjustment::default()
         );
+    }
+
+    #[gpui::test]
+    fn wallpaper_scope_defaults_migrates_and_persists_each_choice(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let legacy: UiSettings = serde_json::from_str("{}").unwrap();
+        assert_eq!(legacy.wallpaper_scope, WallpaperScope::Workspace);
+        cx.update(|cx| {
+            init(legacy, dir.path(), cx);
+            for scope in WallpaperScope::ALL {
+                set_wallpaper_scope(scope, cx);
+                assert_eq!(current(cx).wallpaper_scope, scope);
+                assert_eq!(UiSettings::load(dir.path()).wallpaper_scope, scope);
+            }
+        });
     }
 
     #[test]
@@ -3195,6 +3251,7 @@ mod tests {
                     zoom: 1.8,
                 },
             }),
+            wallpaper_scope: WallpaperScope::ConversationAndSidebar,
             wallpaper_folder: Some("/tmp/wallpapers".into()),
             wallpaper_source: Some("/tmp/wallpapers/background.png".into()),
             wallpaper_history: vec!["/tmp/wallpapers/background.png".into()],
@@ -3215,6 +3272,7 @@ mod tests {
         assert!(json.contains(r#""mathSize": 135"#));
         assert!(json.contains(r#""openWebLinksInRCode": false"#));
         assert!(json.contains(r#""newThreadBackgroundEffect": "ascii""#));
+        assert!(json.contains(r#""wallpaperScope": "conversationAndSidebar""#));
         assert!(json.contains(r#""focalX": 0.25"#));
         assert!(json.contains(r#""focalY": 0.75"#));
         assert!(json.contains(r#""zoom": 1.8"#));

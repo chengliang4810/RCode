@@ -97,6 +97,7 @@ mod sidebar_sections;
 pub(crate) mod spaces;
 mod viewport_row;
 mod thread_search;
+mod workspace_background;
 use side_chats::SideChatTab;
 mod tabs;
 
@@ -10338,6 +10339,66 @@ impl Shell {
             )
     }
 
+    fn background_frame(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> crate::new_thread_background_effects::ArtworkFrame {
+        let ui_settings = settings::current(cx);
+        let theme = Theme::of(cx).clone();
+        let new_thread_background_setting = ui_settings.new_thread_composer_background;
+        let new_thread_background_effect = ui_settings.new_thread_background_effect;
+        let new_thread_background_adjustment = new_thread_background_setting
+            .as_ref()
+            .map(|background| background.adjustment)
+            .unwrap_or_default();
+        let frame_time = self.render_time.unwrap_or_else(std::time::Instant::now);
+        // Prewarm even in an established thread. Decode/effect work is not
+        // contingent on a hero measurement or a navigation gesture.
+        let artwork = new_thread_background_setting
+            .as_ref()
+            .and_then(|background| {
+                crate::new_thread_background_effects::prepare(
+                    new_thread_background_effect,
+                    &theme,
+                    std::path::Path::new(&background.path),
+                    cx,
+                )
+            });
+        self.new_thread_artwork_ready.frame(
+            artwork,
+            new_thread_background_setting
+                .as_ref()
+                .map(|background| std::path::Path::new(&background.path)),
+            new_thread_background_adjustment,
+            new_thread_background_setting.is_some(),
+            self.reduced_motion,
+            frame_time,
+        )
+    }
+
+    fn conversation_wallpaper_active(&self, cx: &App) -> bool {
+        let settings = settings::current(cx);
+        matches!(self.route, Route::Chat)
+            && settings.new_thread_composer_background.is_some()
+            && (settings.wallpaper_scope != settings::WallpaperScope::NewThread
+                || self.state.read(cx).selected_chat.is_none())
+    }
+
+    fn workspace_wallpaper_active(&self, cx: &App) -> bool {
+        let settings = settings::current(cx);
+        matches!(self.route, Route::Chat)
+            && settings.wallpaper_scope == settings::WallpaperScope::Workspace
+            && settings.new_thread_composer_background.is_some()
+    }
+
+    fn workspace_panel_bg(&self, theme: &Theme, cx: &App) -> gpui::Hsla {
+        if self.workspace_wallpaper_active(cx) {
+            theme.panel_bg().opacity(0.45)
+        } else {
+            theme.panel_bg()
+        }
+    }
+
     fn render_main(
         &mut self,
         window: &mut Window,
@@ -10380,35 +10441,9 @@ impl Shell {
             (has_spaces || no_project || has_appshots) && has_selection,
         );
         let ui_settings = settings::current(cx);
-        let new_thread_background_setting = ui_settings.new_thread_composer_background;
-        let new_thread_background_effect = ui_settings.new_thread_background_effect;
-        let new_thread_background_adjustment = new_thread_background_setting
-            .as_ref()
-            .map(|background| background.adjustment)
-            .unwrap_or_default();
         let frame_time = self.render_time.unwrap_or_else(std::time::Instant::now);
-        // Prewarm even in an established thread. Decode/effect work is not
-        // contingent on a hero measurement or a navigation gesture.
-        let artwork = new_thread_background_setting
-            .as_ref()
-            .and_then(|background| {
-                crate::new_thread_background_effects::prepare(
-                    new_thread_background_effect,
-                    theme,
-                    std::path::Path::new(&background.path),
-                    cx,
-                )
-            });
-        let artwork_frame = self.new_thread_artwork_ready.frame(
-            artwork,
-            new_thread_background_setting
-                .as_ref()
-                .map(|background| std::path::Path::new(&background.path)),
-            new_thread_background_adjustment,
-            new_thread_background_setting.is_some(),
-            self.reduced_motion,
-            frame_time,
-        );
+        let new_thread_artwork = (ui_settings.wallpaper_scope == settings::WallpaperScope::NewThread)
+            .then(|| self.background_frame(cx));
         let dock_frame =
             self.composer_dock
                 .borrow_mut()
@@ -10416,8 +10451,14 @@ impl Shell {
         if dock_frame.active {
             self.motion_active.set(true);
         }
-        self.composer
-            .update(cx, |composer, cx| composer.set_dock_frame(dock_frame, cx));
+        let wallpaper_surface = self.conversation_wallpaper_active(cx)
+            || (ui_settings.new_thread_composer_background.is_some()
+                && ui_settings.wallpaper_scope == settings::WallpaperScope::NewThread
+                && dock_frame.active);
+        self.composer.update(cx, |composer, cx| {
+            composer.set_wallpaper_surface(wallpaper_surface, cx);
+            composer.set_dock_frame(dock_frame, cx);
+        });
         // The session card: docked, the transcript holds its room free on
         // the right and the composer follows the column left by half of it;
         // over a column too tight for that, it floats once opened.
@@ -10452,36 +10493,38 @@ impl Shell {
                 ),
             )));
         let term_h = self.terminal_geometry.get().height;
-        let new_thread_background_layer = (!has_selection || dock_frame.active).then(|| {
-            if artwork_frame.active {
-                window.request_animation_frame();
-            }
-            let width = (self.viewport_width - self.sidebar_now()).max(0.0);
-            let bounds = self.composer.read(cx).surface_bounds();
-            let opacity = new_thread_background_opacity(theme.is_frost());
-            div()
-                .absolute()
-                .inset_0()
-                .child(new_thread_background(
-                    artwork_frame.previous,
-                    artwork_frame.previous_adjustment,
-                    self.viewport_height,
-                    width,
-                    bounds.clone(),
-                    dock_frame.dissolve(),
-                    (1.0 - artwork_frame.mix) * opacity,
-                ))
-                .child(new_thread_background(
-                    artwork_frame.current,
-                    artwork_frame.current_adjustment,
-                    self.viewport_height,
-                    width,
-                    bounds,
-                    dock_frame.dissolve(),
-                    artwork_frame.mix * opacity,
-                ))
-                .into_any_element()
-        });
+        let new_thread_background_layer = new_thread_artwork
+            .filter(|_| !has_selection || dock_frame.active)
+            .map(|artwork_frame| {
+                if artwork_frame.active {
+                    window.request_animation_frame();
+                }
+                let width = (self.viewport_width - self.sidebar_now()).max(0.0);
+                let bounds = self.composer.read(cx).surface_bounds();
+                let opacity = new_thread_background_opacity(theme.is_frost());
+                div()
+                    .absolute()
+                    .inset_0()
+                    .child(new_thread_background(
+                        artwork_frame.previous,
+                        artwork_frame.previous_adjustment,
+                        self.viewport_height,
+                        width,
+                        bounds.clone(),
+                        dock_frame.dissolve(),
+                        (1.0 - artwork_frame.mix) * opacity,
+                    ))
+                    .child(new_thread_background(
+                        artwork_frame.current,
+                        artwork_frame.current_adjustment,
+                        self.viewport_height,
+                        width,
+                        bounds,
+                        dock_frame.dissolve(),
+                        artwork_frame.mix * opacity,
+                    ))
+                    .into_any_element()
+            });
 
         // Content outlet: selected chat → transcript; nothing selected → the
         // centered new-thread composition; no spaces at all → the onboarding
@@ -11198,7 +11241,7 @@ impl Shell {
         // height with a left hairline, glass-friendly like the terminal dock
         // (translucent over the frost; solid otherwise). The resize grabber
         // lives outside this clipped container, on the root layout's seam.
-        let panel_bg = theme.panel_bg();
+        let panel_bg = self.workspace_panel_bg(&theme, cx);
         let panel = div()
             .id("right-pane-focus")
             .debug_selector(|| "right-pane".into())
@@ -12800,6 +12843,24 @@ impl Render for Shell {
                     }
                 });
 
+                let wallpaper_scope = settings::current(cx).wallpaper_scope;
+                let workspace_background = (on_chat
+                    && wallpaper_scope != settings::WallpaperScope::NewThread)
+                    .then(|| {
+                        let frame = self.background_frame(cx);
+                        if frame.active {
+                            window.request_animation_frame();
+                        }
+                        workspace_background::render(
+                            frame,
+                            wallpaper_scope,
+                            self.viewport_width,
+                            self.viewport_height,
+                            self.sidebar_now(),
+                            self.right_visible_width(cx) + self.files_visible_width(cx),
+                            Self::window_corner_radius(window),
+                        )
+                    });
                 let sidebar = self.render_sidebar(cx);
                 // A collapsed or fit-hidden sidebar has no seam: the window's
                 // own left edge sits there, and a press must resize the window
@@ -12965,7 +13026,8 @@ impl Render for Shell {
                     .child(self.render_titlebar_cluster(cx))
                     .children(self.render_sidebar_options_titlebar(cx))
                     .children(overlays);
-                root.child(sidebar_tone)
+                root.children(workspace_background)
+                    .child(sidebar_tone)
                     .child(motion::fade_in("phase-app", page))
             }
             GatePhase::Loading => root, // splash overlay covers boot
@@ -17272,6 +17334,104 @@ mod settings_modal_regressions {
             },
             cx,
         )
+    }
+
+    #[gpui::test]
+    fn workspace_background_covers_chats_and_excludes_settings(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("background.png");
+        let image = image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
+            16,
+            16,
+            image::Rgba([40, 100, 180, 255]),
+        ));
+        image.save(&path).unwrap();
+        crate::new_thread_background_effects::PreloadedArtwork::load(
+            &image,
+            settings::NewThreadBackgroundEffect::None,
+            true,
+        )
+        .install(&path);
+        let mut saved = settings::UiSettings::default();
+        saved.new_thread_composer_background = Some(settings::NewThreadComposerBackground {
+            path: path.to_string_lossy().into_owned(),
+            name: "background.png".into(),
+            adjustment: Default::default(),
+        });
+        init_settings_test(saved, dir.path(), cx);
+        cx.update(|cx| motion::init(motion::ReduceMotion::On, false, cx));
+        let (shell, cx) = cx.add_window_view(|_, cx| test_shell(dir.path(), cx));
+        cx.simulate_resize(gpui::size(px(1200.0), px(800.0)));
+        shell.update(cx, |shell, cx| {
+            shell.debug_gate = Some(GatePhase::Ready);
+            shell.splash = SplashPhase::Gone;
+            shell.reduced_motion = true;
+            shell.state.update(cx, |state, _| {
+                state.no_project = true;
+                state.selected_chat = Some("existing".into());
+            });
+            shell.active_chat = "existing".into();
+            shell.toggle_right_pane(cx);
+        });
+        for selected in [true, false] {
+            shell.update(cx, |shell, cx| {
+                shell.state.update(cx, |state, _| {
+                    state.selected_chat = selected.then(|| "existing".into());
+                });
+            });
+            for scope in settings::WallpaperScope::ALL {
+                cx.update(|_, cx| settings::set_wallpaper_scope(scope, cx));
+                cx.update(|window, cx| window.draw(cx).clear());
+                let bounds = cx.debug_bounds("workspace-wallpaper");
+                shell.read_with(cx, |shell, cx| {
+                    assert_eq!(
+                        shell.composer.read(cx).wallpaper_surface,
+                        scope != settings::WallpaperScope::NewThread || !selected,
+                    );
+                });
+                if scope == settings::WallpaperScope::NewThread {
+                    assert!(bounds.is_none());
+                    continue;
+                }
+                let bounds = bounds.expect("workspace background must mount on both chat states");
+                shell.read_with(cx, |shell, cx| {
+                    let left = if scope == settings::WallpaperScope::Conversation {
+                        shell.sidebar_now()
+                    } else {
+                        0.0
+                    };
+                    let right = if scope == settings::WallpaperScope::Workspace {
+                        0.0
+                    } else {
+                        shell.right_visible_width(cx) + shell.files_visible_width(cx)
+                    };
+                    assert!((f32::from(bounds.left()) - left).abs() <= 1.0);
+                    assert!(
+                        (f32::from(bounds.right()) - (1200.0 - right)).abs() <= 1.0,
+                        "scope={scope:?} selected={selected} bounds={bounds:?} viewport={} sidebar={} right={right}",
+                        shell.viewport_width, shell.sidebar_now(),
+                    );
+                    assert_eq!(bounds.size.height, px(800.0));
+                });
+            }
+        }
+        shell.update(cx, |shell, cx| {
+            shell.open_settings(SettingsSection::Appearance, cx)
+        });
+        cx.update(|window, cx| window.draw(cx).clear());
+        assert!(cx.debug_bounds("workspace-wallpaper").is_none());
+        shell.read_with(cx, |shell, cx| {
+            assert!(!shell.workspace_wallpaper_active(cx))
+        });
+        shell.update(cx, |shell, cx| {
+            settings::remove_new_thread_composer_background(cx).unwrap();
+            shell.close_settings(cx);
+        });
+        cx.update(|window, cx| window.draw(cx).clear());
+        shell.read_with(cx, |shell, cx| {
+            assert!(!shell.composer.read(cx).wallpaper_surface);
+            assert!(!shell.conversation_wallpaper_active(cx));
+        });
     }
 
     #[test]

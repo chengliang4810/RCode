@@ -131,7 +131,12 @@ settings-appearance-reduce-motion-off = 即使系统要求减少动态效果，�
 settings-appearance-pause-animations = 后台时暂停动画
 settings-appearance-pause-animations-detail = RCode 不是当前活动窗口时暂停动画。
 
-settings-appearance-background = 新会话背景
+settings-appearance-background = 背景图片
+settings-appearance-background-scope = 背景范围
+settings-appearance-background-scope-new-thread = 仅新会话
+settings-appearance-background-scope-conversation = 对话区域
+settings-appearance-background-scope-sidebar = 对话区域与左侧栏
+settings-appearance-background-scope-workspace = 整个工作区
 settings-appearance-background-adjust = 调整
 settings-appearance-background-replace = 更换图片
 settings-appearance-background-remove = 移除
@@ -139,7 +144,7 @@ settings-appearance-background-choose = 选择图片
 settings-appearance-background-unavailable = 图片不可用
 settings-appearance-background-choose-replacement = 重新选择一张或移除。
 settings-appearance-background-none = 未选择图片
-settings-appearance-choose-background = 选择新会话输入区背景
+settings-appearance-choose-background = 选择背景图片
 
 settings-appearance-adjust-background = 调整背景
 settings-appearance-adjust-background-detail = 拖动调整位置，滚动或双指缩放。

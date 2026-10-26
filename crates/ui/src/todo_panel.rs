@@ -310,7 +310,9 @@ impl Composer {
         // Dismissable whenever the turn is idle, finished or not.
         let header = self.todo_header(&chat_id, &items, summary, expanded, !live, &theme, cx);
 
-        let surface = crate::queue::queue_panel_surface(&theme, cx.has_active_drag())
+        let surface = crate::queue::queue_panel_surface(
+            &theme, cx.has_active_drag(), self.wallpaper_surface,
+        )
             .when(has_goal, |surface| surface.pb(px(4.0)).rounded_b(px(crate::queue::PANEL_RADIUS)))
             .child(header);
         let surface = if expanded {
@@ -368,11 +370,13 @@ impl Composer {
                 // Cancel the column gap and tuck the tray behind what follows
                 // (the queue tray, or the composer itself).
                 .mb(px(if has_goal { 0.0 } else { -(Theme::SPACE_SM + QUEUE_COMPOSER_OVERLAP) }))
-                .child(crate::frost::frosted(
-                    crate::queue::PANEL_RADIUS,
-                    crate::frost::MENU_BLUR,
-                    surface,
-                ))
+                .child(
+                    crate::frost::frosted(
+                        crate::queue::PANEL_RADIUS,
+                        crate::frost::MENU_BLUR,
+                        surface,
+                    ).with_wallpaper(self.wallpaper_surface),
+                )
                 .into_any_element(),
         )
     }
