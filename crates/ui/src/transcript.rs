@@ -1511,6 +1511,12 @@ pub fn rows_for_entry(
                 subagent_tail,
                 ..
             } => {
+                // Questions have their own InputChip; do not repeat them in
+                // the work group or include them in its tool count.
+                if matches!(call, ToolCall::Unknown { name, .. } if matches!(name.as_str(), "Ask" | "AskUserQuestion"))
+                {
+                    continue;
+                }
                 let item = ToolItem {
                     part_id: part.id().to_owned(),
                     call: call.clone(),
@@ -13254,6 +13260,60 @@ mod tests {
                 .any(|r| r.style.code && r.text == "let x = 1;"),
             "{flat:?}"
         );
+    }
+
+    #[test]
+    fn ask_tools_only_render_the_question_card() {
+        for name in ["Ask", "AskUserQuestion"] {
+            for compact in [false, true] {
+                for status in [MessageStatus::Streaming, MessageStatus::Complete] {
+                    for resolved in [false, true] {
+                        let mut ask = tool_part("ask", "");
+                        if let MessagePart::Tool { call, .. } = &mut ask {
+                            *call = ToolCall::Unknown {
+                                name: name.into(),
+                                input: None,
+                            };
+                        }
+                        let question = MessagePart::Input {
+                            id: "input".into(),
+                            request_id: "request".into(),
+                            request: rcode_proto::InteractionRequest::Questions {
+                                questions: vec![],
+                            },
+                            resolved,
+                        };
+                        let entry = assistant("a1", status, vec![question, ask]);
+                        let rows = rows_for_entry(&entry, false, compact, &mut parse);
+                        assert_eq!(rows.len(), 1, "{name}, compact={compact}");
+                        assert!(
+                            matches!(rows[0].kind, RowKind::InputChip { resolved: value, .. } if value == resolved)
+                        );
+
+                        let mut mixed = entry.clone();
+                        mixed.parts.push(tool_part("exec", "pwd"));
+                        let rows = rows_for_entry(&mixed, false, compact, &mut parse);
+                        assert_eq!(
+                            rows.iter()
+                                .filter(|row| matches!(row.kind, RowKind::InputChip { .. }))
+                                .count(),
+                            1
+                        );
+                        for row in &rows {
+                            if let RowKind::ToolGroup { tools, summary, .. } = &row.kind {
+                                assert_eq!(tools.len(), 1);
+                                assert!(matches!(tools[0].call, ToolCall::Exec { .. }));
+                                assert_eq!(summary.as_ref(), tool_group_summary(tools));
+                            }
+                        }
+                        assert!(
+                            rows.iter()
+                                .any(|row| matches!(row.kind, RowKind::ToolGroup { .. }))
+                        );
+                    }
+                }
+            }
+        }
     }
 
     fn tool_part(id: &str, command: &str) -> MessagePart {
