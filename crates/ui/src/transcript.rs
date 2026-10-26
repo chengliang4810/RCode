@@ -11062,13 +11062,18 @@ mod tests {
             this.list.clone()
         });
         let cx = cx.add_empty_window();
-        let draw = |cx: &mut gpui::VisualTestContext, height| {
-            cx.draw(Point::default(), size(px(500.0), px(height)), |_, _| {
-                list(list_state.clone(), |_, _, _| {
+        struct TestList(ListState);
+        impl Render for TestList {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                list(self.0.clone(), |_, _, _| {
                     div().w_full().h(px(50.0)).into_any_element()
                 })
                 .size_full()
-                .into_any_element()
+            }
+        }
+        let draw = |cx: &mut gpui::VisualTestContext, height| {
+            cx.draw(Point::default(), size(px(500.0), px(height)), |_, cx| {
+                cx.new(|_| TestList(list_state.clone())).into_any_element()
             });
         };
         let wheel = |cx: &mut gpui::VisualTestContext, delta| {
