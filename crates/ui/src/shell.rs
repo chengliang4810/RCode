@@ -571,16 +571,16 @@ impl SettingsSection {
         SettingsSection::General,
         SettingsSection::Appearance,
         SettingsSection::Notifications,
-        SettingsSection::Shortcuts,
         SettingsSection::Devices,
-        SettingsSection::Harnesses,
+        SettingsSection::Shortcuts,
+        SettingsSection::Plugins,
         SettingsSection::Skills,
         SettingsSection::Commands,
-        SettingsSection::Subagents,
-        SettingsSection::Mcp,
-        SettingsSection::Plugins,
-        SettingsSection::PluginMarketplace,
         SettingsSection::Personalization,
+        SettingsSection::Mcp,
+        SettingsSection::Subagents,
+        SettingsSection::PluginMarketplace,
+        SettingsSection::Harnesses,
         SettingsSection::Files,
         SettingsSection::Appshots,
         SettingsSection::Archived,
@@ -660,10 +660,10 @@ impl SettingsSection {
         })
     }
 
-    /// Nav groups are separated by spacing alone: preferences, providers and
-    /// devices, then workspace data.
+    /// Nav groups are separated by spacing alone: preferences, agent
+    /// capabilities, then workspace data.
     fn starts_nav_group(self) -> bool {
-        matches!(self, Self::Harnesses | Self::Files)
+        matches!(self, Self::Plugins | Self::Files)
     }
 
     /// Sidebar + header label (zeron settings-sidebar.tsx SECTIONS / __root.tsx
