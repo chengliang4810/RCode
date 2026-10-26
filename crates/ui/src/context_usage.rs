@@ -1,6 +1,8 @@
 //! Context occupancy is read from the replicated chat snapshot, never local CLI state.
 use crate::{
+    popover,
     theme::Theme,
+    typography::UiTextRole,
     usage_stats::placement::{self, PanelBounds},
 };
 use gpui::{
@@ -8,7 +10,7 @@ use gpui::{
     canvas, div, point, prelude::*, px,
 };
 use rcode_proto::ContextUsage;
-use std::{cell::Cell, rc::Rc, time::Duration};
+use std::{cell::Cell, rc::Rc};
 
 /// Context occupancy with an anchored, hover-only details panel.
 pub struct Indicator {
@@ -77,7 +79,7 @@ impl Indicator {
             if !self.open && self.show_task.is_none() {
                 self.show_task = Some(cx.spawn(async |this, cx| {
                     cx.background_executor()
-                        .timer(Duration::from_millis(500))
+                        .timer(popover::DETAILS_OPEN_DELAY)
                         .await;
                     let _ = this.update(cx, |this, cx| {
                         this.show_task = None;
@@ -99,7 +101,7 @@ impl Indicator {
         }
         self.hide_task = Some(cx.spawn(async |this, cx| {
             cx.background_executor()
-                .timer(Duration::from_millis(250))
+                .timer(popover::DETAILS_CLOSE_DELAY)
                 .await;
             let _ = this.update(cx, |this, cx| {
                 this.hide_task = None;
@@ -141,10 +143,13 @@ impl Render for Indicator {
                     .max(1.0)))
                 .overflow_y_scroll()
                 .occlude();
-            let content = crate::frost::frosted(
-                crate::popover::CARD_RADIUS,
-                crate::frost::MENU_BLUR,
-                content,
+            let content = crate::motion::fade_quick(
+                "context-usage-details-in",
+                div().child(crate::frost::frosted(
+                    crate::popover::CARD_RADIUS,
+                    crate::frost::MENU_BLUR,
+                    content,
+                )),
             );
             div().absolute().inset_0().size_0().child(
                 gpui::deferred(placement::Panel::new(
@@ -163,12 +168,12 @@ impl Render for Indicator {
             .id("composer-context-usage")
             .debug_selector(|| "composer-context-usage".into())
             .relative()
-            .size(px(24.0))
+            .size(px(crate::surface_chrome::CONTROL_SIZE))
             .flex_none()
             .flex()
             .items_center()
             .justify_center()
-            .rounded(px(5.0))
+            .rounded(px(crate::surface_chrome::CONTROL_RADIUS))
             .aria_label(format!(
                 "{}: {}",
                 crate::l10n::localizer()
@@ -339,14 +344,16 @@ pub fn card(usage: Option<ContextUsage>, theme: &Theme) -> gpui::Div {
                 .child(
                     div()
                         .flex_none()
-                        .text_size(px(14.0))
+                        .text_size(UiTextRole::Primary.size())
+                        .line_height(UiTextRole::Primary.line_height())
                         .child(SharedString::from(heading)),
                 )
                 .child(
                     div()
                         .min_w_0()
                         .text_right()
-                        .text_size(px(12.0))
+                        .text_size(UiTextRole::Secondary.size())
+                        .line_height(UiTextRole::Secondary.line_height())
                         .text_color(theme.text_muted)
                         .child(SharedString::from(details(usage))),
                 ),

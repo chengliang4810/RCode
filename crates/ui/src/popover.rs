@@ -24,6 +24,7 @@ use std::time::{Duration, Instant};
 
 use crate::motion::{self, RCODE_PULSE};
 use crate::theme::{Theme, hairline, ink};
+use crate::typography::UiTextRole;
 
 // ---------------------------------------------------------------------------
 // Loadable — async slot state shared by pickers/settings pages
@@ -304,15 +305,19 @@ pub fn classify_key(key: &str, cmd: bool, ctrl: bool) -> MenuKey {
 /// Shared floating surface used by palettes, popovers, dropdowns and menus.
 /// Mount helpers supply the same 16px backdrop blur as the composer.
 /// Corner radius must match the frost wrapper's mask.
-pub const CARD_RADIUS: f32 = 12.0;
+pub const CARD_RADIUS: f32 = Theme::POPOVER_RADIUS;
 
 pub const MENU_GAP: f32 = 2.0;
 /// The four-pixel inset of [`popover_card`] that [`menu_scroll_host`] /
 /// [`menu_scroll_list`] cancel for card-bleeding scroll hosts.
-pub const CARD_INSET: f32 = 4.0;
+pub const CARD_INSET: f32 = Theme::SURFACE_INSET;
 /// Concentric corners: rows sit inside both the card's 1px border and padding.
 pub const MENU_ITEM_RADIUS: f32 = CARD_RADIUS - 1.0 - CARD_INSET;
 pub const PALETTE_ITEM_RADIUS: f32 = 14.0 - CARD_INSET;
+
+/// Details cards share one intent delay and one grace period for crossing the gap.
+pub const DETAILS_OPEN_DELAY: Duration = Duration::from_millis(350);
+pub const DETAILS_CLOSE_DELAY: Duration = Duration::from_millis(180);
 
 pub fn surface_bg(theme: &Theme) -> gpui::Hsla {
     if theme.is_frost() {
@@ -336,7 +341,8 @@ pub fn popover_card(theme: &Theme) -> gpui::Div {
         .p(px(CARD_INSET))
         .gap(px(MENU_GAP))
         .overflow_hidden()
-        .text_size(crate::typography::ui_rems(13.0))
+        .text_size(UiTextRole::Primary.size())
+        .line_height(UiTextRole::Primary.line_height())
         .text_color(theme.text)
 }
 
@@ -901,10 +907,9 @@ fn modal_with(
     .into_any_element()
 }
 
-/// One menu row (the original app `menuItem`): `gap-2.5 rounded-lg px-2 py-1.5
-/// text-[13px]`, active = `bg-white/10 text-foreground`, hover wash
-/// `white/[0.08]` fading over `transition-colors` (floating-styles.ts) via the
-/// per-`fade_key` [`motion::hover_blend`]. The caller adds the id/click
+/// One menu row with the shared primary reading size and an inset corner.
+/// Hover uses a weaker wash than selection, fading via the per-`fade_key`
+/// [`motion::hover_blend`]. The caller adds the id/click
 /// listener — `fade_key` must be unique app-wide and stable across frames
 /// (the id string is a good choice).
 pub fn menu_row(theme: &Theme, active: bool, fade_key: impl Into<SharedString>) -> gpui::Div {
@@ -916,7 +921,9 @@ pub fn menu_row(theme: &Theme, active: bool, fade_key: impl Into<SharedString>) 
         .px(px(8.0))
         .py(px(6.0))
         .rounded(px(MENU_ITEM_RADIUS))
-        .text_size(crate::typography::ui_rems(13.0))
+        .min_h(px(PICKER_ROW_HEIGHT))
+        .text_size(UiTextRole::Primary.size())
+        .line_height(UiTextRole::Primary.line_height())
         .cursor_pointer();
     if active {
         row.bg(crate::theme::card_selected_bg())
@@ -932,7 +939,7 @@ pub fn menu_row(theme: &Theme, active: bool, fade_key: impl Into<SharedString>) 
             .bg(motion::hover_blend(
                 &fade_key,
                 crate::theme::wash(0.0),
-                crate::theme::card_selected_bg(),
+                ink(0.05),
             ));
         // Imperative form — the caller's `.id(...)` makes the element stateful
         // (hover listeners need element state, `.on_hover` needs `Stateful`).
@@ -942,10 +949,8 @@ pub fn menu_row(theme: &Theme, active: bool, fade_key: impl Into<SharedString>) 
     }
 }
 
-/// [`menu_row`] with a distinct keyboard-navigation highlight: a selected row
-/// carries the full `bg-white/10` wash, the keyboard cursor the lighter
-/// `bg-white/[0.08]` (the original app's `data-[highlighted]` styling) — two selected-
-/// looking rows never appear at once.
+/// Selection keeps the stronger wash; keyboard navigation and pointer hover
+/// share a quieter treatment without making another row look selected.
 pub fn menu_row_nav(
     theme: &Theme,
     selected: bool,
@@ -954,24 +959,22 @@ pub fn menu_row_nav(
 ) -> gpui::Div {
     let row = menu_row(theme, selected, fade_key);
     if !selected && highlighted {
-        row.bg(crate::theme::card_selected_bg())
-            .text_color(theme.text)
+        row.bg(ink(0.05)).text_color(theme.text)
     } else {
         row
     }
 }
 
-/// Small uppercase section heading inside a floating menu (the original app
-/// `MenuHeading`): `px-2 pb-1 pt-1.5 text-[10px] font-medium uppercase
-/// tracking-[0.1em] text-muted-foreground/60`. gpui has no letter-spacing at
-/// the pinned rev; the tracking is approximated with hair spaces.
+/// Section heading at the shared section size. gpui has no letter-spacing at
+/// the pinned rev; uppercase tracking is approximated with hair spaces.
 pub fn menu_heading(theme: &Theme, label: &str) -> gpui::Div {
     let theme = &theme.for_popup();
     div()
         .px(px(8.0))
         .pb(px(4.0))
         .pt(px(6.0))
-        .text_size(crate::typography::ui_rems(10.0))
+        .text_size(UiTextRole::Section.size())
+        .line_height(UiTextRole::Section.line_height())
         .font_weight(gpui::FontWeight::MEDIUM)
         .text_color(theme.text_muted)
         .child(SharedString::from(tracked_upper(label)))
@@ -1216,7 +1219,8 @@ pub fn picker_row(
         .min_h(px(PICKER_ROW_HEIGHT))
         .px(px(8.0))
         .rounded(px(MENU_ITEM_RADIUS))
-        .text_size(crate::typography::ui_rems(13.0))
+        .text_size(UiTextRole::Primary.size())
+        .line_height(UiTextRole::Primary.line_height())
         .text_color(theme.text)
         .cursor_pointer();
     if selected {
@@ -1334,7 +1338,9 @@ pub fn btn_ghost(
         .px(px(12.0))
         .py(px(6.0))
         .rounded(px(8.0))
-        .text_size(crate::typography::ui_rems(13.0))
+        .min_h(px(PICKER_ROW_HEIGHT))
+        .text_size(UiTextRole::Primary.size())
+        .line_height(UiTextRole::Primary.line_height())
         .text_color(motion::hover_blend(&fade_key, theme.text_muted, theme.text))
         .bg(motion::hover_blend(
             &fade_key,
@@ -1355,7 +1361,9 @@ pub fn btn_primary(theme: &Theme, label: impl Into<SharedString>) -> gpui::Div {
         .py(px(6.0))
         .rounded(px(8.0))
         .bg(theme.text)
-        .text_size(crate::typography::ui_rems(13.0))
+        .min_h(px(PICKER_ROW_HEIGHT))
+        .text_size(UiTextRole::Primary.size())
+        .line_height(UiTextRole::Primary.line_height())
         .font_weight(gpui::FontWeight::MEDIUM)
         .text_color(theme.on_solid)
         .cursor_pointer()
@@ -1370,7 +1378,9 @@ pub fn btn_danger(theme: &Theme, label: impl Into<SharedString>) -> gpui::Div {
         .py(px(6.0))
         .rounded(px(8.0))
         .bg(theme.danger_strong)
-        .text_size(crate::typography::ui_rems(13.0))
+        .min_h(px(PICKER_ROW_HEIGHT))
+        .text_size(UiTextRole::Primary.size())
+        .line_height(UiTextRole::Primary.line_height())
         .font_weight(gpui::FontWeight::MEDIUM)
         .text_color(gpui::white())
         .cursor_pointer()
@@ -1378,8 +1388,8 @@ pub fn btn_danger(theme: &Theme, label: impl Into<SharedString>) -> gpui::Div {
         .child(label.into())
 }
 
-/// Pulsing skeleton rows shown while a list loads (the original app:
-/// `h-7 animate-pulse rounded-md bg-white/[0.04]`).
+/// Dense loading rows breathe together so a long list does not become a wave
+/// of competing activity. Label-shaped menu skeletons retain their stagger.
 pub fn skeleton_rows(
     _id: &'static str,
     _theme: &Theme,
@@ -1394,13 +1404,12 @@ pub fn skeleton_rows(
         .flex_col()
         .gap(px(6.0))
         .py(px(4.0))
-        .children((0..count).map(move |i| {
-            let phase = motion::staggered_phase(delta, i, 0.08);
+        .children((0..count).map(move |_| {
             div()
                 .h(px(28.0))
                 .rounded(px(Theme::CONTROL_RADIUS))
                 .bg(wash)
-                .opacity(0.35 + 0.4 * motion::pulse_wave(phase))
+                .opacity(0.6 + 0.2 * motion::pulse_wave(delta))
         }))
         .into_any_element()
 }
@@ -1460,7 +1469,8 @@ pub fn error_row(theme: &Theme, message: &str) -> gpui::Div {
         .flex_col()
         .gap(px(6.0))
         .p(px(Theme::SPACE_SM))
-        .text_size(crate::typography::ui_rems(12.0))
+        .text_size(UiTextRole::Secondary.size())
+        .line_height(UiTextRole::Secondary.line_height())
         .text_color(theme.danger)
         .child(gpui::SharedString::from(message.to_string()))
 }

@@ -4,11 +4,11 @@ use gpui::{Context, Entity, IntoElement, Render, SharedString, Task, Window, div
 use rcode_doc::statistics::{ConversationStatistics, UsageStatistics};
 use rcode_presentation::TextKey;
 
-use crate::{popover, state::AppState, theme::Theme};
+use crate::{popover, state::AppState, theme::Theme, typography::UiTextRole};
 
 pub(crate) mod placement;
 use placement::PanelBounds;
-use std::{cell::Cell, rc::Rc, time::Duration};
+use std::{cell::Cell, rc::Rc};
 
 const STAT_PADDING: f32 = 6.0;
 
@@ -209,6 +209,8 @@ fn card(data: &StatData, theme: &Theme, cx: &gpui::App) -> gpui::Div {
                 .items_center()
                 .justify_between()
                 .gap(px(12.0))
+                .text_size(UiTextRole::Primary.size())
+                .line_height(UiTextRole::Primary.line_height())
                 .child(
                     div()
                         .flex()
@@ -237,14 +239,22 @@ fn card(data: &StatData, theme: &Theme, cx: &gpui::App) -> gpui::Div {
                 .items_start()
                 .justify_between()
                 .gap(px(16.0))
-                .text_size(px(12.0))
+                .text_size(UiTextRole::Secondary.size())
+                .line_height(UiTextRole::Secondary.line_height())
                 .child(
                     div()
                         .flex_none()
                         .text_color(theme.text_muted)
                         .child(key.clone()),
                 )
-                .child(div().min_w_0().text_right().child(value))
+                .child(
+                    div()
+                        .min_w_0()
+                        .text_right()
+                        .text_size(UiTextRole::Primary.size())
+                        .line_height(UiTextRole::Primary.line_height())
+                        .child(value),
+                )
         }))
 }
 
@@ -291,7 +301,7 @@ impl StatControl {
             if !self.open && self.show_task.is_none() {
                 self.show_task = Some(cx.spawn(async |this, cx| {
                     cx.background_executor()
-                        .timer(Duration::from_millis(500))
+                        .timer(popover::DETAILS_OPEN_DELAY)
                         .await;
                     let _ = this.update(cx, |this, cx| {
                         this.show_task = None;
@@ -318,7 +328,7 @@ impl StatControl {
         // Allow the pointer to cross the gap between the trigger and card.
         self.hide_task = Some(cx.spawn(async |this, cx| {
             cx.background_executor()
-                .timer(Duration::from_millis(250))
+                .timer(popover::DETAILS_CLOSE_DELAY)
                 .await;
             let _ = this.update(cx, |this, cx| {
                 this.hide_task = None;
@@ -552,8 +562,11 @@ impl Render for StatControl {
         let panel = self.open.then(|| {
             // Capping at half the available height guarantees the card fits on
             // at least one side of the trigger, even in a short window.
-            let max_height =
-                ((f32::from(window.viewport_size().height) - 22.0 - 32.0) / 2.0).max(1.0);
+            let max_height = ((f32::from(window.viewport_size().height)
+                - crate::surface_chrome::CONTROL_SIZE
+                - 32.0)
+                / 2.0)
+                .max(1.0);
             let content = card(&self.data, &theme.for_popup(), cx)
                 .id("statistics-hover-scroll")
                 .debug_selector(|| "statistics-hover-card".into())
@@ -561,8 +574,14 @@ impl Render for StatControl {
                 .max_h(px(max_height))
                 .overflow_y_scroll()
                 .occlude();
-            let content =
-                crate::frost::frosted(popover::CARD_RADIUS, crate::frost::MENU_BLUR, content);
+            let content = crate::motion::fade_quick(
+                "statistics-details-in",
+                div().child(crate::frost::frosted(
+                    popover::CARD_RADIUS,
+                    crate::frost::MENU_BLUR,
+                    content,
+                )),
+            );
             div().absolute().inset_0().size_0().child(
                 gpui::deferred(placement::Panel::new(
                     content.into_any_element(),
@@ -581,13 +600,14 @@ impl Render for StatControl {
             .debug_selector(|| "statistics-control".into())
             .relative()
             .aria_label(format!("{} {}", self.data.title, self.data.label))
-            .h(px(22.0))
+            .h(px(crate::surface_chrome::CONTROL_SIZE))
             .px(px(STAT_PADDING))
-            .rounded(px(5.0))
+            .rounded(px(crate::surface_chrome::CONTROL_RADIUS))
             .flex()
             .items_center()
             .gap(px(5.0))
-            .text_size(crate::typography::ui_rems(11.0))
+            .text_size(UiTextRole::Caption.size())
+            .line_height(UiTextRole::Caption.line_height())
             .text_color(theme.text_muted)
             .hover(|s| s.bg(theme.element_hover))
             .on_hover(cx.listener(|this, hovered, _, cx| this.hover_trigger(*hovered, cx)))
