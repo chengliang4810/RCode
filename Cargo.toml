@@ -46,6 +46,7 @@ gpui = { path = "vendor/gpui" }
 stacksafe-macro = { path = "vendor/stacksafe-macro" }
 # Preserve Loro's data model while applying container memory-safety fixes.
 sized-chunks = { path = "vendor/sized-chunks" }
+taffy = { path = "vendor/taffy" }
 
 [workspace.dependencies]
 rcode-veil = { path = "crates/veil" }
