@@ -1,52 +1,52 @@
 //! Destination disclosure is local text only. Never fetch link previews.
 use crate::theme::Theme;
-use gpui::{AnyElement, App, Context, Render, SharedString, Window, div, prelude::*, px};
-
-pub struct Destination(
-    pub String,
-    pub std::rc::Rc<std::cell::Cell<Option<gpui::Bounds<gpui::Pixels>>>>,
-);
-impl Render for Destination {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        destination_card(&self.0, self.1.clone(), window, cx)
-    }
-}
+use gpui::{AnyElement, App, SharedString, Window, div, prelude::*, px};
 fn viewport_limits(width: f32, height: f32) -> (f32, f32) {
     (
         (width - 24.).clamp(1., 360.),
         (height - 80.).clamp(1., 160.),
     )
 }
-/// Invisible break opportunities let even a single long path segment wrap.
-/// This presentation string never replaces the original link destination.
-fn breakable_url(url: &str) -> String {
+/// Wrap by measured graphemes: GPUI's word wrapping can otherwise leave a
+/// URL scheme alone on the first line. This never replaces the destination.
+fn wrapped_destination(url: &str, width: f32, x_for_index: impl Fn(usize) -> f32) -> String {
     use unicode_segmentation::UnicodeSegmentation;
-    url.graphemes(true).collect::<Vec<_>>().join("\u{200b}")
+    let mut shown = String::new();
+    let mut start = 0;
+    let mut origin = x_for_index(0);
+    for (at, grapheme) in url.grapheme_indices(true) {
+        if at > start && (x_for_index(at + grapheme.len()) - origin).abs() > width {
+            shown.push_str(&url[start..at]);
+            shown.push('\n');
+            start = at;
+            origin = x_for_index(at);
+        }
+    }
+    shown.push_str(&url[start..]);
+    shown
 }
 pub fn destination_card(
     url: &str,
     bounds: std::rc::Rc<std::cell::Cell<Option<gpui::Bounds<gpui::Pixels>>>>,
     window: &Window,
-    cx: &App,
+    _cx: &App,
 ) -> AnyElement {
-    let theme = Theme::of(cx);
+    let theme = Theme::dark();
     let (max_width, height) = viewport_limits(
         window.viewport_size().width.into(),
         window.viewport_size().height.into(),
     );
-    let text: SharedString = breakable_url(url).into();
-    // GPUI measures hover tooltips with min-content constraints. Use the
-    // shaped text width so short URLs stay on one line despite wrap points.
-    let natural_width = window
-        .text_system()
-        .shape_line(
-            text.clone(),
-            px(11.),
-            &[window.text_style().to_run(text.len())],
-            None,
-        )
-        .width();
-    let width = (f32::from(natural_width).ceil() + 14.).min(max_width);
+    let text: SharedString = url.to_owned().into();
+    let shaped = window.text_system().shape_line(
+        text.clone(),
+        px(11.),
+        &[window.text_style().to_run(text.len())],
+        None,
+    );
+    let width = (f32::from(shaped.width()).ceil() + 22.).min(max_width);
+    let text = wrapped_destination(url, (width - 22.).max(1.), |at| {
+        shaped.x_for_index(at).into()
+    });
     div()
         .id("web-destination-card")
         .relative()
@@ -57,16 +57,16 @@ pub fn destination_card(
         )
         .w(px(width))
         .max_w(px(width))
-        .px(px(6.))
-        .py(px(4.))
-        .rounded(px(4.))
-        .border_1()
-        .border_color(theme.border_strong)
+        .px(px(10.))
+        .py(px(6.))
+        .rounded(px(12.))
         .bg(theme.surface_raised)
         .shadow_sm()
         .text_size(px(11.))
         .line_height(px(14.))
         .text_color(theme.text)
+        .text_center()
+        .role(gpui::Role::Tooltip)
         .flex()
         .flex_col()
         .child(
@@ -88,6 +88,10 @@ mod tests {
             assert!(width < w && height < h);
         }
         let url = format!("https://example.com/{}?q=🙂", "á界".repeat(5000));
-        assert_eq!(breakable_url(&url).replace('\u{200b}', ""), url);
+        let shown = wrapped_destination(&url, 300., |at| at as f32);
+        assert_eq!(shown.replace('\n', ""), url);
+        assert!(shown.lines().all(|line| line.len() <= 300));
+        let short = "https://example.com";
+        assert_eq!(wrapped_destination(short, 300., |at| at as f32), short);
     }
 }

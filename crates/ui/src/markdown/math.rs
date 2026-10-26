@@ -463,7 +463,6 @@ pub(crate) fn display_flat(
         text: text.into(),
         links: Vec::new(),
         code_ranges: Vec::new(),
-        file_glyphs: Vec::new(),
         math: vec![MathSlot {
             range,
             formula,

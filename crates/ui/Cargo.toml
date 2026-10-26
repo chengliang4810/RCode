@@ -160,3 +160,7 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Securit
 [[example]]
 name = "history-window-fixture"
 required-features = ["appshots-fixture"]
+
+[[example]]
+name = "link-style-fixture"
+required-features = ["appshots-fixture"]

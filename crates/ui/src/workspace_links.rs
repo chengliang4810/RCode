@@ -268,14 +268,13 @@ fn probe_path(
     }
 }
 
-/// A file link's resolved match: the absolute path on the owning device, the
-/// wire path its presentation shows, and whether that device is this one.
+/// A file link's resolved location on the owning device and whether that
+/// device is this one.
 pub(crate) struct FileLink {
     pub absolute: PathBuf,
-    /// The decoded path the hover card shows: workspace-relative for owned
-    /// links, absolute for outside ones.
-    pub path: String,
     pub local: bool,
+    pub line: Option<u32>,
+    pub column: Option<u32>,
 }
 
 /// A decoded path plus its line reference, tagged by shape so resolution can

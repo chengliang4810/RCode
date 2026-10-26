@@ -19,8 +19,8 @@ use std::time::Instant;
 
 use gpui::{
     AnyElement, BorderStyle, Bounds, Context, CursorStyle, Div, FontStyle, FontWeight, Hsla,
-    Render, SharedString, StyledText, TextRun, UnderlineStyle, Window, canvas, div, point,
-    prelude::*, px, quad, size,
+    Render, SharedString, StyledText, TextRun, Window, canvas, div, point, prelude::*, px, quad,
+    size,
 };
 use rcode_syntax::{HighlightKind, HighlightSpan, HighlightedDocument};
 
@@ -153,15 +153,41 @@ pub struct LinkUi {
     /// system-level menu rows (default app, file manager).
     pub source_local: bool,
     /// The ordered checkouts a file link may resolve against on this surface,
-    /// the linking chat's own first. `None` renders no trailing open glyph
-    /// and offers no file paths — previews and web-only surfaces.
+    /// the linking chat's own first. `None` offers no file paths — previews
+    /// and web-only surfaces.
     pub(crate) file_roots: Option<Rc<Vec<crate::workspace_links::FileLinkRoot>>>,
     pub handler: Rc<dyn Fn(&LinkActivation, &mut Window, &mut gpui::App) -> LinkOutcome>,
 }
 
 impl LinkUi {
+    #[cfg(feature = "appshots-fixture")]
+    pub fn fixture(root: &str) -> Self {
+        Self {
+            source_session: Some("link-preview".into()),
+            source_local: true,
+            file_roots: Some(Rc::new(vec![crate::workspace_links::FileLinkRoot {
+                chat: Some("link-preview".into()),
+                root: root.into(),
+                local: true,
+            }])),
+            handler: Rc::new(|_, _, _| LinkOutcome::Rejected),
+        }
+    }
+    pub(crate) fn destination(&self, target: &str) -> String {
+        let Some(file) = self.file_link(target) else {
+            return target.to_owned();
+        };
+        let mut shown = file.absolute.to_string_lossy().into_owned();
+        if let Some(line) = file.line {
+            shown.push_str(&format!(":{line}"));
+            if let Some(column) = file.column {
+                shown.push_str(&format!(":{column}"));
+            }
+        }
+        shown
+    }
     /// The workspace file `target` resolves to under this surface's roots,
-    /// when the link is one at all. Drives the trailing open glyph and the
+    /// when the link is one at all. Drives destination disclosure and the
     /// menu's file rows; the click path re-resolves with owners. Owned links
     /// get their absolute path from the resolved root joined with the link's
     /// workspace-relative path; an outside link's absolute path is the
@@ -175,25 +201,19 @@ impl LinkUi {
             crate::workspace_links::FileLinkResolution::Owned { root: ix, link } => {
                 let root = &roots[ix];
                 let absolute = root.absolute(&link);
-                // A project root past the linking chat's own opens by
-                // absolute path (see `Shell::open_workspace_file_link`), so
-                // its hover card shows that path too.
-                let path = if ix > 0 && root.chat.is_none() {
-                    absolute.to_string_lossy().into_owned()
-                } else {
-                    link.path
-                };
                 Some(crate::workspace_links::FileLink {
                     absolute,
-                    path,
                     local: root.local,
+                    line: link.line,
+                    column: link.column,
                 })
             }
             crate::workspace_links::FileLinkResolution::Outside(link) => {
                 Some(crate::workspace_links::FileLink {
                     absolute: PathBuf::from(&link.path),
-                    path: link.path,
                     local: self.source_local,
+                    line: link.line,
+                    column: link.column,
                 })
             }
         }
@@ -1040,13 +1060,7 @@ fn render_table(
                     .as_ref()
                     .filter(|ui| ui.source_session.is_some())
                     .map(|_| {
-                        super::link_presentation::present(
-                            &flat,
-                            px(560.),
-                            px(MD_TEXT_SIZE),
-                            window,
-                            opts,
-                        )
+                        super::link_presentation::present(&flat, px(560.), px(MD_TEXT_SIZE), window)
                     });
                 let flat = measured.as_ref().unwrap_or(&flat);
                 // Cell sources are single-line; guard anyway (same byte count,
@@ -1180,9 +1194,6 @@ pub struct FlatText {
     pub runs: Vec<TextRun>,
     pub links: Vec<(Range<usize>, String)>,
     pub code_ranges: Vec<Range<usize>>,
-    /// Reserved slots after resolved file links — displayed-text
-    /// coordinates. Each slot paints the trailing open glyph.
-    pub file_glyphs: Vec<Range<usize>>,
     /// Reserved slots for formulas — displayed-text coordinates. Each slot
     /// paints its formula; copy and selection read its `$tex$` source.
     pub math: Vec<super::math::MathSlot>,
@@ -1274,7 +1285,8 @@ fn flatten_runs_weighted(
             Some(None) => (Some(None), None),
             None => (None, None),
         };
-        let code = run.style.code || matches!(formula, Some(None));
+        let is_link = run.style.link.is_some();
+        let code = (run.style.code && !is_link) || matches!(formula, Some(None));
         let shown = match (&slot, &delimited) {
             (Some(slot), _) => slot.as_str(),
             (None, Some(delimited)) => delimited.as_str(),
@@ -1316,14 +1328,15 @@ fn flatten_runs_weighted(
             } else {
                 FontStyle::Normal
             };
+            if is_link && f.weight.0 < FontWeight::MEDIUM.0 {
+                f.weight = FontWeight::MEDIUM;
+            }
         }
-        // Links stay monochrome — foreground with an underline (the original app's md
-        // theme underlines in the text color; indigo is reserved for primary
-        // actions).
-        let is_link = run.style.link.is_some();
         // Inline code uses the body foreground; the monospace face and wash
         // distinguish it. Fenced code uses the syntax palette below.
-        let color = if code {
+        let color = if is_link {
+            theme.accent
+        } else if code {
             inline_code_text(theme)
         } else {
             theme.text
@@ -1357,13 +1370,9 @@ fn flatten_runs_weighted(
             // underlay (`code_wash_underlay`) — a run background here could
             // only be a square box.
             background_color: None,
-            // A formula in a link label paints over its slot; an underline
-            // there would strike through it.
-            underline: (is_link && slot.is_none()).then_some(UnderlineStyle {
-                color: Some(theme.text_muted),
-                thickness: px(1.0),
-                wavy: false,
-            }),
+            // Hover decoration follows the shaped link rectangles, without
+            // changing the text layout or striking through inline formulas.
+            underline: None,
             strikethrough: run.style.strikethrough.then_some(gpui::StrikethroughStyle {
                 thickness: px(1.0),
                 color: Some(theme.text_muted),
@@ -1384,7 +1393,6 @@ fn flatten_runs_weighted(
         runs: out,
         links,
         code_ranges,
-        file_glyphs: Vec::new(),
         math,
     }
 }
@@ -1582,8 +1590,7 @@ pub(super) fn flat_text_presented_element(
     .into_any_element()
 }
 
-/// Clickable link ranges (and resolved file links' trailing glyphs) over a
-/// flattened block's text element.
+/// Clickable ranges over a flattened block's text element.
 fn link_text_element(
     flat: &FlatText,
     child: AnyElement,
@@ -1591,15 +1598,7 @@ fn link_text_element(
     ix: usize,
     opts: &RenderOptions,
 ) -> AnyElement {
-    // A resolved file link's hit range covers its reserved glyph slot,
-    // so the trailing open glyph activates the link too.
-    let glyph_end = |range: &std::ops::Range<usize>| {
-        flat.file_glyphs
-            .iter()
-            .find(|slot| slot.start == range.end)
-            .map_or(range.end, |slot| slot.end)
-    };
-    let child = super::link_interaction::LinkRanges {
+    super::link_interaction::LinkRanges {
         id: format!(
             "{}-{}-t{ix}",
             opts.row_key,
@@ -1616,7 +1615,7 @@ fn link_text_element(
             .iter()
             .map(|(range, url)| {
                 (
-                    range.start..glyph_end(range),
+                    range.clone(),
                     LinkTarget::new(
                         flat.original
                             .as_ref()
@@ -1630,17 +1629,33 @@ fn link_text_element(
             })
             .collect(),
         ui: opts.link.clone(),
-    }
-    .into_any_element();
-    // Trailing open glyphs of resolved file links paint over the shaped text.
-    if flat.file_glyphs.is_empty() {
-        return child;
-    }
-    super::link_presentation::FileLinkGlyphs {
-        id: format!("{}-file-glyphs-{ix}", opts.row_key).into(),
-        child,
-        layout: link_layout,
-        slots: flat.file_glyphs.clone(),
+        decorations: flat
+            .links
+            .iter()
+            .map(|(range, _)| {
+                // Formulas keep a clear baseline.
+                let mut spans = vec![range.clone()];
+                for excluded in flat.math.iter().map(|slot| &slot.range) {
+                    spans = spans
+                        .into_iter()
+                        .flat_map(|span| {
+                            if span.end <= excluded.start || span.start >= excluded.end {
+                                vec![span]
+                            } else {
+                                [
+                                    span.start..span.end.min(excluded.start),
+                                    span.start.max(excluded.end)..span.end,
+                                ]
+                                .into_iter()
+                                .filter(|span| !span.is_empty())
+                                .collect()
+                            }
+                        })
+                        .collect();
+                }
+                spans
+            })
+            .collect(),
     }
     .into_any_element()
 }
@@ -2225,6 +2240,7 @@ fn text_element(
     let direct_file = opts
         .workspace_root
         .as_deref()
+        .filter(|_| flat.links.is_empty())
         .and_then(|root| sole_file_reference(runs, root));
     let content = if let Some(path) = direct_file {
         div()
@@ -2261,9 +2277,7 @@ fn text_element(
         .into_any_element()
 }
 
-/// A file icon belongs beside a link only when the whole visible paragraph is
-/// one safe workspace-file target. Mixed prose and external links retain the
-/// ordinary inline Markdown layout.
+/// Resolve a paragraph that consists of one workspace file target.
 fn sole_workspace_file_link(runs: &[InlineRun], workspace_root: &str) -> Option<String> {
     let mut target = None;
     for run in runs.iter().filter(|run| !run.text.is_empty()) {
@@ -4137,9 +4151,8 @@ mod tests {
         assert_eq!(flat.links, vec![(3..7, "https://x.dev".to_string())]);
         let total: usize = flat.runs.iter().map(|r| r.len).sum();
         assert_eq!(total, flat.text.len());
-        // Links stay monochrome (foreground + underline), never accent-tinted.
-        assert_eq!(flat.runs[1].color, theme.text);
-        assert!(flat.runs[1].underline.is_some());
+        assert_eq!(flat.runs[1].color, theme.accent);
+        assert!(flat.runs[1].underline.is_none());
         assert_eq!(flat.runs[2].font.weight, FontWeight::SEMIBOLD);
     }
 
@@ -4419,13 +4432,13 @@ mod tests {
             panic!("one formula slot");
         };
         assert_eq!(flat.links, vec![(0..flat.text.len(), url.to_string())]);
-        let underlined = |runs: &[TextRun], range: Range<usize>| {
+        let undecorated = |runs: &[TextRun], range: Range<usize>| {
             super::super::link_presentation::slice_runs(runs, range)
                 .iter()
-                .all(|run| run.underline.is_some())
+                .all(|run| run.underline.is_none())
         };
-        assert!(underlined(&flat.runs, 0..slot.range.start));
-        assert!(underlined(&flat.runs, slot.range.end..flat.text.len()));
+        assert!(undecorated(&flat.runs, 0..slot.range.start));
+        assert!(undecorated(&flat.runs, slot.range.end..flat.text.len()));
         assert!(
             super::super::link_presentation::slice_runs(&flat.runs, slot.range.clone())
                 .iter()
@@ -4453,10 +4466,9 @@ mod tests {
                 }
                 _ => panic!("one slot at most"),
             }
-            // The ellipsis keeps the link's underline even when it stands
-            // for the formula.
+            // Truncation keeps the resting link style, even for a formula.
             let at = ellipsis..ellipsis + '…'.len_utf8();
-            assert!(underlined(&shown.runs, at), "{:?}", shown.text);
+            assert!(undecorated(&shown.runs, at), "{:?}", shown.text);
         }
     }
 
@@ -4472,7 +4484,6 @@ mod tests {
                     runs: Vec::new(),
                     links: Vec::new(),
                     code_ranges: Vec::new(),
-                    file_glyphs: Vec::new(),
                     math: Vec::new(),
                 }),
             );
@@ -4518,7 +4529,6 @@ mod tests {
                 runs: Vec::new(),
                 links: Vec::new(),
                 code_ranges: Vec::new(),
-                file_glyphs: Vec::new(),
                 math: Vec::new(),
             }),
         );
