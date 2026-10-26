@@ -4002,7 +4002,14 @@ impl Transcript {
     pub(crate) fn distance_from_bottom(&self) -> f32 {
         let max = f32::from(self.list.max_offset_for_scrollbar().y);
         let cur = f32::from(self.list.scroll_px_offset_for_scrollbar().y);
-        (max + cur).max(0.0)
+        // A short, bottom-aligned chat can have a negative first-row offset
+        // while its anchor is being materialized. The blank space above it
+        // is alignment space, not scrollable content below the viewport.
+        if max <= 0.0 {
+            0.0
+        } else {
+            (max + cur).max(0.0)
+        }
     }
 
     /// Whether a user scroll should re-engage the bottom pin: inside the 70px
@@ -4665,7 +4672,9 @@ impl Transcript {
     /// Whether the shell should float the "Scroll to bottom" pill (scrolled
     /// more than [`SCROLL_BUTTON_THRESHOLD_PX`] off the end, unpinned).
     pub fn jump_button_shown(&self) -> bool {
-        self.show_jump_button
+        // Layout can reach the end without another wheel event (for example
+        // after a resize or a fold). Do not retain a stale visible pill there.
+        self.show_jump_button && self.distance_from_bottom() > AT_BOTTOM_PX
     }
 
     /// The scroll-to-bottom pill's click: glide back to the end and re-pin.
@@ -10789,6 +10798,91 @@ mod tests {
         assert!(!jump_visibility(shown, AT_BOTTOM_PX));
         assert!(!jump_visibility(false, 319.0));
         assert!(jump_visibility(false, 321.0));
+    }
+
+    #[gpui::test]
+    fn jump_button_tracks_scrollable_content_after_wheel_and_resize(cx: &mut gpui::TestAppContext) {
+        let transcript = cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+            let state = cx.new(|_| AppState::new());
+            cx.new(|cx| Transcript::new(state, cx))
+        });
+        let list_state = transcript.update(cx, |this, _| {
+            this.rows = (0..10)
+                .map(|ix| viewport_row(&format!("row-{ix}"), "reply"))
+                .collect();
+            this.list.reset(10);
+            this.list.clone()
+        });
+        let cx = cx.add_empty_window();
+        let draw = |cx: &mut gpui::VisualTestContext, height| {
+            cx.draw(Point::default(), size(px(500.0), px(height)), |_, _| {
+                list(list_state.clone(), |_, _, _| {
+                    div().w_full().h(px(50.0)).into_any_element()
+                })
+                .size_full()
+                .into_any_element()
+            });
+        };
+        let wheel = |cx: &mut gpui::VisualTestContext, delta| {
+            cx.simulate_event(gpui::ScrollWheelEvent {
+                position: point(px(250.0), px(50.0)),
+                delta: gpui::ScrollDelta::Pixels(point(px(0.0), px(delta))),
+                ..Default::default()
+            });
+        };
+
+        // The wheel callback also materializes the anchor before checking for
+        // older history. On a short chat that offset includes top alignment
+        // space, even though the wheel did not move any content off screen.
+        draw(cx, 1_200.0);
+        for delta in [60.0, -60.0] {
+            wheel(cx, delta);
+            transcript.read_with(cx, |this, _| {
+                assert!(this.is_pinned());
+                assert!(!this.jump_button_shown());
+            });
+            draw(cx, 1_200.0);
+        }
+
+        // There is a real destination below the viewport: offer the pill.
+        list_state.scroll_to_end();
+        draw(cx, 100.0);
+        wheel(cx, 400.0);
+        transcript.read_with(cx, |this, _| {
+            assert!(!this.is_pinned());
+            assert!(this.jump_button_shown());
+        });
+
+        // A resize fits the entire chat without another input event. A cached
+        // wheel decision must no longer keep the button on screen.
+        draw(cx, 1_200.0);
+        transcript.read_with(cx, |this, _| {
+            assert_eq!(this.distance_from_bottom(), 0.0);
+            assert!(!this.jump_button_shown());
+        });
+        for delta in [60.0, -60.0, 60.0] {
+            wheel(cx, delta);
+            draw(cx, 1_200.0);
+            transcript.read_with(cx, |this, _| {
+                assert!(this.is_pinned());
+                assert!(!this.jump_button_shown());
+            });
+        }
+
+        // Materializing a short bottom-aligned chat preserves the blank
+        // space above its first row as a negative offset, including between
+        // layouts. That space must never be reported as unread content.
+        list_state.scroll_to(ListOffset {
+            item_ix: 0,
+            offset_in_item: px(-700.0),
+        });
+        transcript.update(cx, |this, _| {
+            this.show_jump_button = true;
+            assert_eq!(this.distance_from_bottom(), 0.0);
+            assert!(!this.jump_button_shown());
+        });
     }
 
     #[gpui::test]
