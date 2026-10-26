@@ -95,6 +95,7 @@ mod side_chats;
 mod sidebar_pins;
 mod sidebar_sections;
 pub(crate) mod spaces;
+mod viewport_row;
 mod thread_search;
 use side_chats::SideChatTab;
 mod tabs;

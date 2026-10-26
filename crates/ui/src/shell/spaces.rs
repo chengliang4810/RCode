@@ -5323,6 +5323,7 @@ impl Shell {
         let mut slot = 0usize;
         let mut rendered = Vec::new();
         let mut moving_row = None;
+        let row_theme = std::sync::Arc::new(theme.clone());
         for (group, rows) in sections {
             let pinned_group = slot < pinned_count;
             let drag_group = if pinned_group {
@@ -5413,28 +5414,51 @@ impl Shell {
                     .filter(|drag| drag.payload.chat_id == chat.id)
                     .map_or(0.0, |drag| drag.collapsed_height);
                 let slot_height = height - removed;
-                let element = self.render_chat_row(
-                    chat.id.clone(),
-                    transcript::single_line(&chat.title.clone().unwrap_or_else(|| {
-                        crate::l10n::localizer().text(TextKey::ShellNewSessionFallback)
-                    }))
-                    .into(),
-                    time_ago,
-                    folder.into(),
-                    branch.map(SharedString::from),
-                    change_request,
-                    harness,
-                    status,
-                    is_selected,
-                    false,
-                    is_moving,
-                    if is_moving { None } else { drag },
-                    jump_label,
-                    self.settings.sidebar_show_project_icon && !project_group,
-                    None,
-                    theme,
-                    cx,
-                );
+                let row_id = chat.id.clone();
+                let row_title = transcript::single_line(&chat.title.clone().unwrap_or_else(|| {
+                    crate::l10n::localizer().text(TextKey::ShellNewSessionFallback)
+                }))
+                .into();
+                let row_project_icon = self.settings.sidebar_show_project_icon && !project_group;
+                let force_visible = is_moving
+                    || self.chat_rename.as_ref().is_some_and(|rename| {
+                        rename.chat_id == chat.id && rename.surface == ChatRenameSurface::Sidebar
+                    })
+                    || self.session_hover_card.target() == Some(chat.id.as_str())
+                    || self
+                        .chat_status_hover
+                        .as_deref()
+                        .and_then(|id| id.strip_prefix("chat-"))
+                        == Some(chat.id.as_str());
+                let shell = cx.weak_entity();
+                let row_theme = row_theme.clone();
+                let element =
+                    super::viewport_row::viewport_row(height, force_visible, move |_, cx| {
+                        shell
+                            .update(cx, |shell, cx| {
+                                shell.render_chat_row(
+                                    row_id,
+                                    row_title,
+                                    time_ago,
+                                    folder.into(),
+                                    branch.map(SharedString::from),
+                                    change_request,
+                                    harness,
+                                    status,
+                                    is_selected,
+                                    false,
+                                    is_moving,
+                                    if is_moving { None } else { drag },
+                                    jump_label,
+                                    row_project_icon,
+                                    None,
+                                    &row_theme,
+                                    cx,
+                                )
+                            })
+                            .unwrap_or_else(|_| div().into_any_element())
+                    })
+                    .into_any_element();
                 // The source slot shrinks when its vacancy moves across sections.
                 // Its zero-height anchor still tracks the live activity position.
                 let element = if let Some(origin) = origin {
