@@ -26,6 +26,8 @@ use windows_numerics::Vector2;
 use crate::*;
 use gpui::*;
 
+mod font_data;
+
 #[derive(Debug)]
 struct FontInfo {
     font_family_h: HSTRING,
@@ -354,29 +356,13 @@ impl DirectWriteState {
         fonts: Vec<Cow<'static, [u8]>>,
     ) -> Result<()> {
         for font_data in fonts {
-            match font_data {
-                Cow::Borrowed(data) => unsafe {
-                    let font_file = components
-                        .in_memory_loader
-                        .CreateInMemoryFontFileReference(
-                            &components.factory,
-                            data.as_ptr().cast(),
-                            data.len() as _,
-                            None,
-                        )?;
-                    components.builder.AddFontFile(&font_file)?;
-                },
-                Cow::Owned(data) => unsafe {
-                    let font_file = components
-                        .in_memory_loader
-                        .CreateInMemoryFontFileReference(
-                            &components.factory,
-                            data.as_ptr().cast(),
-                            data.len() as _,
-                            None,
-                        )?;
-                    components.builder.AddFontFile(&font_file)?;
-                },
+            let font_file = font_data::create_font_file(
+                &components.factory,
+                &components.in_memory_loader,
+                font_data,
+            )?;
+            unsafe {
+                components.builder.AddFontFile(&font_file)?;
             }
         }
         let set = unsafe { components.builder.CreateFontSet()? };

@@ -171,7 +171,7 @@ pub(crate) fn svg_options() -> usvg::Options<'static> {
             let mut db = usvg::fontdb::Database::new();
             db.load_system_fonts();
             for face in crate::typography::bundled_font_faces() {
-                db.load_font_data(face.to_vec());
+                db.load_font_source(usvg::fontdb::Source::Binary(Arc::new(face)));
             }
             db.set_sans_serif_family("Geist");
             db.set_monospace_family("Geist Mono");
@@ -312,6 +312,21 @@ fn decode_raster_image_bounded(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn svg_fonts_borrow_bundled_bytes() {
+        let options = svg_options();
+        for bytes in crate::typography::bundled_font_faces() {
+            assert!(options.fontdb.faces().any(|face| {
+                matches!(
+                    &face.source,
+                    usvg::fontdb::Source::Binary(data)
+                        if data.as_ref().as_ref().as_ptr() == bytes.as_ptr()
+                            && data.as_ref().as_ref().len() == bytes.len()
+                )
+            }));
+        }
+    }
 
     fn assert_svg_text_is_visible(family: &str) {
         let svg = format!(
