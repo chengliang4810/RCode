@@ -68,11 +68,15 @@ use std::{
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub(crate) struct DispatchNodeId(usize);
 
+mod capacity_decay;
+use capacity_decay::DispatchNodeCapacityDecay;
+
 pub(crate) struct DispatchTree {
     node_stack: Vec<DispatchNodeId>,
     pub(crate) context_stack: Vec<KeyContext>,
     view_stack: Vec<EntityId>,
     nodes: Vec<DispatchNode>,
+    node_capacity_decay: DispatchNodeCapacityDecay,
     focusable_node_ids: FxHashMap<FocusId, DispatchNodeId>,
     view_node_ids: FxHashMap<EntityId, DispatchNodeId>,
     keymap: Rc<RefCell<Keymap>>,
@@ -143,6 +147,7 @@ impl DispatchTree {
             context_stack: Vec::new(),
             view_stack: Vec::new(),
             nodes: Vec::new(),
+            node_capacity_decay: DispatchNodeCapacityDecay::default(),
             focusable_node_ids: FxHashMap::default(),
             view_node_ids: FxHashMap::default(),
             keymap,
@@ -154,7 +159,7 @@ impl DispatchTree {
         self.node_stack.clear();
         self.context_stack.clear();
         self.view_stack.clear();
-        self.nodes.clear();
+        self.node_capacity_decay.clear(&mut self.nodes);
         self.focusable_node_ids.clear();
         self.view_node_ids.clear();
     }

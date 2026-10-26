@@ -6,7 +6,7 @@ preserved in `LICENSE-APACHE`. The standalone manifest resolves inherited
 workspace dependencies to their original declarations and pins sibling crates
 to the same Git revision.
 
-The only upstream Rust source change is in `src/arena.rs`. After clearing every
+The arena change is in `src/arena.rs`. After clearing every
 element and invalidating its handles, an arena larger than four chunks can shed
 excess chunks when frame demand stays at half its capacity or below for at least
 30 seconds. It retains the recent window's maximum demand rounded up to a power
@@ -31,6 +31,13 @@ interval and the next frame. Returning to a large frame requires reallocating
 discarded chunks, so it can increase the first resumed frame's allocation cost.
 Probe results are not installed-app savings or UI-latency acceptance. Actual
 RCode release delivery and workload verification are still required.
+
+`src/key_dispatch.rs` also applies a capacity policy to its cleared node vector.
+Buffers above 4,096 entries may shrink after at least 30 seconds at one-quarter
+usage or below. The retained capacity covers twice the recent demand, rounded
+up geometrically, with a minimum of 512 entries. Renewed demand resets the grace
+period; small and busy buffers do not read the clock. This runs during an
+ordinary clear and does not schedule background frames or change dispatch order.
 
 ## Focused regressions
 
