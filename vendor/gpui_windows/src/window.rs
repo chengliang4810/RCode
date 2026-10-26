@@ -54,6 +54,7 @@ pub struct WindowsWindowState {
     pub restore_from_minimized: Cell<Option<Box<dyn FnMut(RequestFrameOptions)>>>,
 
     pub callbacks: Callbacks,
+    pub(crate) frame_demand: Arc<crate::frame_demand::FrameDemand>,
     pub input_handler: Cell<Option<PlatformInputHandler>>,
     pub ime_enabled: Cell<bool>,
     pub pending_surrogate: Cell<Option<u16>>,
@@ -164,6 +165,7 @@ impl WindowsWindowState {
             restore_from_minimized: Cell::new(restore_from_minimized),
             min_size,
             callbacks,
+            frame_demand: Arc::default(),
             input_handler: Cell::new(input_handler),
             ime_enabled: Cell::new(true),
             pending_surrogate: Cell::new(pending_surrogate),
@@ -935,6 +937,17 @@ impl PlatformWindow for WindowsWindow {
 
     fn on_request_frame(&self, callback: Box<dyn FnMut(RequestFrameOptions)>) {
         self.state.callbacks.request_frame.set(Some(callback));
+    }
+
+    fn frame_requester(&self) -> Option<Rc<dyn Fn()>> {
+        let demand = self.state.frame_demand.clone();
+        Some(Rc::new(move || demand.request()))
+    }
+
+    fn pause_frame_requests(&self) {
+        if !self.state.direct_manipulation.needs_frame() {
+            self.state.frame_demand.pause();
+        }
     }
 
     fn on_input(&self, callback: Box<dyn FnMut(PlatformInput) -> DispatchEventResult>) {

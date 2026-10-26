@@ -175,12 +175,14 @@ impl WindowsWindowInner {
         // Don't resize the renderer when the window is minimized, but record that it was minimized so
         // that on restore the swap chain can be recreated via `update_drawable_size_even_if_unchanged`.
         if wparam.0 == SIZE_MINIMIZED as usize {
-            self.state
-                .restore_from_minimized
-                .set(self.state.callbacks.request_frame.take());
+            self.state.frame_demand.suspend();
+            if let Some(callback) = self.state.callbacks.request_frame.take() {
+                self.state.restore_from_minimized.set(Some(callback));
+            }
             return Some(0);
         }
 
+        self.state.frame_demand.resume();
         let width = lparam.loword().max(1) as i32;
         let height = lparam.hiword().max(1) as i32;
         let new_size = size(DevicePixels(width), DevicePixels(height));
@@ -1224,6 +1226,7 @@ impl WindowsWindowInner {
     }
 
     fn handle_dm_pointer_hit_test(&self, wparam: WPARAM) -> Option<isize> {
+        self.state.frame_demand.request();
         self.state.direct_manipulation.on_pointer_hit_test(wparam);
         None
     }
