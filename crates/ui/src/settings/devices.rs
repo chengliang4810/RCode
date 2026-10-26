@@ -1,6 +1,8 @@
 //! Local external access and the execution hosts this desktop connects to.
 
-use gpui::{App, ClipboardItem, Context, Entity, Subscription, Task, Window, div, prelude::*, px};
+use gpui::{
+    App, ClipboardItem, Context, Entity, Focusable, Subscription, Task, Window, div, prelude::*, px,
+};
 use rcode_presentation::TextKey;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -44,6 +46,8 @@ pub struct DevicesPage {
     port: Entity<ComposerInput>,
     key: Entity<ComposerInput>,
     key_visible: bool,
+    saved_key: String,
+    pending_access_toggle: Option<(bool, bool)>,
     hosts: Vec<RemoteHost>,
     editor: Option<HostEditor>,
     editor_generation: u64,
@@ -58,6 +62,7 @@ pub struct DevicesPage {
     _key_load: Option<Task<()>>,
     _poll: Option<Task<()>>,
     _observe: Subscription,
+    _blur: Vec<Subscription>,
 }
 
 fn input(
@@ -110,6 +115,8 @@ impl DevicesPage {
             port,
             key,
             key_visible: false,
+            saved_key: String::new(),
+            pending_access_toggle: None,
             hosts: Vec::new(),
             editor: None,
             editor_generation: 0,
@@ -124,6 +131,7 @@ impl DevicesPage {
             _key_load: None,
             _poll: None,
             _observe: observe,
+            _blur: Vec::new(),
         };
         page.load(cx);
         page.set_active(true, cx);
@@ -132,6 +140,7 @@ impl DevicesPage {
 
     pub(crate) fn set_active(&mut self, active: bool, cx: &mut Context<Self>) {
         if !active {
+            self.save_access_draft(cx);
             self._poll = None;
             return;
         }
@@ -206,6 +215,8 @@ impl DevicesPage {
         self.editor = None;
         self.editor_generation = self.editor_generation.wrapping_add(1);
         self.key_visible = false;
+        self.saved_key.clear();
+        self.pending_access_toggle = None;
         self.error = None;
         self.loading = false;
         self.set_saving(false, cx);
@@ -272,6 +283,7 @@ impl DevicesPage {
                 page.loading = false;
                 match result {
                     Ok((access, hosts, key)) => {
+                        page.saved_key = key.clone();
                         if page.port.read(cx).edit_revision() == port_revision {
                             page.port.update(cx, |input, cx| {
                                 input.set_text(access.port.to_string(), cx)
@@ -311,7 +323,13 @@ impl DevicesPage {
     }
 
     fn save_access(&mut self, enabled: bool, replace_key: bool, cx: &mut Context<Self>) {
-        if self.saving || self.loading {
+        if self.loading {
+            return;
+        }
+        if self.saving {
+            // Blurring a local field can start its save before the switch's
+            // click arrives. Apply that click once the current write finishes.
+            self.pending_access_toggle = Some((enabled, replace_key));
             return;
         }
         let text = crate::l10n::localizer();
@@ -338,11 +356,50 @@ impl DevicesPage {
             }
             params["apiKey"] = json!(key);
         }
+        self.write_access(params, cx);
+    }
+
+    fn save_access_draft(&mut self, cx: &mut Context<Self>) {
+        if self.saving || self.loading {
+            return;
+        }
+        let Some(access) = &self.access else {
+            return;
+        };
+        let port = self.port.read(cx).text().parse::<u16>();
+        let key = self.key.read(cx).text();
+        let replace_key = access.enabled && key != self.saved_key;
+        if port.as_ref().is_ok_and(|port| *port == access.port) && !replace_key {
+            return;
+        }
+        let text = crate::l10n::localizer();
+        let port = match port {
+            Ok(port) if port != 0 => port,
+            _ => {
+                self.error = Some(text.text(TextKey::SettingsDevicesInvalidPort));
+                cx.notify();
+                return;
+            }
+        };
+        if replace_key && !valid_key(key) {
+            self.error = Some(text.text(TextKey::SettingsDevicesInvalidKey));
+            cx.notify();
+            return;
+        }
+        let mut params = json!({"enabled":access.enabled,"port":port});
+        if replace_key {
+            params["apiKey"] = json!(key);
+        }
+        self.write_access(params, cx);
+    }
+
+    fn write_access(&mut self, params: Value, cx: &mut Context<Self>) {
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             return;
         };
         let context = self.context(cx);
         let generation = self.context_generation;
+        let key_revision = self.key.read(cx).edit_revision();
         self.set_saving(true, cx);
         self.error = None;
         self._write = Some(cx.spawn(async move |page, cx| {
@@ -373,16 +430,36 @@ impl DevicesPage {
                 page.set_saving(false, cx);
                 match result {
                     Ok((access, key)) => {
-                        page.key.update(cx, |input, cx| input.set_text(key, cx));
+                        page.saved_key = key.clone();
+                        if page.key.read(cx).edit_revision() == key_revision {
+                            page.key.update(cx, |input, cx| input.set_text(key, cx));
+                        }
                         page.access = Some(access);
                     }
                     Err(error) => page.error = Some(error),
                 }
+                page.flush_access_toggle(cx);
                 cx.notify();
             })
             .ok();
         }));
         cx.notify();
+    }
+
+    fn flush_access_toggle(&mut self, cx: &mut Context<Self>) {
+        if let Some((enabled, replace_key)) = self.pending_access_toggle.take() {
+            let page = cx.entity().downgrade();
+            let context = self.loaded_context;
+            let generation = self.context_generation;
+            cx.defer(move |cx| {
+                page.update(cx, |page, cx| {
+                    if page.is_current_context(context, generation, cx) {
+                        page.save_access(enabled, replace_key, cx);
+                    }
+                })
+                .ok();
+            });
+        }
     }
 
     fn edit_host(&mut self, host: Option<RemoteHost>, cx: &mut Context<Self>) {
@@ -520,6 +597,7 @@ impl DevicesPage {
                     }
                     Err(error) => page.error = Some(error.to_string()),
                 }
+                page.flush_access_toggle(cx);
                 cx.notify();
             })
             .ok();
@@ -643,18 +721,6 @@ impl DevicesPage {
                                     },
                                 )),
                             ),
-                    )
-                    .child(
-                        widgets::text_action(
-                            theme,
-                            widgets::ActionTone::Outlined,
-                            text.text(TextKey::ActionSave),
-                        )
-                        .id("devices-access-save")
-                        .role(gpui::Role::Button)
-                        .tab_index(0)
-                        .opacity(if busy { 0.5 } else { 1.0 })
-                        .on_click(cx.listener(|page, _, _, cx| page.save_access(true, true, cx))),
                     ),
             );
         }
@@ -764,7 +830,17 @@ impl popover::ScrollRailHost for DevicesPage {
 }
 
 impl Render for DevicesPage {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self._blur.is_empty() {
+            self._blur = [&self.port, &self.key]
+                .into_iter()
+                .map(|input| {
+                    cx.on_blur(&input.focus_handle(cx), window, |page, _, cx| {
+                        page.save_access_draft(cx);
+                    })
+                })
+                .collect();
+        }
         let theme = Theme::of(cx).for_settings_surface();
         let text = crate::l10n::localizer();
         let access = self.render_access(&theme, cx);
@@ -819,15 +895,22 @@ impl Render for DevicesPage {
             hosts = hosts.child(editor);
         }
         hosts = hosts.child(
-            widgets::text_action(
-                &theme,
-                widgets::ActionTone::Quiet,
-                text.text(TextKey::SettingsDevicesAddHost),
-            )
-            .id("devices-add-host")
-            .role(gpui::Role::Button)
-            .tab_index(0)
-            .on_click(cx.listener(|page, _, _, cx| page.edit_host(None, cx))),
+            div().flex().child(
+                widgets::action_button(&theme, widgets::ActionTone::Solid)
+                    .id("devices-add-host")
+                    .debug_selector(|| "devices-add-host".into())
+                    .role(gpui::Role::Button)
+                    .aria_label(text.text(TextKey::SettingsDevicesAddHost))
+                    .tab_index(0)
+                    .focus_visible(|s| s.border_2().border_color(theme.accent))
+                    .on_click(cx.listener(|page, _, _, cx| page.edit_host(None, cx)))
+                    .child(
+                        icons::icon(icons::PLUS)
+                            .size(px(14.0))
+                            .text_color(theme.on_solid),
+                    )
+                    .child(text.text(TextKey::SettingsDevicesAddHost)),
+            ),
         );
         let mut column = widgets::page_column()
             .child(widgets::page_header(

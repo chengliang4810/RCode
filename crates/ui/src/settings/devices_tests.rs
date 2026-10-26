@@ -1,6 +1,6 @@
 use super::*;
 use crate::state::EngineHandle;
-use gpui::{TestAppContext, WindowHandle};
+use gpui::{Focusable, TestAppContext, WindowHandle};
 use rcode_rpc::{ClientFrame, RpcClient};
 use tokio::sync::mpsc;
 
@@ -163,6 +163,171 @@ fn host(id: &str) -> RemoteHost {
         connected: true,
         error: None,
     }
+}
+
+fn draw(cx: &mut TestAppContext, window: WindowHandle<DevicesPage>) {
+    cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear())
+        .unwrap();
+}
+
+#[gpui::test]
+fn local_access_fields_save_on_blur_including_the_disabled_port(cx: &mut TestAppContext) {
+    let runtime = runtime();
+    let _guard = runtime.enter();
+    let (mut server, window) = setup(&runtime, cx);
+    window
+        .update(cx, |_, window, _| window.activate_window())
+        .unwrap();
+    draw(cx, window);
+    for enabled in [false, true] {
+        window
+            .update(cx, |page, window, cx| {
+                page.access.as_mut().unwrap().enabled = enabled;
+                let input = if enabled { &page.key } else { &page.port };
+                window.focus(&input.focus_handle(cx), cx);
+            })
+            .unwrap();
+        draw(cx, window);
+        window
+            .update(cx, |page, _, cx| {
+                page.port.update(cx, |input, cx| {
+                    input.set_text(if enabled { "28889" } else { "28888" }, cx)
+                });
+                if enabled {
+                    page.key
+                        .update(cx, |input, cx| input.set_text("UpdatedKey123", cx));
+                }
+            })
+            .unwrap();
+        server.assert_idle(cx);
+        window.update(cx, |_, window, _| window.blur()).unwrap();
+        draw(cx, window);
+        let request = server.request(cx);
+        assert_eq!(request.method.as_deref(), Some("SetRemoteAccess"));
+        let port = if enabled { 28889 } else { 28888 };
+        let expected = if enabled {
+            json!({"enabled":true,"port":port,"apiKey":"UpdatedKey123"})
+        } else {
+            json!({"enabled":false,"port":port})
+        };
+        assert_eq!(request.params, expected);
+        server.reply(
+            &runtime,
+            &request,
+            json!({"enabled":enabled,"port":port,"hasApiKey":enabled,"error":null}),
+        );
+        let request = server.request(cx);
+        assert_eq!(request.method.as_deref(), Some("GetRemoteAccessApiKey"));
+        server.reply(
+            &runtime,
+            &request,
+            json!({"apiKey":if enabled { "UpdatedKey123" } else { "" }}),
+        );
+        cx.run_until_parked();
+        // Refocusing an unchanged field must not rewrite the configuration.
+        window
+            .update(cx, |page, window, cx| {
+                window.focus(&page.port.focus_handle(cx), cx)
+            })
+            .unwrap();
+        draw(cx, window);
+        window.update(cx, |_, window, _| window.blur()).unwrap();
+        draw(cx, window);
+        server.assert_idle(cx);
+    }
+    let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+    assert!(visual.debug_bounds("devices-access-save").is_none());
+    assert!(visual.debug_bounds("devices-add-host").is_some());
+}
+
+#[gpui::test]
+fn leaving_devices_saves_pending_local_changes(cx: &mut TestAppContext) {
+    let runtime = runtime();
+    let _guard = runtime.enter();
+    let (mut server, window) = setup(&runtime, cx);
+    window
+        .update(cx, |page, _, cx| {
+            page.port
+                .update(cx, |input, cx| input.set_text("28888", cx));
+            page.set_active(false, cx);
+        })
+        .unwrap();
+    let request = server.request(cx);
+    assert_eq!(request.method.as_deref(), Some("SetRemoteAccess"));
+    assert_eq!(request.params, json!({"enabled":false,"port":28888}));
+    server.reply(
+        &runtime,
+        &request,
+        json!({"enabled":false,"port":28888,"hasApiKey":false,"error":null}),
+    );
+    let request = server.request(cx);
+    assert_eq!(request.method.as_deref(), Some("GetRemoteAccessApiKey"));
+    server.reply(&runtime, &request, json!({"apiKey":""}));
+    server.assert_idle(cx);
+}
+
+#[gpui::test]
+fn access_toggle_waits_for_the_automatic_field_save(cx: &mut TestAppContext) {
+    let runtime = runtime();
+    let _guard = runtime.enter();
+    let (mut server, window) = setup(&runtime, cx);
+    window
+        .update(cx, |page, _, cx| {
+            page.port
+                .update(cx, |input, cx| input.set_text("28888", cx));
+            page.save_access_draft(cx);
+            page.save_access(true, false, cx);
+        })
+        .unwrap();
+    for enabled in [false, true] {
+        let request = server.request(cx);
+        assert_eq!(request.method.as_deref(), Some("SetRemoteAccess"));
+        assert_eq!(request.params, json!({"enabled":enabled,"port":28888}));
+        server.reply(
+            &runtime,
+            &request,
+            json!({"enabled":enabled,"port":28888,"hasApiKey":enabled,"error":null}),
+        );
+        let request = server.request(cx);
+        assert_eq!(request.method.as_deref(), Some("GetRemoteAccessApiKey"));
+        server.reply(
+            &runtime,
+            &request,
+            json!({"apiKey":if enabled { "Fixture12345" } else { "" }}),
+        );
+    }
+    server.assert_idle(cx);
+    window
+        .update(cx, |page, _, _| {
+            assert!(page.access.as_ref().unwrap().enabled)
+        })
+        .unwrap();
+}
+
+#[gpui::test]
+fn automatic_access_save_rejects_invalid_values_without_changing_saved_settings(
+    cx: &mut TestAppContext,
+) {
+    let runtime = runtime();
+    let _guard = runtime.enter();
+    let (mut server, window) = setup(&runtime, cx);
+    window
+        .update(cx, |page, _, cx| {
+            page.port.update(cx, |input, cx| input.set_text("0", cx));
+            page.save_access_draft(cx);
+            assert!(page.error.is_some());
+            assert_eq!(page.access.as_ref().unwrap().port, 27655);
+            page.access.as_mut().unwrap().enabled = true;
+            page.port
+                .update(cx, |input, cx| input.set_text("27655", cx));
+            page.key
+                .update(cx, |input, cx| input.set_text("invalid", cx));
+            page.save_access_draft(cx);
+            assert!(page.error.is_some());
+            assert!(page.saved_key.is_empty());
+        })
+        .unwrap();
+    server.assert_idle(cx);
 }
 
 #[gpui::test]
