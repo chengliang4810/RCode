@@ -23,6 +23,7 @@ use crate::motion::{self, AnimationExt as _, TAB_SLIDE};
 use crate::settings::shortcuts::modifier_send_label;
 use crate::terminal::panel::{drop_index, slide_offset};
 use crate::theme::Theme;
+use crate::typography::UiTextRole;
 
 /// Queue rows are replicated CRDT state, so ordinary mutations deliberately
 /// land on the local engine. Delivery and cancellation must execute on the
@@ -66,7 +67,8 @@ impl Render for QueueActionTooltip {
             .border_1()
             .border_color(theme.border)
             .bg(crate::popover::surface_bg(theme))
-            .text_size(px(10.5))
+            .text_size(UiTextRole::Caption.size())
+            .line_height(UiTextRole::Caption.line_height())
             .text_color(theme.text_muted)
             .child(self.label.clone());
         crate::frost::frosted(6.0, crate::frost::MENU_BLUR, card)
@@ -77,7 +79,6 @@ impl Render for QueueActionTooltip {
 /// keep the tray's inset between them, so neighbouring hover and editing
 /// washes never touch; each slot stays 36px.
 const ROW_HEIGHT: f32 = 32.0;
-const QUEUE_TEXT_SIZE: f32 = 12.5;
 const ROW_GAP: f32 = PANEL_PAD_X;
 const ROW_SLOT: f32 = ROW_HEIGHT + ROW_GAP;
 const ROW_PAD_X: f32 = 8.0;
@@ -303,13 +304,7 @@ pub(crate) fn queue_panel_surface(theme: &Theme, dragging: bool) -> gpui::Div {
     div()
         .when(!dragging, |el| el.occlude())
         .rounded_t(px(PANEL_RADIUS))
-        .bg(
-            if theme.is_frost() && matches!(theme.appearance, crate::theme::Appearance::Dark) {
-                theme.composer_sidebar_tint()
-            } else {
-                theme.input_glass_bg()
-            },
-        )
+        .bg(theme.composer_surface_bg())
         .border_1()
         .border_color(theme.border)
         .when(!theme.is_frost(), |el| el.shadow_lg())
@@ -543,6 +538,7 @@ impl Composer {
         });
         let being_edited = editing.as_deref() == Some(item.id.as_str());
         let being_removed = self.queue_removing.contains(&item.id);
+        let preparing_edit = self.queue_edit_pending_id.as_deref() == Some(item.id.as_str());
         let delivery_blocked = item.delivery_gate.is_some();
         let interaction_blocked = delivery_blocked || being_removed;
         let (text, chips) = match &item.delivery_gate {
@@ -570,11 +566,13 @@ impl Composer {
             "edit",
             &crate::l10n::localizer().text(TextKey::ConversationQueueEdit),
             icons::PEN,
-            !being_removed,
+            !being_removed && !preparing_edit,
+            preparing_edit,
             theme,
             cx.listener(move |this, _, _, cx| {
                 this.begin_queue_edit(edit_id.clone(), cx);
             }),
+            cx,
         );
         let drop_id = item.id.clone();
         let discard = self.queue_action(
@@ -587,10 +585,12 @@ impl Composer {
             }),
             icons::TRASH_BIN_MINIMALISTIC,
             !being_removed,
+            being_removed,
             theme,
             cx.listener(move |this, _, _, cx| {
                 this.remove_queued(drop_id.clone(), cx);
             }),
+            cx,
         );
         let resolved_primary = available_queue_primary_action(
             interaction_blocked,
@@ -621,10 +621,12 @@ impl Composer {
             &crate::l10n::localizer().text(TextKey::ConversationQueueSave),
             icons::QUEUE_CHECK,
             !self.queue_edit_finishing,
+            self.queue_edit_finishing,
             theme,
             cx.listener(|this, _, _, cx| {
                 this.commit_queue_edit(cx);
             }),
+            cx,
         );
         let cancel = self.queue_action(
             &key,
@@ -632,10 +634,12 @@ impl Composer {
             &crate::l10n::localizer().text(TextKey::ActionCancel),
             icons::QUEUE_CLOSE,
             !self.queue_edit_finishing,
+            false,
             theme,
             cx.listener(|this, _, _, cx| {
                 this.cancel_queue_edit(cx);
             }),
+            cx,
         );
 
         let drag_chat = chat_id.to_string();
@@ -698,14 +702,13 @@ impl Composer {
             // from the editing state.
             .when(being_edited, |el| el.child(div().w(px(14.0)).flex_none()))
             .when(!being_edited, |el| {
-                // A line with chips is taller, so their pills have room.
-                let line_height = if chips.is_empty() { 16.0 } else { 20.0 };
+                // Keep ordinary text and chip labels on the same reading line.
                 let content = div()
                     .flex_1()
                     .min_w_0()
                     .truncate()
-                    .text_size(px(QUEUE_TEXT_SIZE))
-                    .line_height(px(line_height))
+                    .text_size(UiTextRole::Primary.size())
+                    .line_height(UiTextRole::Primary.line_height())
                     .text_color(theme.text.opacity(0.9))
                     .child(crate::composer::chip_text(text, chips, theme));
                 // Attachments the row's chips already show get no tile.
@@ -759,7 +762,8 @@ impl Composer {
                     div()
                         .flex_1()
                         .min_w_0()
-                        .text_size(px(QUEUE_TEXT_SIZE))
+                        .text_size(UiTextRole::Primary.size())
+                        .line_height(UiTextRole::Primary.line_height())
                         .text_color(theme.text_muted)
                         .child(crate::l10n::localizer().text(if self.queue_edit_finishing {
                             TextKey::ConversationQueueSaving
@@ -1107,8 +1111,10 @@ impl Composer {
         label: &str,
         glyph: &'static str,
         enabled: bool,
+        busy: bool,
         theme: &Theme,
         on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static,
+        cx: &mut Context<Self>,
     ) -> AnyElement {
         let own = SharedString::from(format!("{key}-{slot}-grp"));
         let accent = theme.accent;
@@ -1126,10 +1132,10 @@ impl Composer {
             .items_center()
             .justify_center()
             .rounded(px(ROW_CONTROL_RADIUS))
-            .opacity(0.72)
+            .text_color(theme.text_muted)
             .when(enabled, |el| {
                 el.cursor_pointer()
-                    .hover(|s| s.opacity(1.0).bg(crate::theme::ink(0.07)))
+                    .hover(|s| s.bg(crate::theme::ink(0.07)).text_color(theme.text))
                     .tab_index(0)
                     .focus_visible(move |s| s.bg(accent.opacity(0.18)).text_color(accent))
                     .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
@@ -1139,7 +1145,8 @@ impl Composer {
                     })
             })
             .when(!enabled, |el| {
-                el.cursor(gpui::CursorStyle::Arrow).opacity(0.45)
+                el.cursor(gpui::CursorStyle::Arrow)
+                    .opacity(if busy { 0.85 } else { 0.45 })
             })
             .tooltip(move |_, cx| {
                 cx.new(|_| QueueActionTooltip {
@@ -1148,12 +1155,22 @@ impl Composer {
                 .into()
             })
             .tooltip_show_delay(std::time::Duration::from_millis(350))
-            .child(
+            .child(if busy {
+                crate::loaders::mini_mono_spinner(
+                    format!("{key}-{slot}-busy"),
+                    2.0,
+                    theme.text_muted,
+                    cx.entity_id(),
+                    cx,
+                )
+                .into_any_element()
+            } else {
                 icon(glyph)
                     .size(px(QUEUE_ICON_SIZE))
-                    .text_color(theme.text_muted.opacity(0.8))
-                    .group_hover(own, |s| s.text_color(theme.text)),
-            )
+                    .text_color(theme.text_muted)
+                    .group_hover(own, |style| style.text_color(theme.text))
+                    .into_any_element()
+            })
             .into_any_element()
     }
 
@@ -1189,7 +1206,8 @@ impl Composer {
             .items_center()
             .justify_center()
             .rounded(px(ROW_CONTROL_RADIUS))
-            .text_size(px(11.5))
+            .text_size(UiTextRole::Caption.size())
+            .line_height(UiTextRole::Caption.line_height())
             .text_color(theme.text_muted)
             .when(enabled, |el| {
                 el.cursor_pointer()
@@ -2135,6 +2153,7 @@ impl Composer {
                         "queue mutation was not applied; reconciling"
                     );
                     this.update(cx, |composer, cx| {
+                        composer.failure = Some(failure.clone().into());
                         if let Some(id) = &pending_message {
                             composer.state.update(cx, |state, cx| {
                                 state.end_pending_send(&chat_id, id);
@@ -2144,6 +2163,7 @@ impl Composer {
                         composer
                             .state
                             .update(cx, |state, cx| state.refresh_selected_queue(cx));
+                        cx.notify();
                     })
                     .ok();
                 }

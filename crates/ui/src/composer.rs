@@ -45,6 +45,7 @@ use crate::theme::Theme;
 
 mod chip;
 mod goal;
+mod staged_motion;
 pub use chip::ChipKind;
 use chip::*;
 pub(crate) use chip::{
@@ -68,10 +69,10 @@ pub const TEXTAREA_MAX: f32 = 260.0;
 /// Expanded actions row: 2px top + 32px picker + 8px bottom.
 const ACTIONS_BOTTOM_PAD: f32 = 8.0;
 pub const ACTIONS_ROW_HEIGHT: f32 = 2.0 + 32.0 + ACTIONS_BOTTOM_PAD;
-/// The pill's 1px hairline, top + bottom (`rounded-[26px] border`).
+/// The pill's 1px hairline, top + bottom.
 pub const PILL_BORDER_V: f32 = 2.0;
 /// Corner radius shared by the composer and the queue tray behind it.
-pub(crate) const COMPOSER_RADIUS: f32 = 26.0;
+pub(crate) const COMPOSER_RADIUS: f32 = Theme::COMPOSER_RADIUS;
 /// Expanded composer bounds: 120px when empty, 304px at the content cap.
 pub const COMPOSER_MIN_HEIGHT: f32 = TEXTAREA_MIN + ACTIONS_ROW_HEIGHT + PILL_BORDER_V;
 pub const COMPOSER_MAX_HEIGHT: f32 = TEXTAREA_MAX + ACTIONS_ROW_HEIGHT + PILL_BORDER_V;
@@ -306,10 +307,47 @@ pub fn attachment_strip_height(count: usize, inner_width: f32) -> f32 {
     if count == 0 {
         return 0.0;
     }
-    let usable = (inner_width - 2.0 * STRIP_PAD_X).max(STRIP_THUMB);
-    let per_row = (((usable + STRIP_GAP) / (STRIP_THUMB + STRIP_GAP)).floor() as usize).max(1);
+    let per_row = attachment_strip_columns(inner_width);
     let rows = count.div_ceil(per_row);
     STRIP_PAD_TOP + rows as f32 * STRIP_THUMB + (rows - 1) as f32 * STRIP_GAP
+}
+
+fn attachment_strip_columns(inner_width: f32) -> usize {
+    let usable = (inner_width - 2.0 * STRIP_PAD_X).max(STRIP_THUMB);
+    (((usable + STRIP_GAP) / (STRIP_THUMB + STRIP_GAP)).floor() as usize).max(1)
+}
+
+/// Departing tiles release their layout reservation on the same clock as
+/// their exit. Interpolating across integer counts avoids holding an empty
+/// wrapped row until the last retained view is finally removed.
+fn attachment_strip_reserved_height(occupied: f32, inner_width: f32) -> f32 {
+    if !occupied.is_finite() || occupied <= 0.0 {
+        return 0.0;
+    }
+    let lower = occupied.floor() as usize;
+    motion::lerp(
+        attachment_strip_height(lower, inner_width),
+        attachment_strip_height(lower.saturating_add(1), inner_width),
+        occupied - lower as f32,
+    )
+}
+
+/// Interpolate the wrap seam as well as the strip height. A remaining live
+/// tile then moves up with its row instead of being clipped at the old row.
+fn attachment_strip_slot_origin(slot: f32, inner_width: f32) -> (f32, f32) {
+    let columns = attachment_strip_columns(inner_width);
+    let lower = slot.max(0.0).floor() as usize;
+    let fraction = slot.max(0.0) - lower as f32;
+    let origin = |index: usize| (
+        (index % columns) as f32 * (STRIP_THUMB + STRIP_GAP),
+        (index / columns) as f32 * (STRIP_THUMB + STRIP_GAP),
+    );
+    let from = origin(lower);
+    let to = origin(lower.saturating_add(1));
+    (
+        STRIP_PAD_X + motion::lerp(from.0, to.0, fraction),
+        STRIP_PAD_TOP + motion::lerp(from.1, to.1, fraction),
+    )
 }
 
 pub fn comment_strip_height(count: usize) -> f32 {
@@ -1923,6 +1961,8 @@ pub struct ComposerInput {
     last_width: f32,
     /// Raw Markdown → chip display projection from the last layout pass.
     projection: TextProjection,
+    /// Stable document-owned ink reveals; never participates in text layout.
+    chip_motion: InputChipMotion,
     syntax_source: String,
     syntax_spans: Vec<rcode_syntax::HighlightSpan>,
     syntax_task: Option<Task<()>>,
@@ -2035,6 +2075,7 @@ impl ComposerInput {
             max_line_width: 0.0,
             last_width: 0.0,
             projection: TextProjection::default(),
+            chip_motion: InputChipMotion::default(),
             syntax_source: String::new(),
             syntax_spans: Vec::new(),
             syntax_task: None,
@@ -2165,7 +2206,7 @@ impl ComposerInput {
         cx.notify();
     }
 
-    fn enable_mentions(&mut self) {
+    pub(crate) fn enable_mentions(&mut self) {
         self.mentions_enabled = true;
         self.refresh_projection();
     }
@@ -2453,6 +2494,8 @@ impl ComposerInput {
         self.scroll_top = 0.0;
         self.scroll_left = 0.0;
         self.refresh_projection();
+        // Loading/navigating a draft is restoration, not a new reference edit.
+        self.chip_motion.restored(self.edit_revision);
         self.follow_cursor = true;
         // Programmatic replacement (draft load, clear-on-submit) is a new
         // document, not an edit — undo must not reach back past it.
@@ -4466,7 +4509,8 @@ impl Render for MentionPathTooltip {
 struct ComposerTextPrepaint {
     cursor: Option<PaintQuad>,
     /// Each chip row's bounds; the first row of a chip also carries its icon.
-    mention_chips: Vec<(Bounds<Pixels>, Option<ChipIcon>)>,
+    mention_chips: Vec<(Bounds<Pixels>, Option<ChipIcon>, motion::PresenceSample)>,
+    chip_motion_active: bool,
     mention_hits: Vec<MentionHit>,
     /// Image chips take the pointing hand: a click opens them.
     image_chip_hitboxes: Vec<gpui::Hitbox>,
@@ -4546,6 +4590,11 @@ impl gpui::Element for ComposerTextElement {
                 cx.emit(ComposerInputEvent::ViewportChanged);
             }
         });
+        let now = Instant::now();
+        let reduced = motion::reduced_motion(cx);
+        let chip_samples = self.input.update(cx, |input, _| {
+            input.chip_motion.sync(&input.projection.mentions, input.edit_revision, now, reduced)
+        });
         let input = self.input.read(cx);
         let paint_bounds = input.paint_bounds(bounds);
         let scroll = px(input.scroll_top);
@@ -4554,9 +4603,10 @@ impl gpui::Element for ComposerTextElement {
         let caret_color = Theme::of(cx).caret;
 
         let mut mention_chips = Vec::new();
+        let mut chip_motion_active = false;
         let appearance = Theme::of(cx).appearance;
         let mut mention_hits = Vec::new();
-        for (mention, display) in &input.projection.mentions {
+        for ((mention, display), sample) in input.projection.mentions.iter().zip(chip_samples) {
             let mut first_row = true;
             let target = MentionTooltipTarget {
                 range: mention.range.clone(),
@@ -4588,6 +4638,7 @@ impl gpui::Element for ComposerTextElement {
                 mention_chips.push((
                     chip_bounds,
                     first_row.then(|| chip_icon(mention.kind, &mention.path, appearance)),
+                    sample,
                 ));
                 first_row = false;
                 let above_anchor = chip_bounds.top() - px(tooltip_height) - px(tooltip_gap);
@@ -4602,6 +4653,7 @@ impl gpui::Element for ComposerTextElement {
                 if visible_bounds.size.width == px(0.0) || visible_bounds.size.height == px(0.0) {
                     continue;
                 }
+                chip_motion_active |= sample.active;
                 mention_hits.push(MentionHit {
                     target: target.clone(),
                     bounds: visible_bounds,
@@ -4711,6 +4763,7 @@ impl gpui::Element for ComposerTextElement {
         ComposerTextPrepaint {
             cursor,
             mention_chips,
+            chip_motion_active,
             mention_hits,
             image_chip_hitboxes,
             selection_quads,
@@ -4746,6 +4799,9 @@ impl gpui::Element for ComposerTextElement {
         for hitbox in &prepaint.image_chip_hitboxes {
             window.set_cursor_style(CursorStyle::PointingHand, hitbox);
         }
+        if prepaint.chip_motion_active {
+            motion::pulse_lease(self.input.entity_id(), cx);
+        }
 
         // WrappedLine isn't Clone — temporarily take the shaped lines out of the
         // entity for painting, then put them back for mouse mapping.
@@ -4767,8 +4823,8 @@ impl gpui::Element for ComposerTextElement {
             }),
             |window| {
                 let theme = Theme::of(cx).clone();
-                for (chip, icon) in prepaint.mention_chips.drain(..) {
-                    paint_chip(window, chip, icon.as_ref(), &theme, cx);
+                for (chip, icon, sample) in prepaint.mention_chips.drain(..) {
+                    paint_input_chip(window, chip, icon.as_ref(), &theme, sample, cx);
                 }
                 for quad in prepaint.selection_quads.drain(..) {
                     window.paint_quad(quad);
@@ -5607,7 +5663,11 @@ pub struct Composer {
     /// attachments. Each owns one screenshot that joins the existing upload
     /// path only at send time.
     pub(crate) appshots: HashMap<String, Vec<CapturedAppshot>>,
-    appshot_entrances: HashMap<String, Instant>,
+    attachment_motion: staged_motion::StagedMotion<StagedAttachment>,
+    appshot_motion: staged_motion::StagedMotion<CapturedAppshot>,
+    staged_motion_cleanup: Option<Task<()>>,
+    staged_motion_cleanup_epoch: u64,
+    attachment_exit_height_active: bool,
     /// The staged attachment being viewed full-size (click a thumbnail).
     preview: Option<attachments::PreviewImage>,
     /// Focused while the lightbox is open so Escape reaches it; the input
@@ -5637,6 +5697,8 @@ pub struct Composer {
     popup_bar: crate::popover::MenuScrollbarState,
     pub(crate) current_key: String,
     sending: bool,
+    send_pressed: bool,
+    send_press: motion::PropertySpring,
     /// Armed immediately before a blank-canvas send selects its minted chat.
     /// The state observer consumes it to distinguish that handoff from normal
     /// session navigation, which must continue to snap.
@@ -5805,6 +5867,22 @@ impl Composer {
     }
 
     pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
+        Self::new_with_environment_attachments(state, true, cx)
+    }
+
+    /// The isolated native fixture must not read files named by inherited
+    /// developer environment variables. Normal application construction keeps
+    /// its existing attachment/preview boot knobs.
+    #[cfg(feature = "appshots-fixture")]
+    pub(crate) fn new_isolated_fixture(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
+        Self::new_with_environment_attachments(state, false, cx)
+    }
+
+    fn new_with_environment_attachments(
+        state: Entity<AppState>,
+        load_environment_attachments: bool,
+        cx: &mut Context<Self>,
+    ) -> Self {
         cx.on_release(|this, cx| {
             this.release_queue_previews(cx);
         })
@@ -5904,7 +5982,11 @@ impl Composer {
             attachments: HashMap::new(),
             attachment_drafts: HashMap::new(),
             appshots: HashMap::new(),
-            appshot_entrances: HashMap::new(),
+            attachment_motion: Default::default(),
+            appshot_motion: Default::default(),
+            staged_motion_cleanup: None,
+            staged_motion_cleanup_epoch: 0,
+            attachment_exit_height_active: false,
             preview: None,
             preview_focus: cx.focus_handle(),
             preview_focus_pending: false,
@@ -5921,6 +6003,8 @@ impl Composer {
             popup_bar: crate::popover::MenuScrollbarState::default(),
             current_key,
             sending: false,
+            send_pressed: false,
+            send_press: motion::PropertySpring::new(1.0, motion::SpringSpec::new(600.0, 30.0, 1.0).with_thresholds(0.0001, 0.002), Instant::now()),
             launching_new_chat: false,
             failure: None,
             wizard: None,
@@ -5982,7 +6066,7 @@ impl Composer {
         // Dev knob: pre-stage attachments (drop/paste can't be synthesized on
         // a rig) — `RCODE_ATTACH=/path/a.png[,/path/b.png]`, and
         // `RCODE_ATTACH_PREVIEW=1` boots with the first one's lightbox open.
-        if let Ok(spec) = std::env::var("RCODE_ATTACH") {
+        if load_environment_attachments && let Ok(spec) = std::env::var("RCODE_ATTACH") {
             let staged: Vec<StagedAttachment> = spec
                 .split(',')
                 .filter(|s| !s.trim().is_empty())
@@ -6138,12 +6222,7 @@ impl Composer {
             cx.notify();
             return false;
         }
-        self.appshot_entrances
-            .retain(|_, start| start.elapsed().as_secs_f32() < motion::speed_scale());
-        if !motion::reduced_motion(cx) {
-            self.appshot_entrances
-                .insert(appshot.id.clone(), Instant::now());
-        }
+        self.appshot_motion.enter(&key, &appshot.id, self.staged_appshots().len(), Instant::now(), motion::reduced_motion(cx));
         // A capture completing while a queue edit is being saved belongs to
         // the displaced draft; it must not be lost or change the in-flight edit.
         if self.queue_edit_finishing && key == self.current_key {
@@ -6354,6 +6433,13 @@ impl Composer {
         mut staged: Vec<StagedAttachment>,
         cx: &mut Context<Self>,
     ) {
+        if key == self.current_key {
+            let now = Instant::now();
+            let reduced = motion::reduced_motion(cx);
+            for (index, item) in staged.iter().enumerate() {
+                self.attachment_motion.enter(&key, &item.id, index, now, reduced);
+            }
+        }
         if key != self.current_key {
             self.attachments.entry(key).or_default().extend(staged);
             return;
@@ -6446,6 +6532,7 @@ impl Composer {
     /// Set the draft's chip numbering and undo stash aside while a queued
     /// message occupies the composer.
     pub(crate) fn displace_attachment_draft(&mut self) {
+        self.clear_staged_motion();
         self.queue_edit_attachment_draft = Some(
             self.attachment_drafts
                 .remove(&self.current_key)
@@ -6456,10 +6543,56 @@ impl Composer {
     /// Bring back what [`Self::displace_attachment_draft`] set aside; the
     /// edit's own numbering and stash are dropped with it.
     pub(crate) fn restore_attachment_draft(&mut self) {
+        self.clear_staged_motion();
         if let Some(draft) = self.queue_edit_attachment_draft.take() {
             self.attachment_drafts
                 .insert(self.current_key.clone(), draft);
         }
+    }
+
+    /// A different draft is a different presentation lifetime even when it
+    /// belongs to the same chat (ordinary draft versus queue edit).
+    fn clear_staged_motion(&mut self) {
+        self.staged_motion_cleanup_epoch = self.staged_motion_cleanup_epoch.wrapping_add(1);
+        self.staged_motion_cleanup = None;
+        self.attachment_exit_height_active = false;
+        self.attachment_motion.forget(&self.current_key);
+        self.appshot_motion.forget(&self.current_key);
+    }
+
+    fn schedule_staged_motion_cleanup(&mut self, cx: &mut Context<Self>) {
+        self.staged_motion_cleanup_epoch = self.staged_motion_cleanup_epoch.wrapping_add(1);
+        self.staged_motion_cleanup = None;
+        if self.attachment_motion.retiring_count(&self.current_key) == 0
+            && self.appshot_motion.retiring_count(&self.current_key) == 0
+        {
+            return;
+        }
+        let epoch = self.staged_motion_cleanup_epoch;
+        let scope = self.current_key.clone();
+        let delay = motion::ATTACHMENT_OUT.total().mul_f32(motion::speed_scale());
+        let deadline = Instant::now() + delay;
+        self.staged_motion_cleanup = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(delay).await;
+            let _ = this.update(cx, |this, cx| {
+                if this.staged_motion_cleanup_epoch != epoch || this.current_key != scope {
+                    return;
+                }
+                this.staged_motion_cleanup = None;
+                // The executor clock can advance without a draw or a matching
+                // wall-clock advance (sleep/resume and GPUI tests).
+                let now = Instant::now().max(deadline);
+                let reduced = motion::reduced_motion(cx);
+                this.attachment_motion.prune(now, reduced);
+                this.appshot_motion.prune(now, reduced);
+                if this.attachment_motion.retiring_count(&scope) > 0
+                    || this.appshot_motion.retiring_count(&scope) > 0
+                {
+                    this.schedule_staged_motion_cleanup(cx);
+                }
+                cx.notify();
+            });
+        }));
     }
 
     fn remove_attachment(&mut self, id: &str, cx: &mut Context<Self>) {
@@ -6467,9 +6600,14 @@ impl Composer {
             return;
         }
         let mut mention = None;
+        let visible_index = self.tiled_attachments(cx).iter().position(|item| item.id == id);
+        let mut retiring = None;
         if let Some(list) = self.attachments.get_mut(&self.current_key) {
             if let Some(at) = list.iter().position(|a| a.id == id) {
                 let removed = list.remove(at);
+                if let Some(index) = visible_index {
+                    retiring = Some((removed.clone(), index));
+                }
                 if let Some(index) = removed.mention {
                     mention = Some(index);
                     // Undo of the chip removal below restages this image.
@@ -6483,6 +6621,10 @@ impl Composer {
             if list.is_empty() {
                 self.attachments.remove(&self.current_key);
             }
+        }
+        if let Some((removed, index)) = retiring {
+            self.attachment_motion.retire(&self.current_key, id, removed, index, Instant::now(), motion::reduced_motion(cx));
+            self.schedule_staged_motion_cleanup(cx);
         }
         if let Some(index) = mention {
             self.input
@@ -6516,11 +6658,18 @@ impl Composer {
         if self.queue_edit_finishing {
             return;
         }
+        let mut retiring = None;
         if let Some(list) = self.appshots.get_mut(&self.current_key) {
-            list.retain(|appshot| appshot.id != id);
+            if let Some(index) = list.iter().position(|appshot| appshot.id == id) {
+                retiring = Some((list.remove(index), index));
+            }
             if list.is_empty() {
                 self.appshots.remove(&self.current_key);
             }
+        }
+        if let Some((item, index)) = retiring {
+            self.appshot_motion.retire(&self.current_key, id, item, index, Instant::now(), motion::reduced_motion(cx));
+            self.schedule_staged_motion_cleanup(cx);
         }
         cx.notify();
     }
@@ -6528,10 +6677,15 @@ impl Composer {
     /// Drop a deleted chat's per-chat composer state — staged attachments hold
     /// raw image bytes, and a deleted chat's stage could never be sent again.
     pub fn purge_chat(&mut self, chat_id: &str, cx: &mut Context<Self>) {
+        if chat_id == self.current_key {
+            self.clear_staged_motion();
+        }
         self.drafts.remove(chat_id);
         self.attachments.remove(chat_id);
         self.attachment_drafts.remove(chat_id);
         self.appshots.remove(chat_id);
+        self.attachment_motion.forget(chat_id);
+        self.appshot_motion.forget(chat_id);
         self.state.update(cx, |state, _| {
             state.purge_review_comments(chat_id);
         });
@@ -6574,21 +6728,24 @@ impl Composer {
     /// `flex flex-wrap gap-2 px-4 pt-3`, 56px rounded thumbs, a remove button
     /// revealed on hover, click opens the full-size preview. Attachments with
     /// a chip in the draft are left out.
-    fn render_attachment_strip(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<gpui::Div> {
-        let staged = self.tiled_attachments(cx);
+    fn render_attachment_strip(&mut self, theme: &Theme, staged: Vec<staged_motion::StagedView<StagedAttachment>>, reserved_height: f32, inner_width: f32, window: &mut Window, cx: &mut Context<Self>) -> Option<gpui::Div> {
         if staged.is_empty() {
             return None;
         }
         let mut strip = div()
+            .debug_selector(|| "composer-attachment-strip".into())
             .w_full()
             .flex_none()
-            .flex()
-            .flex_row()
-            .flex_wrap()
-            .gap(px(STRIP_GAP))
-            .px(px(STRIP_PAD_X))
-            .pt(px(STRIP_PAD_TOP));
-        for (ix, att) in staged.iter().enumerate() {
+            .relative()
+            .h(px(reserved_height))
+            .overflow_hidden();
+        let mut slot = 0.0;
+        for (ix, view) in staged.iter().enumerate() {
+            let att = &view.item;
+            if view.sample.active { window.request_animation_frame(); }
+            let reservation = view.reservation;
+            let origin = attachment_strip_slot_origin(slot, inner_width);
+            slot += reservation;
             let group: SharedString = format!("composer-att-{}", att.id).into();
             let remove_id = att.id.clone();
             let remove_label: SharedString = crate::l10n::localizer()
@@ -6601,12 +6758,18 @@ impl Composer {
                 div()
                     .group(group.clone())
                     .flex_none()
-                    .relative()
-                    .child(self.attachment_tile(att, ix, cx))
+                    .absolute()
+                    .left(px(origin.0))
+                    .w(px(STRIP_THUMB * reservation))
+                    .h(px(STRIP_THUMB))
+                    .opacity(view.sample.opacity)
+                    .top(px(origin.1 + view.sample.offset_y))
+                    .when(view.exiting, |el| el.overflow_hidden())
+                    .child(self.attachment_tile(att, !view.exiting, cx))
                     // Own layer: inside the frosted pill everything shares one
                     // draw order and images render last, so without it the
                     // thumbnail paints OVER this button (user report).
-                    .child(crate::frost::layered(
+                    .when(!view.exiting, |el| el.child(crate::frost::layered(
                         div()
                             .id(("composer-att-remove", ix))
                             .absolute()
@@ -6638,7 +6801,7 @@ impl Composer {
                                     .size(px(14.0))
                                     .text_color(theme.text_muted),
                             ),
-                    )),
+                    ))),
             );
         }
         Some(strip)
@@ -6649,11 +6812,13 @@ impl Composer {
     fn attachment_tile(
         &self,
         att: &StagedAttachment,
-        ix: usize,
+        interactive: bool,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
+        let tile_id = att.id.clone();
         let frame = div()
-            .id(("composer-att-thumb", ix))
+            .id(SharedString::from(format!("composer-att-thumb-{}", att.id)))
+            .debug_selector(move || format!("composer-att-thumb-{tile_id}").into())
             .size(px(STRIP_THUMB))
             .rounded(px(8.0))
             .overflow_hidden()
@@ -6680,7 +6845,7 @@ impl Composer {
                         .w_full()
                         .truncate()
                         .text_center()
-                        .text_size(px(10.0))
+                        .text_size(crate::typography::UiTextRole::Caption.size())
                         .text_color(theme.text_muted)
                         .child(SharedString::from(att.name.clone())),
                 )
@@ -6688,13 +6853,12 @@ impl Composer {
         };
         let preview = attachments::PreviewImage::new(att.name.clone(), image.clone());
         frame
-            .cursor_pointer()
-            .on_click(cx.listener(move |this, _, _, cx| {
+            .when(interactive, |el| el.cursor_pointer().on_click(cx.listener(move |this, _, _, cx| {
                 preview.viewer.reset();
                 this.preview = Some(preview.clone());
                 this.preview_focus_pending = true;
                 cx.notify();
-            }))
+            })))
             .child(
                 img(image.clone())
                     // EXPLICIT dims, not size_full: img layout honors the
@@ -6714,12 +6878,13 @@ impl Composer {
     }
 
     fn render_appshot_strip(
-        &self,
+        &mut self,
         theme: &Theme,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<gpui::AnyElement> {
-        let appshots = self.staged_appshots();
+        let live = self.staged_appshots().iter().map(|item| (item.id.clone(), item.clone())).collect();
+        let appshots = self.appshot_motion.views(&self.current_key, live, Instant::now(), motion::reduced_motion(cx));
         if appshots.is_empty() {
             return None;
         }
@@ -6736,7 +6901,11 @@ impl Composer {
             - 2.0
             - 2.0 * STRIP_PAD_X
             - 2.0 * APPSHOT_IMAGE_INSET;
-        for (ix, appshot) in appshots.iter().enumerate() {
+        for (ix, view) in appshots.iter().enumerate() {
+            let appshot = &view.item;
+            let exiting = view.exiting;
+            let hover_key: SharedString = format!("appshot-glow-{}-{}", self.current_key, appshot.id).into();
+            let glow = if exiting { 0.0 } else { motion::hover_t(&hover_key) };
             let Some(screenshot) = appshot.screenshot.image().cloned() else {
                 continue;
             };
@@ -6777,7 +6946,7 @@ impl Composer {
                 appshot_contained_size(appshot.screenshot_dimensions, max_image_width);
             let tile_width = (image_width + 2.0 * APPSHOT_IMAGE_INSET).max(APPSHOT_TILE_MIN_WIDTH);
             let mut card = div()
-                .id(("composer-appshot", ix))
+                .id(SharedString::from(format!("composer-appshot-{}", appshot.id)))
                 .group(group.clone())
                 .relative()
                 .w(px(tile_width))
@@ -6790,13 +6959,14 @@ impl Composer {
                 .overflow_hidden()
                 .cursor_pointer()
                 .hover(|style| style.bg(crate::theme::ink(0.045)))
+                .on_hover(motion::hover_listener(hover_key))
                 .tooltip(move |_, cx| {
                     cx.new(|_| AppshotActionTooltip(preview_label.clone()))
                         .into()
                 })
                 .role(gpui::Role::Button)
                 .aria_label(preview_aria)
-                .tab_index(0)
+                .tab_index(if exiting { -1 } else { 0 })
                 .focus_visible(|style| {
                     style
                         .bg(crate::theme::ink(0.06))
@@ -6804,6 +6974,7 @@ impl Composer {
                         .border_color(theme.accent)
                 })
                 .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
+                    if exiting { return; }
                     if matches!(event.keystroke.key.as_str(), "enter" | "space") {
                         cx.stop_propagation();
                         preview_on_key.viewer.reset();
@@ -6813,6 +6984,7 @@ impl Composer {
                     }
                 }))
                 .on_a11y_action(gpui::AccessibleAction::Click, move |_, _, cx| {
+                    if exiting { return; }
                     composer_for_preview
                         .update(cx, |this, cx| {
                             preview_on_a11y.viewer.reset();
@@ -6823,6 +6995,7 @@ impl Composer {
                         .ok();
                 })
                 .on_click(cx.listener(move |this, _, _, cx| {
+                    if exiting { return; }
                     preview.viewer.reset();
                     this.preview = Some(preview.clone());
                     this.preview_focus_pending = true;
@@ -6914,15 +7087,17 @@ impl Composer {
                     })
                     .role(gpui::Role::Button)
                     .aria_label(remove_aria)
-                    .tab_index(0)
+                    .tab_index(if exiting { -1 } else { 0 })
                     .focus_visible(|style| style.opacity(1.0).border_1().border_color(theme.accent))
                     .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
+                        if exiting { return; }
                         if matches!(event.keystroke.key.as_str(), "enter" | "space") {
                             cx.stop_propagation();
                             this.remove_appshot(&remove_on_key_id, cx);
                         }
                     }))
                     .on_a11y_action(gpui::AccessibleAction::Click, move |_, _, cx| {
+                        if exiting { return; }
                         composer_for_remove
                             .update(cx, |this, cx| {
                                 this.remove_appshot(&remove_on_a11y_id, cx);
@@ -6931,6 +7106,7 @@ impl Composer {
                     })
                     .on_click(cx.listener(move |this, _, _, cx| {
                         cx.stop_propagation();
+                        if exiting { return; }
                         this.remove_appshot(&remove_id, cx);
                     }))
                     .child(
@@ -6939,18 +7115,24 @@ impl Composer {
                             .text_color(theme.text_muted),
                     ),
             ));
-            // Entity-owned timestamps prevent the entrance replaying on route remount.
-            if let Some(start) = self.appshot_entrances.get(&appshot.id) {
-                let raw = (start.elapsed().as_secs_f32() / (0.24 * motion::speed_scale()))
-                    .clamp(0.0, 1.0);
-                if raw < 1.0 && !motion::reduced_motion(cx) {
-                    let progress =
-                        motion::MotionSpec::new(240, motion::EASE_OUT_EXPO).progress(raw);
-                    card = card.opacity(progress).top(px(8.0 * (1.0 - progress)));
-                    window.request_animation_frame();
-                }
+            card = card.opacity(view.sample.opacity).top(px(view.sample.offset_y));
+            // A small, theme-owned sheen on this low-frequency preview card;
+            // it never animates the text or creates a permanent pulse.
+            if glow > 0.001 {
+                card = card.child(div()
+                    .absolute().left_0().right_0().bottom_0().h(px(44.0))
+                    .bg(gpui::linear_gradient(0.0,
+                        gpui::linear_color_stop(theme.accent.opacity(0.055 * glow), 0.0),
+                        gpui::linear_color_stop(gpui::transparent_black(), 1.0))));
             }
-            strip = strip.child(card);
+            if view.sample.active { window.request_animation_frame(); }
+            let reservation = if exiting { view.sample.opacity } else { 1.0 };
+            strip = strip.child(div()
+                .flex_none()
+                .w(px(tile_width * reservation))
+                .h(px(APPSHOT_TILE_HEIGHT))
+                .when(exiting, |el| el.overflow_hidden().mr(px(-STRIP_GAP * (1.0 - reservation))))
+                .child(card));
         }
         Some(strip.into_any_element())
     }
@@ -8110,6 +8292,7 @@ impl Composer {
 
         // Draft swap on chat navigation — the input entity itself survives.
         if key != self.current_key {
+            self.clear_staged_motion();
             if !key.is_empty() && !self.current_key.is_empty() {
                 // Switching between established chats still snaps to the new
                 // draft; a tail from a hero transition belongs to its old chat.
@@ -9360,8 +9543,8 @@ impl Composer {
     // ---- render pieces ----
 
     /// The agent-asked-a-question panel (zeron question-panel.tsx), rendered in
-    /// place of the composer: the same floating-pill chrome (`rounded-[26px]
-    /// border-white/[0.08] bg-white/[0.03] shadow-xl`), uppercase header +
+    /// place of the composer: the same shared-radius floating-pill chrome,
+    /// hairline border and soft shadow, uppercase header +
     /// "1/3" counter chip, option rows with number kbd chips, a free-text
     /// override over a hairline, and Back / Next-Submit footer.
     fn render_wizard(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
@@ -9604,55 +9787,118 @@ impl Composer {
     fn render_send_button(
         &mut self,
         mode: SendButtonMode,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        let theme = Theme::of(cx);
-        // RCode composer-actions.tsx: a size-7 filled circle — up-arrow to
-        // send/queue, a dark rounded square on the same light circle to stop.
-        match mode {
-            SendButtonMode::Stop => div()
-                .id("composer-stop")
-                .size(px(28.0))
-                .flex_none()
-                .rounded_full()
-                .bg(theme.text)
-                .flex()
-                .items_center()
-                .justify_center()
-                .cursor_pointer()
-                .hover(|s| s.opacity(0.85))
-                .on_click(cx.listener(|this, _, _, cx| this.interrupt_selected(cx)))
-                .tooltip(crate::settings::widgets::text_tooltip(
-                    crate::l10n::localizer().text(rcode_presentation::TextKey::ConversationStop),
-                ))
-                .child(div().size(px(11.0)).rounded(px(3.0)).bg(theme.bg))
-                .into_any_element(),
-            SendButtonMode::Send | SendButtonMode::Queue => {
-                // Share the submission guard with Enter, including pending
-                // edits and the new-session runnable-agent check.
-                let blocked = self.send_blocked(cx);
-                let steers = !crate::settings::active_turn_send_behavior(cx).hold_for_turn_end()
-                    && self.staged().is_empty()
-                    && self.staged_appshots().is_empty()
-                    && self.pickers.read(cx).steers_mid_turn(cx);
-                send_circle("composer-send", blocked, theme)
-                    .when(!blocked, |el| {
-                        el.on_click(cx.listener(|this, _, _, cx| this.on_submit(cx)))
-                    })
-                    .tooltip(crate::settings::widgets::text_tooltip(
-                        crate::l10n::localizer().text(if mode == SendButtonMode::Queue {
-                            if steers {
-                                rcode_presentation::TextKey::ConversationQueueSteer
-                            } else {
-                                rcode_presentation::TextKey::ConversationQueueMessage
-                            }
-                        } else {
-                            rcode_presentation::TextKey::ConversationSendMessage
-                        }),
-                    ))
-                    .into_any_element()
-            }
+        let theme = Theme::of(cx).clone();
+        let stop = mode == SendButtonMode::Stop;
+        let blocked = !stop && self.send_blocked(cx);
+        let reduced = motion::reduced_motion(cx);
+        let now = Instant::now();
+        if blocked || !window.is_window_active() {
+            self.send_pressed = false;
         }
+        self.send_press
+            .retarget(if self.send_pressed { 0.975 } else { 1.0 }, reduced, now);
+        let press = self.send_press.sample(now, reduced);
+        if press.active {
+            window.request_animation_frame();
+        }
+        let scale = press.value.clamp(0.94, 1.025);
+        let steers = !crate::settings::active_turn_send_behavior(cx).hold_for_turn_end()
+            && self.staged().is_empty()
+            && self.staged_appshots().is_empty()
+            && self.pickers.read(cx).steers_mid_turn(cx);
+        let label = crate::l10n::localizer().text(if stop {
+            TextKey::ConversationStop
+        } else if mode == SendButtonMode::Queue {
+            if steers {
+                TextKey::ConversationQueueSteer
+            } else {
+                TextKey::ConversationQueueMessage
+            }
+        } else {
+            TextKey::ConversationSendMessage
+        });
+        let id = if stop { "composer-stop" } else { "composer-send" };
+        let hover_key: SharedString = format!("composer-action-{:?}", cx.entity_id()).into();
+        let hover = motion::hover_t(&hover_key);
+        let fill = motion::mix(theme.text, theme.text.opacity(0.85), hover);
+        let foreground = theme.bg;
+        div()
+            .id(id)
+            .debug_selector(move || id.into())
+            .size(px(28.0))
+            .flex_none()
+            .rounded_full()
+            .relative()
+            .role(Role::Button)
+            .aria_label(label.clone())
+            .when(blocked, |el| el.opacity(0.35))
+            .when(!blocked, |el| el
+                .tab_index(0)
+                .cursor_pointer()
+                .on_hover(motion::hover_listener(hover_key))
+                .focus_visible(|style| style.border_1().border_color(theme.accent))
+                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| {
+                    window.prevent_default();
+                    this.send_pressed = true;
+                    cx.notify();
+                }))
+                .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                    this.send_pressed = false;
+                    cx.notify();
+                }))
+                .on_mouse_up_out(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                    this.send_pressed = false;
+                    cx.notify();
+                }))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    if stop {
+                        this.interrupt_selected(cx);
+                    } else {
+                        this.on_submit(cx);
+                    }
+                })))
+            .tooltip(crate::settings::widgets::text_tooltip(label))
+            .child(gpui::canvas(|bounds, _, _| bounds, move |bounds, _, window, cx| {
+                paint_action_circle(bounds, scale, stop, fill, foreground, window, cx);
+            }).size_full())
+            .into_any_element()
+    }
+}
+
+/// Scale the complete drawn action (circle and glyph) inside an unchanged
+/// hit target. No text metrics, layout widths or caret coordinates are tweened.
+pub(crate) fn paint_action_circle(
+    bounds: Bounds<Pixels>,
+    scale: f32,
+    stop: bool,
+    fill_color: gpui::Hsla,
+    foreground: gpui::Hsla,
+    window: &mut Window,
+    cx: &App,
+) {
+    let scale = scale.clamp(0.9, 1.05);
+    let side = bounds.size.width.min(bounds.size.height) * scale;
+    let center = bounds.center();
+    let circle = Bounds::new(center - point(side / 2.0, side / 2.0), size(side, side));
+    window.paint_quad(quad(
+        circle, side / 2.0, fill_color, px(0.0),
+        gpui::transparent_black(), BorderStyle::default(),
+    ));
+    let icon_side = px(if stop { 11.0 } else { 14.0 }) * scale;
+    let icon = Bounds::new(center - point(icon_side / 2.0, icon_side / 2.0), size(icon_side, icon_side));
+    if stop {
+        window.paint_quad(quad(
+            icon, px(3.0) * scale, foreground, px(0.0),
+            gpui::transparent_black(), BorderStyle::default(),
+        ));
+    } else {
+        let _ = window.paint_svg(
+            icon, crate::icons::ARROW_UP.into(), None,
+            gpui::TransformationMatrix::default(), foreground, cx,
+        );
     }
 }
 
@@ -9708,6 +9954,10 @@ impl Focusable for Composer {
 
 impl Render for Composer {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let presence_now = Instant::now();
+        let reduced = motion::reduced_motion(cx);
+        self.attachment_motion.prune(presence_now, reduced);
+        self.appshot_motion.prune(presence_now, reduced);
         if self.focus_pending {
             self.focus_pending = false;
             let focus = self.input.focus_handle(cx);
@@ -10021,14 +10271,23 @@ impl Render for Composer {
         // `morph_t`) animates. Steady state renders exactly the target.
         // Staged attachments add the wrap strip's height to the pill in BOTH
         // modes (attachment-ui.tsx AttachmentStrip sits above the input row).
-        let staged_count = self.tiled_attachments(cx).len();
+        let staged_live = self.tiled_attachments(cx).into_iter()
+            .map(|item| (item.id.clone(), item.clone())).collect();
+        let staged_views = self.attachment_motion.views(
+            &self.current_key, staged_live, presence_now, reduced,
+        );
+        let attachment_exit_active = staged_views.iter().any(|view| view.exiting);
+        let attachment_exit_finished = self.attachment_exit_height_active && !attachment_exit_active;
+        self.attachment_exit_height_active = attachment_exit_active;
         // The input width excludes the inline controls in compact mode.
         // Wrap against the pill's content width in both modes, accounting
         // for the outer container padding and the pill's 1px borders.
         let strip_width_hint =
             self.last_available_width.unwrap_or(COMPOSER_MAX_WIDTH) - 2.0 * Theme::SPACE_LG - 2.0;
-        let appshot_count = self.staged_appshots().len();
-        let strip_h = attachment_strip_height(staged_count, strip_width_hint);
+        let appshot_count = self.staged_appshots().len() + self.appshot_motion.retiring_count(&self.current_key);
+        let strip_h = attachment_strip_reserved_height(
+            staged_views.iter().map(|view| view.reservation).sum(), strip_width_hint,
+        );
         let comment_strip_h = comment_strip_height(self.staged_comments(cx).len());
         let base_height = if self.dock_frame.is_some() {
             dock_layout.height(dock_amount)
@@ -10071,7 +10330,10 @@ impl Render for Composer {
             || route_chrome_opacities(new_thread_chrome),
             |frame| (frame.selectors(), frame.footer()),
         );
-        self.height_morph = if dock_owns_layout {
+        self.height_morph = if dock_owns_layout
+            || attachment_exit_active
+            || (attachment_exit_finished && target_height <= self.last_target_height)
+        {
             None
         } else if coordinated_route_morph.is_some() {
             coordinated_route_morph
@@ -10167,7 +10429,7 @@ impl Render for Composer {
             }
         });
 
-        let send_button = self.render_send_button(mode, cx);
+        let send_button = self.render_send_button(mode, window, cx);
         let attach_action = cx.entity().downgrade();
         let attach_hover_key: SharedString = format!("composer-attach-{}", cx.entity_id()).into();
         // Attach button — opens the native image picker (the original's hidden
@@ -10234,7 +10496,7 @@ impl Render for Composer {
             );
         // Staged-thumbnail strip (attachment-ui.tsx AttachmentStrip), above
         // the input inside the pill in both modes.
-        let strip = self.render_attachment_strip(&theme, cx);
+        let strip = self.render_attachment_strip(&theme, staged_views, strip_h, strip_width_hint, window, cx);
         let appshot_strip = self.render_appshot_strip(&theme, window, cx);
         let comments_chip = self.render_comments_chip(&theme, cx);
 
@@ -10638,6 +10900,55 @@ impl Composer {
 
     pub fn fixture_usage_panel(&mut self, index: Option<usize>, window: &mut Window, cx: &mut Context<Self>) {
         self.statistics.update(cx, |stats, cx| stats.fixture_show(index, window, cx));
+    }
+}
+
+/// Deterministic native QA inputs. These mutate the real draft and exercise
+/// its normal remove path; they never create an engine or send a command.
+#[cfg(any(test, feature = "appshots-fixture"))]
+impl Composer {
+    pub(crate) fn fixture_reset_feedback_attachments(&mut self, cx: &mut Context<Self>) {
+        self.clear_staged_motion();
+        self.attachments.insert(
+            self.current_key.clone(),
+            (b'A'..=b'G')
+                .map(|letter| StagedAttachment {
+                    id: format!("fixture-{}", letter as char),
+                    name: format!("{}-中文.rs", letter as char),
+                    content: attachments::AttachmentContent::File(std::sync::Arc::new(
+                        format!("// fixture {}\nlet 中文 = 42;\n", letter as char).into_bytes(),
+                    )),
+                    mention: None,
+                })
+                .collect(),
+        );
+        self.sync_attachment_chips(cx);
+        cx.notify();
+    }
+
+    pub(crate) fn fixture_remove_feedback_attachment(
+        &mut self,
+        letter: char,
+        cx: &mut Context<Self>,
+    ) {
+        self.remove_attachment(&format!("fixture-{letter}"), cx);
+    }
+
+    pub(crate) fn fixture_feedback_attachment_count(&self) -> usize {
+        self.staged().len()
+    }
+
+    pub(crate) fn fixture_feedback_queue_state(&mut self, phase: u8, cx: &mut Context<Self>) {
+        self.queue_edit_pending_id = (phase == 1).then(|| "fixture-edit".into());
+        self.queue_removing.clear();
+        if phase == 2 {
+            self.queue_removing.insert("fixture-remove".into());
+        }
+        self.editing_queued = (phase == 3).then(|| "fixture-edit".into());
+        self.queue_edit_finishing = phase == 3;
+        // A local-only fixture has no lease or command task. Pending states
+        // remain pending until the next explicit QA state is selected.
+        cx.notify();
     }
 }
 

@@ -23,7 +23,7 @@ pub(crate) const CHIP_PAD_FAMILY: &str = "Geist";
 const CHIP_ICON_SIZE: f32 = 14.0;
 
 /// What a chip refers to; it picks the chip's icon.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ChipKind {
     Image,
     Skill,
@@ -32,6 +32,80 @@ pub enum ChipKind {
     Directory,
     /// Another chat, dropped from the sidebar.
     Chat,
+}
+
+/// Byte positions are deliberately absent: editing before a reference must
+/// not turn the same chip into a fresh entrance. Duplicate targets occupy
+/// separate, deterministic occurrence slots within the current draft.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct InputChipIdentity {
+    path: String,
+    kind: ChipKind,
+    attachment: Option<u32>,
+    occurrence: usize,
+}
+
+fn input_chip_identities(mentions: &[(FileMentionLink, Range<usize>)]) -> Vec<InputChipIdentity> {
+    let mut occurrences = HashMap::new();
+    mentions.iter().map(|(mention, _)| {
+        let target = (mention.path.clone(), mention.kind, mention.attachment);
+        let occurrence = occurrences.entry(target).or_insert(0);
+        let identity = InputChipIdentity {
+            path: mention.path.clone(),
+            kind: mention.kind,
+            attachment: mention.attachment,
+            occurrence: *occurrence,
+        };
+        *occurrence += 1;
+        identity
+    }).collect()
+}
+
+/// This state lives with the input document, not its rebuilt text element.
+/// Settled entries stay present until the reference itself disappears.
+#[derive(Default)]
+pub(super) struct InputChipMotion {
+    revision: u64,
+    entries: HashMap<InputChipIdentity, motion::Presence>,
+}
+
+impl InputChipMotion {
+    pub(super) fn restored(&mut self, revision: u64) {
+        self.revision = revision;
+        self.entries.clear();
+    }
+
+    pub(super) fn sync(
+        &mut self,
+        mentions: &[(FileMentionLink, Range<usize>)],
+        revision: u64,
+        now: Instant,
+        reduced: bool,
+    ) -> Vec<motion::PresenceSample> {
+        let identities = input_chip_identities(mentions);
+        let live: HashSet<_> = identities.iter().cloned().collect();
+        self.entries.retain(|identity, _| live.contains(identity));
+        let edited = revision != self.revision;
+        self.revision = revision;
+        let mut inserted = 0;
+        identities.into_iter().map(|identity| {
+            let presence = self.entries.entry(identity).or_insert_with(|| {
+                if edited && !reduced {
+                    let presence = motion::Presence::enter(inserted, now, false);
+                    inserted += 1;
+                    presence
+                } else {
+                    motion::Presence::present(now)
+                }
+            });
+            // Switching reduced motion on settles existing entrances too; a
+            // quick switch back cannot resume a half-finished decorative fade.
+            if reduced {
+                *presence = motion::Presence::present(now);
+            }
+            presence.sample(now, reduced)
+        }).collect()
+    }
 }
 
 /// What a chip's icon is painted from: a monochrome glyph tinted like the
@@ -193,10 +267,42 @@ pub(crate) fn paint_chip(
     theme: &Theme,
     cx: &App,
 ) {
+    paint_chip_surface(window, chip, icon, theme, 1.0, 1.0, cx);
+}
+
+/// Input-only feedback: text, caret, selection and hitboxes keep their final
+/// geometry. Only the pill/well ink and monochrome icon softly reveal; file
+/// artwork stays stable because the native image primitive has no local alpha.
+pub(super) fn paint_input_chip(
+    window: &mut Window,
+    chip: Bounds<Pixels>,
+    icon: Option<&ChipIcon>,
+    theme: &Theme,
+    sample: motion::PresenceSample,
+    cx: &App,
+) {
+    let opacity = sample.opacity;
+    paint_chip_surface(window, chip, icon, theme, opacity, 0.96 + 0.04 * opacity, cx);
+}
+
+fn paint_chip_surface(
+    window: &mut Window,
+    chip: Bounds<Pixels>,
+    icon: Option<&ChipIcon>,
+    theme: &Theme,
+    opacity: f32,
+    scale: f32,
+    cx: &App,
+) {
+    let visual_size = size(chip.size.width * scale, chip.size.height * scale);
+    let visual_bounds = Bounds::new(
+        chip.origin + point((chip.size.width - visual_size.width) / 2.0, (chip.size.height - visual_size.height) / 2.0),
+        visual_size,
+    );
     window.paint_quad(quad(
-        chip,
-        px(5.0),
-        theme.ink(0.09),
+        visual_bounds,
+        px(5.0 * scale),
+        theme.ink(0.09).opacity(opacity),
         px(0.0),
         gpui::transparent_black(),
         BorderStyle::default(),
@@ -209,7 +315,7 @@ pub(crate) fn paint_chip(
     window.paint_quad(quad(
         well_bounds,
         px(4.0),
-        crate::file_icons::well_bg(theme),
+        crate::file_icons::well_bg(theme).opacity(opacity),
         px(0.0),
         gpui::transparent_black(),
         BorderStyle::default(),
@@ -227,7 +333,7 @@ pub(crate) fn paint_chip(
                 (*path).into(),
                 None,
                 gpui::TransformationMatrix::default(),
-                theme.text_muted,
+                theme.text_muted.opacity(opacity),
                 cx,
             );
         }
@@ -293,4 +399,75 @@ pub(crate) fn chip_text(
         .child(underlay)
         .child(styled)
         .into_any_element()
+}
+
+#[cfg(test)]
+mod input_motion_tests {
+    use super::*;
+
+    fn projected(text: &str) -> TextProjection {
+        TextProjection::rich(text, None, None)
+    }
+
+    fn later(now: Instant, millis: u64) -> Instant {
+        now + Duration::from_millis(millis).mul_f32(motion::speed_scale())
+    }
+
+    #[test]
+    fn input_chip_identity_survives_prefix_edits_and_unrelated_targets() {
+        let link = local_file_link("src/café.rs", false);
+        let original = projected(&format!("{link} {link}"));
+        let shifted = projected(&format!("前缀 🙂 {} {link} {link}", local_file_link("Cargo.toml", false)));
+        assert_eq!(original.mentions.len(), 2);
+        assert_eq!(shifted.mentions.len(), 3);
+        assert_ne!(original.mentions[0].0.range, shifted.mentions[1].0.range);
+        assert_eq!(input_chip_identities(&original.mentions), input_chip_identities(&shifted.mentions)[1..]);
+        let ids = input_chip_identities(&original.mentions);
+        assert_ne!(ids[0], ids[1], "repeated references retain separate occurrence slots");
+        let mut changed_kind = original.mentions.clone();
+        changed_kind[0].0.kind = ChipKind::Directory;
+        assert_ne!(ids[0], input_chip_identities(&changed_kind)[0]);
+        let mut attachment = original.mentions.clone();
+        attachment[0].0.attachment = Some(7);
+        assert_ne!(ids[0], input_chip_identities(&attachment)[0]);
+    }
+
+    #[test]
+    fn input_chip_entrance_does_not_restart_while_editing_or_after_settling() {
+        let link = local_file_link("src/main.rs", false);
+        let original = projected(&link);
+        let shifted = projected(&format!("中文 prefix {link}"));
+        let now = Instant::now();
+        let mut motion_state = InputChipMotion::default();
+        assert!(motion_state.sync(&original.mentions, 1, now, false)[0].active);
+        let sampled = later(now, 120);
+        let before = motion_state.sync(&original.mentions, 1, sampled, false)[0];
+        let after = motion_state.sync(&shifted.mentions, 2, sampled, false)[0];
+        assert_eq!(before.opacity, after.opacity, "prefix edit must not restart a visible entrance");
+        let settled_at = later(now, 2000);
+        let settled = motion_state.sync(&shifted.mentions, 2, settled_at, false)[0];
+        assert_eq!(settled.opacity, 1.0);
+        assert!(!settled.active);
+        assert!(!motion_state.sync(&original.mentions, 3, later(now, 2010), false)[0].active);
+        assert_eq!(motion_state.entries.len(), 1, "settled identity must remain retained");
+        motion_state.sync(&[], 4, later(now, 2020), false);
+        assert!(motion_state.entries.is_empty());
+        assert!(motion_state.sync(&original.mentions, 5, later(now, 2030), false)[0].active);
+    }
+
+    #[test]
+    fn restored_drafts_and_reduced_motion_never_replay_chip_ink() {
+        let projection = projected(&local_file_link("src/lib.rs", false));
+        let now = Instant::now();
+        let mut motion_state = InputChipMotion::default();
+        motion_state.restored(20);
+        assert!(!motion_state.sync(&projection.mentions, 20, now, false)[0].active);
+        assert!(!motion_state.sync(&projection.mentions, 21, now, false)[0].active);
+        motion_state.sync(&[], 22, now, false);
+        assert!(motion_state.sync(&projection.mentions, 23, now, false)[0].active);
+        assert!(!motion_state.sync(&projection.mentions, 23, later(now, 70), true)[0].active);
+        let restored = motion_state.sync(&projection.mentions, 24, later(now, 80), false)[0];
+        assert!(!restored.active);
+        assert_eq!(restored.opacity, 1.0);
+    }
 }
