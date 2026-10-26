@@ -180,6 +180,69 @@ fn assert_no_gpu_errors(device: &ID3D11Device) -> Result<()> {
 }
 
 #[::core::prelude::v1::test]
+fn warp_path_textures_are_lazy_reused_and_recreated_after_resize() -> Result<()> {
+    let (mut renderer, _window) = warp_renderer()?;
+    let mut scene = Scene::default();
+    scene
+        .quads
+        .push(quad(0, bounds(0., 0., 64., 64.), hsla(0., 0., 1., 1.)));
+    renderer.draw_scene(&scene, WindowBackgroundAppearance::Opaque)?;
+    let resources = renderer.resources.as_ref().unwrap();
+    assert!(resources.path_intermediate_texture.is_none());
+    assert!(resources.path_intermediate_msaa_texture.is_none());
+
+    let mut path = gpui::Path::new(point(px(8.), px(8.)));
+    path.line_to(point(px(56.), px(8.)));
+    path.line_to(point(px(8.), px(56.)));
+    let mut path = path.scale(1.);
+    path.color = hsla(0., 1., 0.5, 1.).into();
+    path.content_mask = ContentMask {
+        bounds: bounds(0., 0., 64., 64.),
+    };
+    scene.quads.clear();
+    scene.paths.push(path);
+    renderer.draw_scene(&scene, WindowBackgroundAppearance::Transparent)?;
+    assert_eq!(pixels(&renderer)?[16 * 64 + 16], [0, 0, 255, 255]);
+    let resources = renderer.resources.as_ref().unwrap();
+    let texture = resources.path_intermediate_texture.clone().unwrap();
+    renderer.draw_scene(&scene, WindowBackgroundAppearance::Transparent)?;
+    let resources = renderer.resources.as_ref().unwrap();
+    assert_eq!(resources.path_intermediate_texture.as_ref(), Some(&texture));
+    drop(texture);
+
+    renderer.trim_idle_resources()?;
+    let resources = renderer.resources.as_ref().unwrap();
+    assert!(resources.path_intermediate_texture.is_none());
+    assert!(resources.path_intermediate_msaa_texture.is_none());
+    assert!(resources.path_intermediate_msaa_view.is_none());
+    assert!(resources.path_intermediate_srv.is_none());
+    assert_eq!(pixels(&renderer)?[16 * 64 + 16], [0, 0, 255, 255]);
+    renderer.draw_scene(&scene, WindowBackgroundAppearance::Transparent)?;
+    assert_eq!(pixels(&renderer)?[16 * 64 + 16], [0, 0, 255, 255]);
+
+    renderer.resize(size(DevicePixels(96), DevicePixels(96)))?;
+    let resources = renderer.resources.as_ref().unwrap();
+    assert!(resources.path_intermediate_texture.is_none());
+    renderer.draw_scene(&scene, WindowBackgroundAppearance::Transparent)?;
+    assert_eq!(pixels(&renderer)?[16 * 96 + 16], [0, 0, 255, 255]);
+    let resources = renderer.resources.as_ref().unwrap();
+    let mut desc = D3D11_TEXTURE2D_DESC::default();
+    unsafe {
+        resources
+            .path_intermediate_msaa_texture
+            .as_ref()
+            .unwrap()
+            .GetDesc(&mut desc)
+    };
+    assert_eq!(
+        (desc.Width, desc.Height, desc.SampleDesc.Count),
+        (96, 96, 4)
+    );
+    assert_no_gpu_errors(&renderer.devices.as_ref().unwrap().device)?;
+    Ok(())
+}
+
+#[::core::prelude::v1::test]
 fn warp_backdrop_blurs_pixels() -> Result<()> {
     let (mut renderer, _window) = warp_renderer()?;
     let mut scene = Scene::default();

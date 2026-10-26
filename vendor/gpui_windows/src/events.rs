@@ -30,6 +30,7 @@ pub(crate) const WM_GPUI_GPU_DEVICE_LOST: u32 = WM_USER + 7;
 pub(crate) const WM_GPUI_KEYDOWN: u32 = WM_USER + 8;
 
 const SIZE_MOVE_LOOP_TIMER_ID: usize = 1;
+pub(crate) const GRAPHICS_TRIM_TIMER_ID: usize = 2;
 
 impl WindowsWindowInner {
     pub(crate) fn handle_msg(
@@ -251,7 +252,16 @@ impl WindowsWindowInner {
     }
 
     fn handle_timer_msg(&self, handle: HWND, wparam: WPARAM) -> Option<isize> {
-        if wparam.0 == SIZE_MOVE_LOOP_TIMER_ID {
+        if wparam.0 == GRAPHICS_TRIM_TIMER_ID {
+            if self.state.frame_demand.is_requested()
+                || self.state.direct_manipulation.needs_frame()
+            {
+                return Some(0);
+            }
+            unsafe { KillTimer(Some(handle), GRAPHICS_TRIM_TIMER_ID).log_err(); }
+            self.state.renderer.borrow_mut().trim_idle_resources().log_err();
+            Some(0)
+        } else if wparam.0 == SIZE_MOVE_LOOP_TIMER_ID {
             let mut runnables = self.main_receiver.clone().try_iter();
             while let Some(Ok(runnable)) = runnables.next() {
                 WindowsDispatcher::execute_runnable(runnable);

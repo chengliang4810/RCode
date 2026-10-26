@@ -91,9 +91,9 @@ struct DirectXResources {
     render_target_view: Option<ID3D11RenderTargetView>,
 
     // Path intermediate textures (with MSAA)
-    path_intermediate_texture: ID3D11Texture2D,
+    path_intermediate_texture: Option<ID3D11Texture2D>,
     path_intermediate_srv: Option<ID3D11ShaderResourceView>,
-    path_intermediate_msaa_texture: ID3D11Texture2D,
+    path_intermediate_msaa_texture: Option<ID3D11Texture2D>,
     path_intermediate_msaa_view: Option<ID3D11RenderTargetView>,
 
     // Cached viewport
@@ -600,6 +600,9 @@ impl DirectXRenderer {
         for blur in blurs {
             self.draw_backdrop_blur(blur)?;
         }
+        if !scene.paths.is_empty() {
+            self.schedule_idle_graphics_trim();
+        }
         Ok(())
     }
 
@@ -609,6 +612,7 @@ impl DirectXRenderer {
         if self.width == width && self.height == height {
             return Ok(());
         }
+        let shrinking = width < self.width || height < self.height;
         self.width = width;
         self.height = height;
 
@@ -627,6 +631,46 @@ impl DirectXRenderer {
                 .OMSetRenderTargets(Some(slice::from_ref(&resources.render_target_view)), None);
         }
 
+        if shrinking {
+            self.schedule_idle_graphics_trim();
+        }
+        Ok(())
+    }
+
+    fn schedule_idle_graphics_trim(&self) {
+        let timer = unsafe {
+            windows::Win32::UI::WindowsAndMessaging::SetTimer(
+                Some(self.hwnd),
+                GRAPHICS_TRIM_TIMER_ID,
+                2000,
+                None,
+            )
+        };
+        if timer == 0 {
+            log::warn!(
+                "Unable to schedule idle graphics trim: {}",
+                std::io::Error::last_os_error()
+            );
+        }
+    }
+
+    pub(crate) fn trim_idle_resources(&mut self) -> Result<()> {
+        let Some(devices) = self.devices.as_ref() else {
+            return Ok(());
+        };
+        let dxgi: IDXGIDevice3 = devices.device.cast()?;
+        unsafe {
+            let rasterizer = devices.device_context.RSGetState().ok();
+            devices.device_context.ClearState();
+            if let Some(resources) = self.resources.as_mut() {
+                resources.release_path_resources();
+            }
+            if let Some(overlay) = self.overlay.as_mut() {
+                overlay.resources.release_path_resources();
+            }
+            dxgi.Trim();
+            devices.device_context.RSSetState(rasterizer.as_ref());
+        }
         Ok(())
     }
 
@@ -764,7 +808,8 @@ impl DirectXRenderer {
         }
 
         let devices = self.devices.as_ref().context("devices missing")?;
-        let resources = self.resources.as_ref().context("resources missing")?;
+        let resources = self.resources.as_mut().context("resources missing")?;
+        resources.ensure_path_resources(&devices.device)?;
         // Clear intermediate MSAA texture
         unsafe {
             devices.device_context.ClearRenderTargetView(
@@ -808,9 +853,9 @@ impl DirectXRenderer {
         // Resolve MSAA to non-MSAA intermediate texture
         unsafe {
             devices.device_context.ResolveSubresource(
-                &resources.path_intermediate_texture,
+                resources.path_intermediate_texture.as_ref().unwrap(),
                 0,
-                &resources.path_intermediate_msaa_texture,
+                resources.path_intermediate_msaa_texture.as_ref().unwrap(),
                 0,
                 RENDER_TARGET_FORMAT,
             );
@@ -1034,15 +1079,8 @@ impl DirectXResources {
             )?
         };
 
-        let (
-            render_target,
-            render_target_view,
-            path_intermediate_texture,
-            path_intermediate_srv,
-            path_intermediate_msaa_texture,
-            path_intermediate_msaa_view,
-            viewport,
-        ) = create_resources(devices, &swap_chain, width, height)?;
+        let (render_target, render_target_view, viewport) =
+            create_resources(devices, &swap_chain, width, height)?;
         set_rasterizer_state(&devices.device, &devices.device_context)?;
 
         Ok(Self {
@@ -1050,10 +1088,10 @@ impl DirectXResources {
             swap_chain,
             render_target: Some(render_target),
             render_target_view,
-            path_intermediate_texture,
-            path_intermediate_msaa_texture,
-            path_intermediate_msaa_view,
-            path_intermediate_srv,
+            path_intermediate_texture: None,
+            path_intermediate_msaa_texture: None,
+            path_intermediate_msaa_view: None,
+            path_intermediate_srv: None,
             viewport,
         })
     }
@@ -1065,22 +1103,35 @@ impl DirectXResources {
         width: u32,
         height: u32,
     ) -> Result<()> {
-        let (
-            render_target,
-            render_target_view,
-            path_intermediate_texture,
-            path_intermediate_srv,
-            path_intermediate_msaa_texture,
-            path_intermediate_msaa_view,
-            viewport,
-        ) = create_resources(devices, &self.swap_chain, width, height)?;
+        let (render_target, render_target_view, viewport) =
+            create_resources(devices, &self.swap_chain, width, height)?;
         self.render_target = Some(render_target);
         self.render_target_view = render_target_view;
-        self.path_intermediate_texture = path_intermediate_texture;
-        self.path_intermediate_msaa_texture = path_intermediate_msaa_texture;
-        self.path_intermediate_msaa_view = path_intermediate_msaa_view;
-        self.path_intermediate_srv = path_intermediate_srv;
+        self.release_path_resources();
         self.viewport = viewport;
+        Ok(())
+    }
+
+    fn release_path_resources(&mut self) {
+        self.path_intermediate_msaa_view = None;
+        self.path_intermediate_srv = None;
+        self.path_intermediate_texture = None;
+        self.path_intermediate_msaa_texture = None;
+    }
+
+    fn ensure_path_resources(&mut self, device: &ID3D11Device) -> Result<()> {
+        if self.path_intermediate_texture.is_some() {
+            return Ok(());
+        }
+        let width = self.viewport.Width as u32;
+        let height = self.viewport.Height as u32;
+        let (texture, srv) = create_path_intermediate_texture(device, width, height)?;
+        let (msaa_texture, msaa_view) =
+            create_path_intermediate_msaa_texture_and_view(device, width, height)?;
+        self.path_intermediate_texture = Some(texture);
+        self.path_intermediate_srv = srv;
+        self.path_intermediate_msaa_texture = Some(msaa_texture);
+        self.path_intermediate_msaa_view = msaa_view;
         Ok(())
     }
 }
@@ -1504,28 +1555,12 @@ fn create_resources(
 ) -> Result<(
     ID3D11Texture2D,
     Option<ID3D11RenderTargetView>,
-    ID3D11Texture2D,
-    Option<ID3D11ShaderResourceView>,
-    ID3D11Texture2D,
-    Option<ID3D11RenderTargetView>,
     D3D11_VIEWPORT,
 )> {
     let (render_target, render_target_view) =
         create_render_target_and_its_view(swap_chain, &devices.device)?;
-    let (path_intermediate_texture, path_intermediate_srv) =
-        create_path_intermediate_texture(&devices.device, width, height)?;
-    let (path_intermediate_msaa_texture, path_intermediate_msaa_view) =
-        create_path_intermediate_msaa_texture_and_view(&devices.device, width, height)?;
     let viewport = set_viewport(&devices.device_context, width as f32, height as f32);
-    Ok((
-        render_target,
-        render_target_view,
-        path_intermediate_texture,
-        path_intermediate_srv,
-        path_intermediate_msaa_texture,
-        path_intermediate_msaa_view,
-        viewport,
-    ))
+    Ok((render_target, render_target_view, viewport))
 }
 
 #[inline]
