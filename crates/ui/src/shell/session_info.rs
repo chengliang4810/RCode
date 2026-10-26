@@ -353,7 +353,8 @@ impl Shell {
             .flex_col()
             .gap(px(popover::MENU_GAP))
             .child(project_row)
-            .children(branch_row);
+            .children(branch_row)
+            .child(self.command_processes.clone());
 
         // The session card keeps its height; only the lanes under it give.
         let card = div()

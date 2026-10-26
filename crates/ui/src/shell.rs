@@ -8955,7 +8955,6 @@ impl Shell {
             // window above this column.)
             .child(filter_row)
             .child(sidebar_lists)
-            .child(self.command_processes.clone())
             // Global connection pill (durable-by-design UI truth): appears
             // whenever the edge posture is degraded; hidden while healthy —
             // appearing IS the signal.
