@@ -1490,6 +1490,7 @@ mod tests {
     use gpui::ClipboardItem;
 
     #[test]
+    #[ignore = "writes the system clipboard; run explicitly on an isolated desktop"]
     fn test_clipboard() {
         let item = ClipboardItem::new_string("你好，我是张小白".to_string());
         write_to_clipboard(item.clone());

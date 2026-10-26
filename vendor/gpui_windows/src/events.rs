@@ -664,11 +664,9 @@ impl WindowsWindowInner {
     fn handle_ime_composition_inner(&self, ctx: HIMC, lparam: LPARAM) -> Option<isize> {
         let lparam = lparam.0 as u32;
         if lparam == 0 {
-            // Japanese IME may send this message with lparam = 0, which indicates that
-            // there is no composition string.
-            self.with_input_handler(|input_handler| {
-                input_handler.replace_text_in_range(None, "");
-            })?;
+            // A cancellation can arrive after commit or after focus changes.
+            // Only remove an active composition, never the ordinary selection.
+            self.with_input_handler(cancel_ime_composition)?;
             Some(0)
         } else {
             if lparam & GCS_RESULTSTR.0 > 0 {
@@ -691,11 +689,15 @@ impl WindowsWindowInner {
                         pos..pos
                     });
                 self.with_input_handler(|input_handler| {
-                    input_handler.replace_and_mark_text_in_range(
-                        None,
-                        &String::from_utf16_lossy(&comp_string),
-                        caret_pos,
-                    );
+                    if comp_string.is_empty() {
+                        cancel_ime_composition(input_handler);
+                    } else {
+                        input_handler.replace_and_mark_text_in_range(
+                            None,
+                            &String::from_utf16_lossy(&comp_string),
+                            caret_pos,
+                        );
+                    }
                 })?;
             }
             if lparam & (GCS_RESULTSTR.0 | GCS_COMPSTR.0) > 0 {
@@ -1603,12 +1605,12 @@ fn retrieve_composition_cursor_position(ctx: HIMC) -> usize {
 }
 
 fn should_use_ime_cursor_position(ctx: HIMC, cursor_pos: usize) -> bool {
-    let attrs_size = unsafe { ImmGetCompositionStringW(ctx, GCS_COMPATTR, None, 0) } as usize;
-    if attrs_size == 0 {
+    let attrs_size = unsafe { ImmGetCompositionStringW(ctx, GCS_COMPATTR, None, 0) };
+    if attrs_size <= 0 {
         return false;
     }
 
-    let mut attrs = vec![0u8; attrs_size];
+    let mut attrs = vec![0u8; attrs_size as usize];
     let result = unsafe {
         ImmGetCompositionStringW(
             ctx,
@@ -1621,6 +1623,16 @@ fn should_use_ime_cursor_position(ctx: HIMC, cursor_pos: usize) -> bool {
         return false;
     }
 
+    ime_cursor_is_adjacent_to_input(&attrs, result as usize, cursor_pos)
+}
+
+fn ime_cursor_is_adjacent_to_input(attrs: &[u8], bytes_read: usize, cursor_pos: usize) -> bool {
+    // Attribute reads can be shorter than the initial size query. Unread zero
+    // padding is not ATTR_INPUT data, even though ATTR_INPUT itself equals zero.
+    let Some(attrs) = attrs.get(..bytes_read) else {
+        return false;
+    };
+
     // Keep the cursor adjacent to the inserted text by only using the suggested position
     // if it's adjacent to unconverted text.
     let at_cursor_is_input = cursor_pos < attrs.len() && attrs[cursor_pos] == (ATTR_INPUT as u8);
@@ -1629,6 +1641,200 @@ fn should_use_ime_cursor_position(ctx: HIMC, cursor_pos: usize) -> bool {
         && attrs[cursor_pos - 1] == (ATTR_INPUT as u8);
 
     at_cursor_is_input || before_cursor_is_input
+}
+
+fn cancel_ime_composition(input_handler: &mut PlatformInputHandler) {
+    if let Some(range) = input_handler.marked_text_range() {
+        input_handler.replace_text_in_range(Some(range), "");
+    }
+}
+
+#[cfg(all(test, feature = "test-support"))]
+mod ime_tests {
+    use super::{
+        cancel_ime_composition, ime_cursor_is_adjacent_to_input, should_use_ime_cursor_position,
+    };
+    use gpui::{
+        App, Bounds, InputHandler, Pixels, PlatformInputHandler, Point, TestAppContext,
+        UTF16Selection, Window,
+    };
+    use std::{cell::RefCell, ops::Range, rc::Rc};
+    use windows::Win32::UI::Input::Ime::{ATTR_CONVERTED, HIMC};
+
+    struct TextState {
+        text: Vec<u16>,
+        selected: Range<usize>,
+        marked: Option<Range<usize>>,
+        replacements: Vec<Option<Range<usize>>>,
+    }
+
+    impl TextState {
+        fn new(text: &str, selected: Range<usize>, marked: Option<Range<usize>>) -> Self {
+            Self {
+                text: text.encode_utf16().collect(),
+                selected,
+                marked,
+                replacements: Vec::new(),
+            }
+        }
+        fn text(&self) -> String {
+            String::from_utf16(&self.text).expect("valid UTF-16")
+        }
+    }
+
+    struct TextInput(Rc<RefCell<TextState>>);
+
+    impl InputHandler for TextInput {
+        fn selected_text_range(
+            &mut self,
+            _: bool,
+            _: &mut Window,
+            _: &mut App,
+        ) -> Option<UTF16Selection> {
+            Some(UTF16Selection {
+                range: self.0.borrow().selected.clone(),
+                reversed: false,
+            })
+        }
+        fn marked_text_range(&mut self, _: &mut Window, _: &mut App) -> Option<Range<usize>> {
+            self.0.borrow().marked.clone()
+        }
+        fn text_for_range(
+            &mut self,
+            range: Range<usize>,
+            adjusted: &mut Option<Range<usize>>,
+            _: &mut Window,
+            _: &mut App,
+        ) -> Option<String> {
+            let state = self.0.borrow();
+            let text = String::from_utf16(state.text.get(range.clone())?).ok()?;
+            *adjusted = Some(range);
+            Some(text)
+        }
+        fn replace_text_in_range(
+            &mut self,
+            replacement: Option<Range<usize>>,
+            text: &str,
+            _: &mut Window,
+            _: &mut App,
+        ) {
+            let mut state = self.0.borrow_mut();
+            state.replacements.push(replacement.clone());
+            // A real editor falls back to its current marked range/selection
+            // when the platform supplies None. Calling this with None after
+            // commit would delete the ordinary selection: the regression.
+            let range = replacement
+                .or_else(|| state.marked.clone())
+                .unwrap_or_else(|| state.selected.clone());
+            let inserted: Vec<_> = text.encode_utf16().collect();
+            let caret = range.start + inserted.len();
+            state.text.splice(range, inserted);
+            state.selected = caret..caret;
+            state.marked = None;
+        }
+        fn replace_and_mark_text_in_range(
+            &mut self,
+            _: Option<Range<usize>>,
+            _: &str,
+            _: Option<Range<usize>>,
+            _: &mut Window,
+            _: &mut App,
+        ) {
+            panic!("cancellation must not create a new composition");
+        }
+        fn unmark_text(&mut self, _: &mut Window, _: &mut App) {
+            self.0.borrow_mut().marked = None;
+        }
+        fn bounds_for_range(
+            &mut self,
+            _: Range<usize>,
+            _: &mut Window,
+            _: &mut App,
+        ) -> Option<Bounds<Pixels>> {
+            None
+        }
+        fn character_index_for_point(
+            &mut self,
+            _: Point<Pixels>,
+            _: &mut Window,
+            _: &mut App,
+        ) -> Option<usize> {
+            None
+        }
+    }
+
+    fn platform_handler(
+        cx: &mut TestAppContext,
+        text: Rc<RefCell<TextState>>,
+    ) -> PlatformInputHandler {
+        let window = cx.add_window(|_, _| gpui::Empty);
+        // Return the adapter before invoking it: its AsyncWindowContext update
+        // must acquire the app outside the construction update's borrow.
+        window
+            .update(cx, |_, window, cx| {
+                PlatformInputHandler::new(window.to_async(cx), Box::new(TextInput(text)))
+            })
+            .unwrap()
+    }
+
+    #[gpui::test]
+    fn ime_cancellation_without_marked_text_preserves_nonempty_selection(cx: &mut TestAppContext) {
+        let text = Rc::new(RefCell::new(TextState::new("保留🙂AB", 4..6, None)));
+        let mut handler = platform_handler(cx, text.clone());
+        cancel_ime_composition(&mut handler);
+        let text = text.borrow();
+        assert_eq!(text.text(), "保留🙂AB");
+        assert_eq!(text.selected, 4..6);
+        assert!(text.replacements.is_empty());
+    }
+
+    #[gpui::test]
+    fn ime_cancellation_deletes_only_marked_utf16_range_beside_emoji(cx: &mut TestAppContext) {
+        let text = Rc::new(RefCell::new(TextState::new(
+            "前🙂组合中文后👩‍💻",
+            5..7,
+            Some(3..7),
+        )));
+        let mut handler = platform_handler(cx, text.clone());
+        cancel_ime_composition(&mut handler);
+        let text = text.borrow();
+        assert_eq!(text.text(), "前🙂后👩‍💻");
+        assert_eq!(text.selected, 3..3);
+        assert!(text.marked.is_none());
+        assert_eq!(text.replacements, [Some(3..7)]);
+    }
+
+    #[gpui::test]
+    fn ime_repeated_cancellation_preserves_later_ordinary_selection(cx: &mut TestAppContext) {
+        let text = Rc::new(RefCell::new(TextState::new(
+            "前🙂正在后A",
+            5..5,
+            Some(3..5),
+        )));
+        let mut handler = platform_handler(cx, text.clone());
+        cancel_ime_composition(&mut handler);
+        text.borrow_mut().selected = 3..5;
+        cancel_ime_composition(&mut handler);
+        cancel_ime_composition(&mut handler);
+        let text = text.borrow();
+        assert_eq!(text.text(), "前🙂后A");
+        assert_eq!(text.selected, 3..5);
+        assert_eq!(text.replacements, [Some(3..5)]);
+    }
+
+    #[test]
+    fn ime_invalid_context_has_no_cursor_attributes() {
+        assert!(!should_use_ime_cursor_position(HIMC::default(), 0));
+    }
+
+    #[test]
+    fn ime_cursor_attributes_ignore_unread_zero_padding() {
+        let attrs = [ATTR_CONVERTED as u8, ATTR_CONVERTED as u8, 0, 0];
+        assert!(!ime_cursor_is_adjacent_to_input(&attrs, 2, 2));
+        assert!(!ime_cursor_is_adjacent_to_input(&attrs, 2, 3));
+        assert!(ime_cursor_is_adjacent_to_input(&attrs, attrs.len(), 2));
+        assert!(!ime_cursor_is_adjacent_to_input(&attrs, attrs.len() + 1, 2));
+    }
 }
 
 #[inline]
