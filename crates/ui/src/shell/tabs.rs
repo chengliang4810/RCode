@@ -60,8 +60,8 @@ pub(super) struct TitlebarTrailing {
 /// The two fixed right-edge anchors: the explorer toggle and the pane toggle
 /// (28px each) with the same 4px gap the surface strip keeps between its
 /// controls, so the two never render as one fused block.
-const PANEL_TOGGLE_GAP: f32 = 4.0;
-const PANEL_TOGGLE_SLOTS: f32 = 28.0 * 2.0 + PANEL_TOGGLE_GAP;
+const PANEL_TOGGLE_GAP: f32 = TITLEBAR_ACTION_GAP;
+const PANEL_TOGGLE_SLOTS: f32 = TITLEBAR_ACTION_SIZE * 2.0 + PANEL_TOGGLE_GAP;
 
 fn panel_titlebar_widths(
     surfaces_visible: f32,
@@ -573,7 +573,7 @@ impl Shell {
                                         self.reduced_motion,
                                     ),
                                     true,
-                                    16.0,
+                                    TITLEBAR_ICON_SIZE,
                                     theme.text_muted,
                                 ),
                                 ShortcutId::ToggleChanges.label_text(),
@@ -600,7 +600,7 @@ impl Shell {
             };
             header_icon_button_with(
                 "toggle-session-info",
-                icons::corner_card_glyph(16.0, theme.text_muted),
+                icons::corner_card_glyph(TITLEBAR_ICON_SIZE, theme.text_muted),
                 label.clone(),
                 cx.listener(|this, _, _, cx| this.toggle_session_info(cx)),
             )
@@ -618,11 +618,8 @@ impl Shell {
                 crate::running_pill::mark_titlebar_button(button, running_lanes, &theme)
             })
         });
-        let inner = div()
+        let inner = crate::chrome::titlebar_row()
             .size_full()
-            .flex()
-            .items_center()
-            .pt(px(Theme::TITLEBAR_TOP_PAD))
             .gap(px(row_gap))
             .pl(px(row_left))
             .pr(px(right_pad))

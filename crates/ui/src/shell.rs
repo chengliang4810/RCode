@@ -328,10 +328,14 @@ pub struct SelectPaletteTab(pub usize);
 
 /// Where the top-left window-control cluster starts, in px from the window's
 /// left edge (zeron window-controls.tsx: `left: fullscreen ? 12 : 88`). The
-/// frameless hiddenInset chrome puts the macOS traffic lights at {14,15};
+/// frameless hiddenInset chrome puts the macOS traffic lights at {14,14};
 /// fullscreen hides them and the cluster reclaims the inset.
 pub fn titlebar_cluster_start(fullscreen: bool) -> f32 {
-    if fullscreen { 12.0 } else { 88.0 }
+    if fullscreen {
+        crate::chrome::MACOS_FULLSCREEN_CLUSTER_START
+    } else {
+        crate::chrome::MACOS_CLUSTER_START
+    }
 }
 
 /// Width of the spacer ahead of the control cluster for a strip that already
@@ -345,45 +349,47 @@ pub fn titlebar_spacer_width(is_macos: bool, fullscreen: bool, container_pad: f3
 }
 
 /// Within-group rhythm for Back/Forward.
-pub const TITLEBAR_CONTROL_GAP: f32 = 2.0;
+pub const TITLEBAR_CONTROL_GAP: f32 = crate::chrome::CONTROL_GAP;
 /// Structural separation between titlebar groups: sidebar, navigation,
 /// transcript identity, and trailing actions.
-pub const TITLEBAR_GROUP_GAP: f32 = Theme::SPACE_SM;
+pub const TITLEBAR_GROUP_GAP: f32 = crate::chrome::GROUP_GAP;
 /// Breathing room between the navigation cluster and transcript identity.
 pub const TITLEBAR_IDENTITY_GAP: f32 = Theme::SPACE_MD;
-/// A 28px action centered in the 38px titlebar with its 2px downward optical
-/// shift lands 6px from the top; use the same inset at the trailing edge.
-pub const TITLEBAR_ACTION_EDGE_INSET: f32 = 6.0;
-/// Width of the persistent top-left button cluster itself: a 24px sidebar
-/// trigger, an 8px group gap, then two 24px history buttons on a 2px rhythm.
-pub const CLUSTER_BUTTONS_WIDTH: f32 = 24.0 * 3.0 + TITLEBAR_GROUP_GAP + TITLEBAR_CONTROL_GAP;
+/// Shared horizontal inset for the trailing titlebar actions.
+pub const TITLEBAR_ACTION_EDGE_INSET: f32 = crate::chrome::TITLEBAR_EDGE_INSET;
+/// Width of the persistent top-left button cluster itself: a shared-size sidebar
+/// trigger, an 8px group gap, then two history buttons on the shared rhythm.
+pub const CLUSTER_BUTTONS_WIDTH: f32 = crate::chrome::NAVIGATION_WIDTH;
 /// Extra width consumed when the collapsed-sidebar New Session action joins
 /// the left controls as its own group.
-pub const TITLEBAR_ACTION_SLOT_WIDTH: f32 = TITLEBAR_GROUP_GAP + 24.0;
+pub const TITLEBAR_ACTION_SLOT_WIDTH: f32 = crate::chrome::NEW_SESSION_SLOT_WIDTH;
+/// Shared geometry for the trailing toolbar and Windows caption controls.
+pub(super) const TITLEBAR_ACTION_SIZE: f32 = crate::chrome::TITLEBAR_BUTTON_SIZE;
+pub(super) const TITLEBAR_ICON_SIZE: f32 = crate::chrome::TITLEBAR_ICON_SIZE;
+pub(super) const TITLEBAR_ACTION_GAP: f32 = crate::chrome::CONTROL_GAP;
 /// Horizontal inset owned by the titlebar control row itself. Keep this value
 /// paired with [`Self::titlebar_spacer`]: using a different number for the
 /// spacer shifts every control while leaving the declared cluster geometry
 /// unchanged.
 const TITLEBAR_CLUSTER_PAD: f32 = 10.0;
 
-/// Width of a row of `count` Linux caption buttons, drawn at the cluster's
-/// own 24px-button / 2px-gap rhythm.
+/// Width of a row of `count` Linux caption buttons, using the titlebar role.
 pub fn caption_buttons_width(count: usize) -> f32 {
     if count == 0 {
         return 0.0;
     }
-    count as f32 * 24.0 + (count as f32 - 1.0) * 2.0
+    count as f32 * TITLEBAR_ACTION_SIZE + (count as f32 - 1.0) * TITLEBAR_ACTION_GAP
 }
 
 /// Where the cluster's first button starts, from the window's left edge.
 /// `linux_left_captions` is the number of caption buttons zeron draws at the
 /// top-left on Linux (GNOME `close:…` layouts) — the app cluster follows them
-/// at the shared 2px rhythm.
+/// at the shared titlebar rhythm.
 pub fn cluster_buttons_start(is_macos: bool, fullscreen: bool, linux_left_captions: usize) -> f32 {
     if is_macos {
         titlebar_cluster_start(fullscreen)
     } else if linux_left_captions > 0 {
-        10.0 + caption_buttons_width(linux_left_captions) + 2.0
+        10.0 + caption_buttons_width(linux_left_captions) + TITLEBAR_ACTION_GAP
     } else {
         10.0
     }
@@ -1451,9 +1457,9 @@ impl WidthTween {
 
 fn titlebar_island_vertical_geometry(progress: f32) -> (f32, f32) {
     // Match the padded flex row's center, not the raw titlebar center.
-    // Keep the native 24px controls untouched and give them 4px of air.
-    let height = 28.0 + 4.0 * progress.clamp(0.0, 1.0);
-    let center = (Theme::TITLEBAR_HEIGHT + Theme::TITLEBAR_TOP_PAD) * 0.5;
+    // A settled island gives the shared buttons 2px of air on each side.
+    let height = TITLEBAR_ACTION_SIZE + TITLEBAR_ACTION_GAP * progress.clamp(0.0, 1.0);
+    let center = crate::chrome::TITLEBAR_CENTER_Y;
     (center - height * 0.5, height)
 }
 
@@ -6728,15 +6734,10 @@ impl Shell {
         }
         let island = self.eval_tween(self.titlebar_island, island_target);
         let (island_top, island_height) = titlebar_island_vertical_geometry(island);
-        div()
+        crate::chrome::titlebar_row()
             .absolute()
             .top_0()
             .left_0()
-            .h(px(Theme::TITLEBAR_HEIGHT))
-            .flex()
-            .flex_row()
-            .items_center()
-            .pt(px(Theme::TITLEBAR_TOP_PAD))
             .px(px(TITLEBAR_CLUSTER_PAD))
             .child(
                 div()
@@ -6761,7 +6762,7 @@ impl Shell {
             .children(self.titlebar_spacer(TITLEBAR_CLUSTER_PAD))
             // Left-side Linux captions (GNOME `close:…` layouts): the
             // root-level caption overlay owns the buttons; the cluster row
-            // just starts past them, at the shared 2px rhythm.
+            // just starts past them, at the shared titlebar rhythm.
             .children((self.linux_left_caption_count() > 0).then(|| {
                 div()
                     .flex_none()
@@ -6778,7 +6779,7 @@ impl Shell {
                         self.reduced_motion,
                     ),
                     false,
-                    16.0,
+                    TITLEBAR_ICON_SIZE,
                     theme.text_muted,
                 ),
                 ShortcutId::ToggleSidebar.label_text(),
@@ -6843,18 +6844,14 @@ impl Shell {
             ),
         ) + CLUSTER_BUTTONS_WIDTH
             + TITLEBAR_ACTION_SLOT_WIDTH * self.titlebar_plus_alpha(cx);
-        let left = (sidebar - Theme::SPACE_SM - 24.0).max(cluster_end + TITLEBAR_GROUP_GAP);
+        let left = (sidebar - Theme::SPACE_SM - TITLEBAR_ACTION_SIZE).max(cluster_end + TITLEBAR_GROUP_GAP);
         let theme = Theme::of(cx).clone();
         let trigger = self.render_sidebar_view_trigger(&theme, cx);
         Some(
-            div()
+            crate::chrome::titlebar_row()
                 .absolute()
                 .top_0()
                 .left(px(left))
-                .h(px(Theme::TITLEBAR_HEIGHT))
-                .pt(px(Theme::TITLEBAR_TOP_PAD))
-                .flex()
-                .items_center()
                 .opacity(reveal)
                 .child(trigger)
                 .into_any_element(),
@@ -6870,45 +6867,43 @@ impl Shell {
     /// Native Windows caption controls integrated into RCode's unified
     /// titlebar. `WindowControlArea` maps these hit targets to HTMINBUTTON,
     /// HTMAXBUTTON, and HTCLOSE, so Windows owns their behavior (including
-    /// Snap Layouts) while GPUI renders the system Segoe caption glyphs.
+    /// Snap Layouts) while GPUI renders the bundled SVG icons. These controls
+    /// must also work on Windows installations without the Segoe icon fonts.
     fn render_windows_caption_controls(&self, window: &Window, cx: &App) -> Option<AnyElement> {
         if !cfg!(target_os = "windows") {
             return None;
         }
 
         let theme = Theme::of(cx);
-        let (maximize_id, maximize_glyph) = if window.is_maximized() {
-            ("window-restore", "\u{e923}")
+        let (maximize_id, maximize_icon) = if window.is_maximized() {
+            ("window-restore", icons::CAPTION_RESTORE)
         } else {
-            ("window-maximize", "\u{e922}")
+            ("window-maximize", icons::CAPTION_MAXIMIZE)
         };
         Some(
-            div()
+            crate::chrome::titlebar_row()
                 .id("windows-window-controls")
                 .absolute()
                 .top_0()
-                .right_0()
-                .h(px(Theme::TITLEBAR_HEIGHT))
-                .flex()
-                .flex_row()
-                .font_family("Segoe Fluent Icons")
+                .right(px(TITLEBAR_ACTION_EDGE_INSET))
+                .gap(px(TITLEBAR_ACTION_GAP))
                 .child(windows_caption_button(
                     "window-minimize",
-                    "\u{e921}",
+                    icons::CAPTION_MINIMIZE,
                     WindowControlArea::Min,
                     theme,
                     false,
                 ))
                 .child(windows_caption_button(
                     maximize_id,
-                    maximize_glyph,
+                    maximize_icon,
                     WindowControlArea::Max,
                     theme,
                     false,
                 ))
                 .child(windows_caption_button(
                     "window-close",
-                    "\u{e8bb}",
+                    icons::CAPTION_CLOSE,
                     WindowControlArea::Close,
                     theme,
                     true,
@@ -6999,21 +6994,16 @@ impl Shell {
         // Ids can be per-button (not per-side): the layout parser dedups, so
         // a button never appears on both sides at once.
         let strip = |buttons: &[Option<gpui::WindowButton>]| {
-            div()
+            crate::chrome::titlebar_row()
                 .absolute()
                 .top_0()
-                .h(px(Theme::TITLEBAR_HEIGHT))
-                .flex()
-                .flex_row()
-                .items_center()
-                .pt(px(Theme::TITLEBAR_TOP_PAD))
-                .gap(px(2.0))
+                .gap(px(TITLEBAR_ACTION_GAP))
                 .px(px(10.0))
                 .children(buttons.iter().flatten().map(|button| {
                     match button {
                         gpui::WindowButton::Minimize => linux_caption_button(
                             "window-minimize",
-                            icons::WINDOW_MINIMIZE,
+                            icons::CAPTION_MINIMIZE,
                             false,
                             theme,
                             |_, window, _| window.minimize_window(),
@@ -7021,9 +7011,9 @@ impl Shell {
                         .into_any_element(),
                         gpui::WindowButton::Maximize => {
                             let (id, icon_path) = if is_maximized {
-                                ("window-restore", icons::WINDOW_RESTORE)
+                                ("window-restore", icons::CAPTION_RESTORE)
                             } else {
-                                ("window-maximize", icons::WINDOW_MAXIMIZE)
+                                ("window-maximize", icons::CAPTION_MAXIMIZE)
                             };
                             linux_caption_button(id, icon_path, false, theme, |_, window, _| {
                                 window.zoom_window()
@@ -7032,7 +7022,7 @@ impl Shell {
                         }
                         gpui::WindowButton::Close => linux_caption_button(
                             "window-close",
-                            icons::CLOSE,
+                            icons::CAPTION_CLOSE,
                             true,
                             theme,
                             |_, window, _| window.remove_window(),
@@ -11720,7 +11710,7 @@ impl Shell {
         let plus_fade = "right-surface-add-fade";
         let mut plus = div()
             .id("right-surface-add")
-            .size(px(24.0))
+            .size(px(TITLEBAR_ACTION_SIZE))
             .flex_none()
             .flex()
             .items_center()
@@ -11755,7 +11745,7 @@ impl Shell {
             ))
             .child(
                 icon(icons::PLUS)
-                    .size(px(13.0))
+                    .size(px(TITLEBAR_ICON_SIZE))
                     .text_color(theme.text_muted),
             );
         if plus_open {
@@ -12003,8 +11993,7 @@ fn grid_backdrop(theme: &Theme) -> AnyElement {
         .into_any_element()
 }
 
-/// A size-6 icon button for the titlebar strip (zeron window-controls.tsx:
-/// `grid size-6 place-items-center rounded-md text-muted-foreground`).
+/// A shared-size icon button for the titlebar navigation strip.
 fn window_control_button(
     id: &'static str,
     icon_path: &'static str,
@@ -12012,7 +12001,7 @@ fn window_control_button(
     theme: &Theme,
     on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
-    let glyph = icon(icon_path).size(px(16.0)).text_color(theme.text_muted);
+    let glyph = icon(icon_path).size(px(TITLEBAR_ICON_SIZE)).text_color(theme.text_muted);
     window_control_button_with(id, glyph, label, theme, on_click)
 }
 
@@ -12029,12 +12018,12 @@ fn window_control_button_with(
     div()
         .id(id)
         .debug_selector(move || id.to_owned())
-        .size(px(24.0))
+        .size(px(TITLEBAR_ACTION_SIZE))
         .flex_none()
         .flex()
         .items_center()
         .justify_center()
-        .rounded(px(6.0))
+        .rounded(px(crate::chrome::CONTROL_RADIUS))
         .cursor_pointer()
         // zeron window-controls.tsx: `transition-colors` — the wash fades.
         .bg(motion::hover_blend(
@@ -12065,8 +12054,8 @@ fn window_control_button_with(
         .tooltip(crate::settings::widgets::text_tooltip(label))
 }
 
-const WINDOWS_CAPTION_BUTTON_WIDTH: f32 = 36.0;
-const WINDOWS_CAPTION_WIDTH: f32 = WINDOWS_CAPTION_BUTTON_WIDTH * 3.0;
+// Three actions plus two internal gaps and one gap to the adjacent toolbar.
+const WINDOWS_CAPTION_WIDTH: f32 = (TITLEBAR_ACTION_SIZE + TITLEBAR_ACTION_GAP) * 3.0;
 
 /// Right padding for titlebar content: past the native Windows caption
 /// cluster, or past zeron's own Linux caption buttons (10px edge inset +
@@ -12081,11 +12070,11 @@ fn titlebar_right_padding(is_windows: bool, linux_right_captions: usize, base: f
     }
 }
 
-/// A Windows-owned caption target using the same system glyphs and native
-/// non-client hit-test areas as GPUI/Zed's platform titlebar.
+/// A Windows-owned caption target with a bundled SVG and native non-client
+/// hit-test areas. SVGs avoid a dependency on optional system icon fonts.
 fn windows_caption_button(
     id: &'static str,
-    glyph: &'static str,
+    icon_path: &'static str,
     area: WindowControlArea,
     theme: &Theme,
     close: bool,
@@ -12108,22 +12097,33 @@ fn windows_caption_button(
     };
     div()
         .id(id)
-        .w(px(WINDOWS_CAPTION_BUTTON_WIDTH))
-        .h_full()
+        .group("windows-caption-button")
+        .size(px(TITLEBAR_ACTION_SIZE))
         .flex_none()
         .flex()
         .items_center()
         .justify_center()
-        .text_size(crate::typography::ui_rems(10.0))
-        .text_color(theme.text)
+        .rounded(px(crate::chrome::CONTROL_RADIUS))
+        .text_color(theme.text_muted)
         .hover(move |style| style.bg(hover_bg).text_color(hover_fg))
         .active(move |style| style.bg(active_bg).text_color(active_fg))
         .occlude()
         .window_control_area(area)
-        .child(glyph)
+        .child(
+            icon(icon_path)
+                .id("windows-caption-icon")
+                .size(px(TITLEBAR_ICON_SIZE))
+                .text_color(theme.text_muted)
+                .group_hover("windows-caption-button", move |style| {
+                    style.text_color(hover_fg)
+                })
+                .group_active("windows-caption-button", move |style| {
+                    style.text_color(active_fg)
+                }),
+        )
 }
 
-/// A Linux caption button in zeron's own cluster style (24px, rounded-6,
+/// A Linux caption button in the shared titlebar style (28px, rounded-6,
 /// 16px linear icon). gpui's `WindowControlArea` hit-testing is inert on
 /// Linux, so unlike the Windows cluster these carry explicit click handlers
 /// (`minimize_window` / `zoom_window` / `remove_window`), the same calls
@@ -12147,12 +12147,12 @@ fn linux_caption_button(
         // gpui svgs don't inherit the div's text color — recolor the glyph
         // on hover through the group instead (zed's WindowControl idiom).
         .group("linux-caption-button")
-        .size(px(24.0))
+        .size(px(TITLEBAR_ACTION_SIZE))
         .flex_none()
         .flex()
         .items_center()
         .justify_center()
-        .rounded(px(6.0))
+        .rounded(px(crate::chrome::CONTROL_RADIUS))
         .cursor_pointer()
         .hover(move |style| style.bg(hover_bg))
         .occlude()
@@ -12163,7 +12163,7 @@ fn linux_caption_button(
         })
         .child(
             icon(icon_path)
-                .size(px(16.0))
+                .size(px(TITLEBAR_ICON_SIZE))
                 .text_color(muted)
                 .group_hover("linux-caption-button", move |style| {
                     style.text_color(hover_fg)
@@ -12184,7 +12184,7 @@ fn nav_history_button(
 ) -> AnyElement {
     if !enabled {
         return div()
-            .size(px(24.0))
+            .size(px(TITLEBAR_ACTION_SIZE))
             .flex_none()
             .flex()
             .items_center()
@@ -12194,7 +12194,7 @@ fn nav_history_button(
             .occlude()
             .child(
                 icon(icon_path)
-                    .size(px(16.0))
+                    .size(px(TITLEBAR_ICON_SIZE))
                     .text_color(theme.text_muted.opacity(0.35)),
             )
             .into_any_element();
@@ -12211,7 +12211,9 @@ fn header_icon_button(
     theme: &Theme,
     on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
 ) -> gpui::Stateful<gpui::Div> {
-    let glyph = icon(icon_path).size(px(16.0)).text_color(theme.text_muted);
+    let glyph = icon(icon_path)
+        .size(px(TITLEBAR_ICON_SIZE))
+        .text_color(theme.text_muted);
     header_icon_button_with(id, glyph, label.into(), on_click)
 }
 
@@ -12227,12 +12229,12 @@ fn header_icon_button_with(
     div()
         .id(id)
         .debug_selector(|| id.into())
-        .size(px(28.0))
+        .size(px(TITLEBAR_ACTION_SIZE))
         .flex_none()
         .flex()
         .items_center()
         .justify_center()
-        .rounded(px(6.0))
+        .rounded(px(crate::chrome::CONTROL_RADIUS))
         .cursor_pointer()
         // zeron __root.tsx header buttons: `transition-colors`.
         .bg(motion::hover_blend(
@@ -13224,14 +13226,15 @@ mod tests {
 
     #[test]
     fn narrowest_sidebar_keeps_its_options_button_beside_the_titlebar_controls() {
-        for is_macos in [true, false] {
-            let cluster_end = cluster_buttons_start(is_macos, false, 0)
+        for (is_macos, left_captions) in [(true, 0), (false, 0), (false, 1), (false, 3)] {
+            let minimum = crate::chrome::sidebar_min_width(is_macos, left_captions);
+            let cluster_end = cluster_buttons_start(is_macos, false, left_captions)
                 + CLUSTER_BUTTONS_WIDTH
                 + TITLEBAR_ACTION_SLOT_WIDTH;
-            let options_right = cluster_end + TITLEBAR_GROUP_GAP + 24.0;
+            let options_right = cluster_end + TITLEBAR_GROUP_GAP + TITLEBAR_ACTION_SIZE;
             assert!(
-                options_right + Theme::SPACE_SM <= SIDEBAR_MIN,
-                "options button ends at {options_right} in a {SIDEBAR_MIN} sidebar"
+                options_right + Theme::SPACE_SM <= minimum,
+                "options button ends at {options_right} in a {minimum} sidebar"
             );
         }
     }
@@ -13361,8 +13364,8 @@ mod tests {
         }
         let (top, height) = titlebar_island_vertical_geometry(1.0);
         assert_eq!(center, 21.0);
-        assert_eq!(center - 12.0 - top, 4.0);
-        assert_eq!(top + height - (center + 12.0), 4.0);
+        assert_eq!(center - TITLEBAR_ACTION_SIZE * 0.5 - top, 2.0);
+        assert_eq!(top + height - (center + TITLEBAR_ACTION_SIZE * 0.5), 2.0);
     }
 
     #[test]
@@ -13734,15 +13737,15 @@ mod tests {
     #[test]
     fn titlebar_cluster_matches_the_upstream_window_controls() {
         // zeron window-controls.tsx: `left: fullscreen ? 12 : 88` — the
-        // cluster clears the {14,15} traffic lights, and reclaims the inset
+        // cluster clears the {14,14} traffic lights, and reclaims the inset
         // when fullscreen hides them.
         assert_eq!(titlebar_cluster_start(false), 88.0);
         assert_eq!(titlebar_cluster_start(true), 12.0);
-        assert_eq!(TITLEBAR_CONTROL_GAP, 2.0);
+        assert_eq!(TITLEBAR_CONTROL_GAP, 4.0);
         assert_eq!(TITLEBAR_GROUP_GAP, Theme::SPACE_SM);
         assert_eq!(TITLEBAR_IDENTITY_GAP, Theme::SPACE_MD);
-        assert_eq!(CLUSTER_BUTTONS_WIDTH, 82.0);
-        assert_eq!(TITLEBAR_ACTION_SLOT_WIDTH, 32.0);
+        assert_eq!(CLUSTER_BUTTONS_WIDTH, 96.0);
+        assert_eq!(TITLEBAR_ACTION_SLOT_WIDTH, 36.0);
         assert_eq!(TITLEBAR_ACTION_EDGE_INSET, 6.0);
     }
 
@@ -13768,38 +13771,37 @@ mod tests {
 
     #[test]
     fn windows_caption_controls_reserve_titlebar_space() {
-        assert_eq!(titlebar_right_padding(true, 0, 16.0), 124.0);
+        assert_eq!(titlebar_right_padding(true, 0, 16.0), 112.0);
         assert_eq!(titlebar_right_padding(false, 0, 16.0), 16.0);
     }
 
     #[test]
     fn linux_caption_controls_reserve_titlebar_space() {
-        // 24px buttons on the cluster's 2px rhythm.
+        // Captions share the toolbar's 28px buttons and 4px gap.
         assert_eq!(caption_buttons_width(0), 0.0);
-        assert_eq!(caption_buttons_width(1), 24.0);
-        assert_eq!(caption_buttons_width(3), 76.0);
+        assert_eq!(caption_buttons_width(1), 28.0);
+        assert_eq!(caption_buttons_width(3), 92.0);
         // Right-side captions (the Linux default: minimize,maximize,close):
         // content pads past the 10px edge inset + the button row.
-        assert_eq!(titlebar_right_padding(false, 3, 16.0), 16.0 + 10.0 + 76.0);
+        assert_eq!(titlebar_right_padding(false, 3, 16.0), 16.0 + 10.0 + 92.0);
         // GNOME-vanilla ":close" — a single right button.
-        assert_eq!(titlebar_right_padding(false, 1, 16.0), 16.0 + 10.0 + 24.0);
+        assert_eq!(titlebar_right_padding(false, 1, 16.0), 16.0 + 10.0 + 28.0);
         // Left-side captions ("close:…" layouts) shift the app cluster right
-        // by the button row + one 2px gap.
+        // by the button row + one shared gap.
         assert_eq!(cluster_buttons_start(false, false, 0), 10.0);
-        assert_eq!(cluster_buttons_start(false, false, 1), 10.0 + 24.0 + 2.0);
-        assert_eq!(cluster_buttons_start(false, false, 3), 10.0 + 76.0 + 2.0);
+        assert_eq!(cluster_buttons_start(false, false, 1), 10.0 + 28.0 + 4.0);
+        assert_eq!(cluster_buttons_start(false, false, 3), 10.0 + 92.0 + 4.0);
         // macOS ignores the Linux caption count entirely.
         assert_eq!(cluster_buttons_start(true, false, 3), 88.0);
     }
 
     #[test]
     fn cluster_clearance_clears_the_overlay_buttons() {
-        // Linux: buttons at 10..92; a 16px-padded header needs 84 more px to
-        // put content at 92 + 8 breathing room.
-        assert_eq!(cluster_clearance(false, false, 0, 16.0), 84.0);
-        assert_eq!(cluster_clearance(false, false, 0, 10.0), 90.0);
+        // The header clears the wider, shared-size navigation group.
+        assert_eq!(cluster_clearance(false, false, 0, 16.0), 98.0);
+        assert_eq!(cluster_clearance(false, false, 0, 10.0), 104.0);
         // Linux with a left-side close caption: everything shifts one slot.
-        assert_eq!(cluster_clearance(false, false, 1, 16.0), 84.0 + 26.0);
+        assert_eq!(cluster_clearance(false, false, 1, 16.0), 98.0 + 32.0);
         // macOS: buttons start at the 88px traffic-light cluster start.
         assert_eq!(
             cluster_clearance(true, false, 0, 16.0),

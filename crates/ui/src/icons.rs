@@ -189,6 +189,11 @@ icon_assets![
     (WINDOW_MINIMIZE, "window-minimize"),
     (WINDOW_MAXIMIZE, "window-maximize"),
     (WINDOW_RESTORE, "window-restore"),
+    // Custom captions share the toolbar's 24-unit grid and 1.75-unit strokes.
+    (CAPTION_MINIMIZE, "caption-minimize"),
+    (CAPTION_MAXIMIZE, "caption-maximize"),
+    (CAPTION_RESTORE, "caption-restore"),
+    (CAPTION_CLOSE, "caption-close"),
     // Hand-drawn hard-drive + home glyphs in the Solar Linear style (like the
     // terminal/plus/return ports) — drawn for the add-space palette's
     // Locations rail; the set has neither.
@@ -340,6 +345,14 @@ mod tests {
     fn pull_request_icons_produce_visible_pixels() {
         let renderer = gpui::SvgRenderer::new(std::sync::Arc::new(Assets));
         for path in [
+            CAPTION_MINIMIZE,
+            CAPTION_MAXIMIZE,
+            CAPTION_RESTORE,
+            CAPTION_CLOSE,
+            WINDOW_MINIMIZE,
+            WINDOW_MAXIMIZE,
+            WINDOW_RESTORE,
+            CLOSE,
             USAGE_GAUGE,
             USAGE_TOKENS,
             CPU,

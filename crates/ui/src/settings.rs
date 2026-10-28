@@ -45,13 +45,14 @@ pub(crate) fn personal_catalog_target() -> serde_json::Value {
     serde_json::json!({ "personal": true })
 }
 
-/// Sidebar drag-resize bounds (px). The minimum keeps the sidebar options
-/// button inside the sidebar beside the titlebar controls: 88 (past the
-/// traffic lights) + 82 (toggle, back, forward) + 32 (new session) + 8 gap
-/// + 24 (options) + 8 inset.
-pub const SIDEBAR_MIN: f32 = 242.0;
+/// Sidebar drag-resize bounds, including the shared titlebar controls.
+/// Linux budgets its widest supported left-side native-control layout.
+pub const SIDEBAR_MIN: f32 = crate::chrome::sidebar_min_width(
+    cfg!(target_os = "macos"),
+    if cfg!(target_os = "linux") { 3 } else { 0 },
+);
 pub const SIDEBAR_MAX: f32 = 400.0;
-pub const SIDEBAR_DEFAULT: f32 = 256.0;
+pub const SIDEBAR_DEFAULT: f32 = if SIDEBAR_MIN > 256.0 { SIDEBAR_MIN } else { 256.0 };
 
 /// Independent file explorer width preference and drag bounds (px).
 pub const FILES_PANEL_DEFAULT: f32 = 286.0;

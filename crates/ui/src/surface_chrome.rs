@@ -6,10 +6,10 @@ use rcode_presentation::TextKey;
 use crate::theme::Theme;
 
 pub(crate) const HEADER_HEIGHT: f32 = Theme::TITLEBAR_HEIGHT;
-pub(crate) const CONTROL_SIZE: f32 = 24.0;
-pub(crate) const CONTROL_RADIUS: f32 = 6.0;
-pub(crate) const ICON_SIZE: f32 = 14.0;
-pub(crate) const CONTROL_GAP: f32 = 4.0;
+pub(crate) const CONTROL_SIZE: f32 = crate::chrome::COMPACT_BUTTON_SIZE;
+pub(crate) const CONTROL_RADIUS: f32 = crate::chrome::CONTROL_RADIUS;
+pub(crate) const ICON_SIZE: f32 = crate::chrome::COMPACT_ICON_SIZE;
+pub(crate) const CONTROL_GAP: f32 = crate::chrome::CONTROL_GAP;
 pub(crate) const EDGE_INSET: f32 = 8.0;
 
 /// Shared field treatment for the file search and browser address controls.

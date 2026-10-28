@@ -4517,12 +4517,12 @@ impl Shell {
             .aria_label(crate::l10n::localizer().text(TextKey::ShellSidebarViewOptions))
             .aria_expanded(view_open)
             .track_focus(&view_focus)
-            .size(px(24.0))
+            .size(px(TITLEBAR_ACTION_SIZE))
             .flex_none()
             .flex()
             .items_center()
             .justify_center()
-            .rounded(px(6.0))
+            .rounded(px(crate::chrome::CONTROL_RADIUS))
             .border_1()
             .border_color(theme.border.opacity(0.0))
             .focus_visible(|el| el.border_color(theme.border_strong))
@@ -4571,7 +4571,7 @@ impl Shell {
             .tooltip_show_delay(std::time::Duration::from_millis(350))
             .child(
                 icon(icons::MORE_HORIZONTAL)
-                    .size(px(16.0))
+                    .size(px(TITLEBAR_ICON_SIZE))
                     .text_color(theme.text_muted),
             );
         let view_trigger = if self.sidebar_view_menu.get().is_some() {

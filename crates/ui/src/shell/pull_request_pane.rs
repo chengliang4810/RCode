@@ -842,7 +842,7 @@ impl Shell {
     /// and its toggle while it is hidden.
     pub(super) fn render_pull_request_title_bar(&mut self, cx: &mut Context<Self>) -> AnyElement {
         /// The pane toggle's fixed right-edge slot.
-        const TOGGLE_SLOT: f32 = 28.0;
+        const TOGGLE_SLOT: f32 = TITLEBAR_ACTION_SIZE;
         let theme = Theme::of(cx).clone();
         let plus_inset = TITLEBAR_ACTION_SLOT_WIDTH * self.titlebar_plus_alpha(cx);
         let sidebar_now = self.sidebar_now();
@@ -934,7 +934,7 @@ impl Shell {
                             self.reduced_motion,
                         ),
                         true,
-                        16.0,
+                        TITLEBAR_ICON_SIZE,
                         theme.text_muted,
                     ),
                     ShortcutId::ToggleChanges.label_text(),
@@ -943,11 +943,8 @@ impl Shell {
                 .debug_selector(|| "toggle-pull-request-pane".into()),
             );
         }
-        let inner = div()
+        let inner = crate::chrome::titlebar_row()
             .size_full()
-            .flex()
-            .items_center()
-            .pt(px(Theme::TITLEBAR_TOP_PAD))
             .gap(px(row_gap))
             .pl(px(row_left))
             .pr(px(right_pad))

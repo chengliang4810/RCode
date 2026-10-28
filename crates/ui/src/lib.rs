@@ -15,6 +15,7 @@ pub mod badges;
 pub mod browser;
 pub mod change_requests;
 pub mod changes;
+pub(crate) mod chrome;
 mod comment_ui;
 pub mod comments;
 pub mod composer;
@@ -403,7 +404,7 @@ fn open_main_window(
                 // from window kind/level, and `appears_transparent` only affects
                 // the titlebar, not the menu bar.
                 // macOS: frameless-inset chrome like the original Electron app
-                // (`titleBarStyle: "hiddenInset"`, traffic lights at 14,15 —
+                // (`titleBarStyle: "hiddenInset"`, traffic lights at 14,14 —
                 // ARCHITECTURE.md). The strip is custom-drawn. Windows
                 // still needs a native title for taskbar previews and Alt+Tab. On
                 // Linux/Windows `appears_transparent` hides the system titlebar
@@ -413,7 +414,7 @@ fn open_main_window(
                     appears_transparent: true,
                     // Native lights are 14px tall: top 14 → center 21, matching
                     // the 38px titlebar row with 4px top-only content padding.
-                    traffic_light_position: Some(gpui::point(px(14.), px(14.))),
+                    traffic_light_position: Some(chrome::macos_traffic_light_position()),
                 }),
                 // Our own titlebar strip drags the window (WindowControlArea::
                 // Drag + start_window_move) — mark the content view app-owned

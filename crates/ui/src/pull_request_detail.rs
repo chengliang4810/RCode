@@ -1415,7 +1415,7 @@ fn action(
         .border_color(gpui::transparent_black())
         .cursor_pointer()
         .when(icon_only, |el| {
-            el.size(px(24.0))
+            el.size(px(crate::surface_chrome::CONTROL_SIZE))
                 .flex_none()
                 .rounded(px(6.0))
                 .occlude()
@@ -1429,7 +1429,7 @@ fn action(
         })
         .children(glyph.map(|glyph| {
             crate::icons::icon(glyph)
-                .size(px(14.0))
+                .size(px(crate::surface_chrome::ICON_SIZE))
                 .text_color(theme.text_muted)
         }))
         .when(!icon_only, |el| el.child(label.clone()))
