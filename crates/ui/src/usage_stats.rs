@@ -153,20 +153,24 @@ impl StatData {
                 stats.models.join(", "),
             ));
         }
-        let input_label = if stats.cache_read_tokens.is_some() {
-            TextKey::ConversationStatsUncachedInput
+        // Uncached input is total input minus the reported cache buckets, so it
+        // needs cache accounting on every recorded call. Over a partial
+        // coverage those buckets are unknown for some calls and subtracting
+        // them would count their tokens as uncached; the row degrades to the
+        // plain input total and the coverage row says how much the rate saw.
+        let complete = stats.cache_coverage_complete() && stats.cache_read_tokens.is_some();
+        let input = if complete {
+            (
+                TextKey::ConversationStatsUncachedInput,
+                stats
+                    .input_tokens
+                    .saturating_sub(stats.cache_read_tokens.unwrap_or(0))
+                    .saturating_sub(stats.cache_write_tokens.unwrap_or(0)),
+            )
         } else {
-            TextKey::ConversationStatsInput
+            (TextKey::ConversationStatsInput, stats.input_tokens)
         };
-        let uncached = if stats.cache_read_tokens.is_some() {
-            stats
-                .input_tokens
-                .saturating_sub(stats.cache_read_tokens.unwrap_or(0))
-                .saturating_sub(stats.cache_write_tokens.unwrap_or(0))
-        } else {
-            stats.input_tokens
-        };
-        rows.push((text(input_label), compact(uncached)));
+        rows.push((text(input.0), compact(input.1)));
         if let Some(read) = stats.cache_read_tokens {
             rows.push((text(TextKey::ConversationStatsCacheRead), compact(read)));
         }
@@ -177,8 +181,20 @@ impl StatData {
             text(TextKey::ConversationStatsOutput),
             compact(stats.output_tokens),
         ));
-        if let Some(hit) = hit {
+        if let Some(hit) = &hit {
             rows.push((text(TextKey::ConversationStatsCacheHit), format!("{hit}%")));
+            if !stats.cache_coverage_complete() {
+                rows.push((
+                    text(TextKey::ConversationStatsCacheCoverage),
+                    crate::l10n::localizer().format_with(
+                        TextKey::ConversationStatsCacheCoverageValue,
+                        &[
+                            ("reported", &stats.cache_read_calls.to_string()),
+                            ("total", &stats.calls.to_string()),
+                        ],
+                    ),
+                ));
+            }
         }
         Some(Self {
             title,
@@ -345,6 +361,67 @@ mod tests {
     use super::*;
     use gpui::{AppContext, TestAppContext};
     use std::time::Duration;
+
+    /// A gateway that omits cache counters for some responses must not cost the
+    /// session its rate: the number covers the reporting calls, and the card
+    /// says how many that was.
+    #[test]
+    fn usage_rates_cache_over_the_reporting_calls_and_flags_the_coverage() {
+        let localizer = crate::l10n::localizer();
+        let hit_label = localizer.text(TextKey::ConversationStatsCacheHit);
+        let coverage_label = localizer.text(TextKey::ConversationStatsCacheCoverage);
+        let coverage_value = localizer.format_with(
+            TextKey::ConversationStatsCacheCoverageValue,
+            &[("reported", "3"), ("total", "4")],
+        );
+        let uncached_label = localizer.text(TextKey::ConversationStatsUncachedInput);
+
+        let partial = StatData::usage(
+            &UsageStatistics {
+                calls: 4,
+                token_calls: 4,
+                input_tokens: 10_000,
+                output_tokens: 200,
+                cache_read_tokens: Some(7_200),
+                cache_read_calls: 3,
+                cache_read_input_tokens: 8_000,
+                ..Default::default()
+            },
+            false,
+        )
+        .unwrap();
+        // 7,200 over the 8,000 input tokens that reported it — not over 10,000.
+        assert!(partial.rows.contains(&(hit_label.clone(), "90%".into())));
+        assert!(partial.rows.contains(&(
+            localizer.text(TextKey::ConversationStatsInput),
+            compact(10_000),
+        )));
+        assert!(
+            partial
+                .rows
+                .contains(&(coverage_label.clone(), coverage_value))
+        );
+        // Uncached input cannot be derived while some calls lack the counters.
+        assert!(!partial.rows.iter().any(|(key, _)| key == &uncached_label));
+
+        let complete = StatData::usage(
+            &UsageStatistics {
+                calls: 2,
+                token_calls: 2,
+                input_tokens: 1_000,
+                output_tokens: 20,
+                cache_read_tokens: Some(500),
+                cache_read_calls: 2,
+                cache_read_input_tokens: 1_000,
+                ..Default::default()
+            },
+            false,
+        )
+        .unwrap();
+        assert!(complete.rows.contains(&(hit_label, "50%".into())));
+        assert!(complete.rows.iter().any(|(key, _)| key == &uncached_label));
+        assert!(!complete.rows.iter().any(|(key, _)| key == &coverage_label));
+    }
 
     #[gpui::test]
     fn usage_model_labels_refresh_when_the_catalog_arrives(cx: &mut TestAppContext) {

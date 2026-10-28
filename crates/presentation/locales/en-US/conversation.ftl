@@ -304,6 +304,10 @@ conversation-stats-cache-write = Cache write
 conversation-stats-output = Output
 conversation-stats-cache-hit = Cache hit
 conversation-stats-cache-summary = Cache hit { $percent }%
+# Shown under the hit rate when some responses carried no cache counters, so
+# the rate covers only the calls that did report them.
+conversation-stats-cache-coverage = Cache counters
+conversation-stats-cache-coverage-value = { $reported }/{ $total } calls
 
 conversation-goal-active = Active
 conversation-goal-paused = Paused

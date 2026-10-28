@@ -10,7 +10,9 @@
 
 - 统计来自主会话中已完成的对话模型请求；一步是一次模型请求，一轮是一个用户消息及随后可能包含多次工具调用的回答。
 - 输入是模型适配器归一化后的总输入，已经包含缓存读取、缓存写入；总 Token 为输入加输出，缓存部分不重复相加。
-- 缓存命中率为缓存读取 / 总输入。未缓存输入为总输入减去缓存读写。输入为零时不计算命中率；未上报缓存读取时不显示命中率，真实零值正常展示。
+- 缓存命中率为缓存读取 / 总输入，只在**上报了缓存计数的请求**范围内计算：分子是这些请求的缓存读取，分母是这些请求的总输入；没有上报的请求不参与，明细里用“缓存计数覆盖 3/4 次”说明这个比率代表了多少请求。一次都没上报时不显示命中率；真实零值（上报 0）正常展示。
+- 未缓存输入为总输入减去缓存读写，只在所有请求都上报了缓存读取时显示。存在未上报请求时，该行退回为“输入”总数，避免把未知的缓存量当成未缓存。
+- 兼容网关可能对部分请求完全不返回缓存字段（同一会话内交替出现），也可能对另一部分返回完整计数；因此“整段会话未知”不是正确口径，命中率按上报子集计算并标注覆盖次数。
 - Chat Completions 优先读取 `prompt_tokens_details.cached_tokens`，缺失时依次兼容 `prompt_cache_hit_tokens`、`cache_read_input_tokens`、`cached_tokens`；保留明确上报的 `cache_creation_input_tokens`。这些字段均为 `prompt_tokens` 的子集，不额外增加总输入。
 - 模型用时为各次请求从开始到完成的耗时之和，包含模型层重试等待，不包含工具执行。
 - TTFT 为有首个输出记录的请求的平均首 Token 延迟；文本、推理及工具调用输出均能建立首 Token 时间。
@@ -24,5 +26,7 @@ Runner 发出带唯一请求 ID 的 `ModelCall` 事件，NativeHarness 保留模
 会话汇总从完整记录生成，并随 transcript revision 缓存；动画帧不会重复统计。被模型压缩排除的历史记录仍保留，文档 thin rebuild、continuation 合并和重新打开都不会清除用量。未知 kind 在旧的文档读者中按现有回退规则处理。
 
 `cargo test -p rcode-doc -p rcode-model -p rcode-agent -p rcode-harness --lib statistics --locked` 覆盖计数、缓存、去重和重载；`cargo test -p rcode-engine --test e2e statistics --locked` 覆盖事件到持久记录的链路。
+
+`cargo test --locked -p rcode-ui --lib usage_stats::tests:: -- --test-threads=1` 覆盖缓存命中率、计数覆盖提示、输入总数回退及统计悬浮面板交互；`cargo test --locked -p rcode-presentation --lib` 检查中英文资源和格式化。
 
 Windows 原生检查可运行 `cargo run -p rcode-ui --example usage-stats-fixture --features appshots-fixture --locked -- output/usage-stats-qa`。它用隔离临时数据启动实际 Shell、Composer、Transcript，只截取自身窗口，不发送模型请求。

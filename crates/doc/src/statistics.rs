@@ -12,8 +12,14 @@ pub struct UsageStatistics {
     pub token_calls: u64,
     pub input_tokens: u64,
     pub output_tokens: u64,
+    /// Cache reads summed over the calls that reported them.
     pub cache_read_tokens: Option<u64>,
     pub cache_write_tokens: Option<u64>,
+    /// Calls whose response carried cache accounting — the only ones the hit
+    /// rate can speak for.
+    pub cache_read_calls: u64,
+    /// Input tokens of those calls: the hit rate's denominator.
+    pub cache_read_input_tokens: u64,
     pub duration_ms: u64,
     pub first_token_ms: u64,
     pub timed_calls: u64,
@@ -43,14 +49,21 @@ impl UsageStatistics {
             self.input_tokens = self.input_tokens.saturating_add(input);
             self.output_tokens = self.output_tokens.saturating_add(output);
         }
-        // Missing cache accounting stays unknown; never turn it into a reported 0%.
-        self.cache_read_tokens = if self.calls == 0 {
-            call.cache_read_tokens
-        } else {
-            self.cache_read_tokens
-                .zip(call.cache_read_tokens)
-                .map(|(a, b)| a.saturating_add(b))
+        // Missing cache accounting stays unknown for that call; never turn it
+        // into a reported 0%. The sum therefore covers the calls that did
+        // report it, and `cache_hit_percent` keeps the denominator to the same
+        // calls — one silent response no longer blanks the whole session.
+        self.cache_read_tokens = match (self.cache_read_tokens, call.cache_read_tokens) {
+            (Some(total), Some(read)) => Some(total.saturating_add(read)),
+            (previous, next) => previous.or(next),
         };
+        if let Some(input) = call
+            .input_tokens
+            .filter(|_| call.cache_read_tokens.is_some())
+        {
+            self.cache_read_calls += 1;
+            self.cache_read_input_tokens = self.cache_read_input_tokens.saturating_add(input);
+        }
         self.cache_write_tokens = match (self.cache_write_tokens, call.cache_write_tokens) {
             (Some(a), Some(b)) => Some(a.saturating_add(b)),
             (previous, next) => previous.or(next),
@@ -66,11 +79,24 @@ impl UsageStatistics {
             .then(|| self.input_tokens.saturating_add(self.output_tokens))
     }
 
+    /// Cache reads as a share of the input that reported them.
+    ///
+    /// Only calls that carried cache accounting count. A provider or a gateway
+    /// route may omit the counters for some responses; folding an unknown into
+    /// the sum would either hide the rate for the whole session or invent one,
+    /// so the rate spans the reporting calls and [`Self::cache_coverage_complete`]
+    /// says whether that is all of them.
     pub fn cache_hit_percent(&self) -> Option<f64> {
         self.total_tokens()?;
         let cached = self.cache_read_tokens?;
-        (self.input_tokens > 0 && cached <= self.input_tokens)
-            .then(|| cached as f64 * 100.0 / self.input_tokens as f64)
+        (self.cache_read_input_tokens > 0 && cached <= self.cache_read_input_tokens)
+            .then(|| cached as f64 * 100.0 / self.cache_read_input_tokens as f64)
+    }
+
+    /// Whether every recorded call reported cache reads, so the rate and the
+    /// uncached input describe the whole session rather than a subset.
+    pub fn cache_coverage_complete(&self) -> bool {
+        self.cache_read_calls >= self.calls
     }
 
     pub fn tokens_per_second(&self) -> Option<f64> {
@@ -231,7 +257,16 @@ mod tests {
             ],
         )]);
         assert_eq!(stats.session.total_tokens(), Some(360));
-        assert_eq!(stats.session.cache_hit_percent(), None);
+        // The unknown call stays out of the rate instead of blanking it.
+        assert_eq!(stats.session.cache_hit_percent(), Some(50.0));
+        assert_eq!(
+            (
+                stats.session.cache_read_calls,
+                stats.session.cache_read_input_tokens,
+            ),
+            (1, 100)
+        );
+        assert!(!stats.session.cache_coverage_complete());
         let stats = ConversationStatistics::from_entries(&[entry(
             "a",
             MessageRole::Assistant,
@@ -241,6 +276,8 @@ mod tests {
             }],
         )]);
         assert_eq!(stats.session.total_tokens(), None);
+        assert_eq!(stats.session.cache_hit_percent(), None);
+        assert!(!stats.session.cache_coverage_complete());
     }
 
     #[test]
@@ -270,6 +307,60 @@ mod tests {
         assert_eq!(stats.session.cache_write_tokens, Some(200));
         assert_eq!(stats.session.cache_hit_percent(), Some(60.0));
         assert_eq!(stats.session.total_tokens(), Some(1700));
+    }
+
+    /// A gateway may answer some requests without cache counters. Those calls
+    /// stay out of the rate instead of blanking it, and the coverage fields say
+    /// how much of the session the number speaks for.
+    #[test]
+    fn statistics_cache_rate_covers_only_the_calls_that_reported_it() {
+        let mut second = entry(
+            "a1-cont",
+            MessageRole::Assistant,
+            vec![call("c2", 2000, 100, None, 2000, Some(500))],
+        );
+        second.continuation_of = Some("a1".into());
+        let entries = vec![
+            entry("u1", MessageRole::User, vec![]),
+            entry(
+                "a1",
+                MessageRole::Assistant,
+                vec![call("c1", 1000, 100, Some(900), 1000, Some(200))],
+            ),
+            second,
+            entry("u2", MessageRole::User, vec![]),
+            entry(
+                "a2",
+                MessageRole::Assistant,
+                vec![call("c3", 4000, 100, Some(2000), 4000, Some(800))],
+            ),
+        ];
+        let stats = ConversationStatistics::from_entries(&entries);
+        assert_eq!(stats.session.calls, 3);
+        assert_eq!(stats.session.cache_read_calls, 2);
+        assert_eq!(stats.session.cache_read_input_tokens, 5000);
+        assert_eq!(stats.session.cache_read_tokens, Some(2900));
+        // 2900 over the 5000 input tokens that reported it, not over all 7300.
+        assert_eq!(stats.session.cache_hit_percent(), Some(58.0));
+        assert!(!stats.session.cache_coverage_complete());
+        let first = &stats.turns["a1"];
+        assert_eq!((first.calls, first.cache_read_calls), (2, 1));
+        assert_eq!(first.cache_hit_percent(), Some(90.0));
+        assert!(!first.cache_coverage_complete());
+        let second = &stats.turns["a2"];
+        assert_eq!(second.cache_hit_percent(), Some(50.0));
+        assert!(second.cache_coverage_complete());
+        // Every call reporting keeps the plain whole-session reading.
+        let reported = ConversationStatistics::from_entries(&[entry(
+            "a",
+            MessageRole::Assistant,
+            vec![
+                call("c1", 1000, 100, Some(900), 1000, Some(200)),
+                call("c2", 1000, 100, Some(100), 1000, Some(200)),
+            ],
+        )]);
+        assert_eq!(reported.session.cache_hit_percent(), Some(50.0));
+        assert!(reported.session.cache_coverage_complete());
     }
 
     #[test]

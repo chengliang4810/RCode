@@ -250,6 +250,9 @@ conversation-stats-cache-write = 缓存写入
 conversation-stats-output = 输出
 conversation-stats-cache-hit = 缓存命中率
 conversation-stats-cache-summary = 缓存命中 { $percent }%
+# 部分响应没有缓存计数时显示在命中率下方：这个比率只覆盖上报了计数的请求。
+conversation-stats-cache-coverage = 缓存计数覆盖
+conversation-stats-cache-coverage-value = { $reported }/{ $total } 次
 
 conversation-goal-active = 进行中
 conversation-goal-paused = 已暂停
