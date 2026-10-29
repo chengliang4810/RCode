@@ -284,8 +284,9 @@ fn files_panel_workspace_navigation_and_external_updates() {
                 frame(window, cx, output.as_deref(), "01b-picker-files-compact").await;
                 window
                     .update(cx, |shell, window, cx| {
-                        assert_eq!(shell.files_visible_width(cx), 284.0);
-                        assert_eq!(shell.files_reserved_width(cx), 284.0);
+                        let available_files = 1200.0 - SIDEBAR_DEFAULT - RIGHT_PANE_MIN - CHAT_PANEL_MIN;
+                        assert_eq!(shell.files_visible_width(cx), available_files);
+                        assert_eq!(shell.files_reserved_width(cx), available_files);
                         assert_eq!(shell.right_visible_width(cx), RIGHT_PANE_MIN);
                         // Squeezed by the narrow window, Files keeps its own
                         // width for when there is room again.

@@ -167,7 +167,7 @@ fn select(shell: &mut Shell, chat: Option<&str>, cx: &mut Context<Shell>) {
 }
 
 #[gpui::test]
-fn native_empty_model_trigger_opens_provider_settings(cx: &mut TestAppContext) {
+fn native_empty_model_trigger_opens_management_then_provider_settings(cx: &mut TestAppContext) {
     let (_dir, shell, cx) = setup(cx);
     change(&shell, cx, |shell, window, cx| {
         select(shell, None, cx);
@@ -176,8 +176,15 @@ fn native_empty_model_trigger_opens_provider_settings(cx: &mut TestAppContext) {
         window.focus(&shell.composer.focus_handle(cx), cx);
     });
     settled(&shell, cx);
-    let trigger = cx.debug_bounds("picker-model").expect("Add model trigger is visible");
+    let trigger = cx.debug_bounds("picker-model").expect("Model management trigger is visible");
     cx.simulate_click(trigger.center(), Default::default());
+    cx.update(|window, cx| window.draw(cx).clear());
+    shell.read_with(cx, |shell, cx| {
+        assert_eq!(shell.route, Route::Chat);
+        assert!(shell.composer.read(cx).pickers().read(cx).is_open());
+    });
+    let management = cx.debug_bounds("model-management").expect("Model management entry is visible");
+    cx.simulate_click(management.center(), Default::default());
     cx.update(|window, cx| window.draw(cx).clear());
     shell.read_with(cx, |shell, cx| {
         assert_eq!(shell.route, Route::Settings(SettingsSection::Harnesses));
@@ -320,9 +327,10 @@ fn panels_share_space_and_keep_rendered_geometry_through_their_lifecycle(cx: &mu
     );
     cx.simulate_mouse_up(sidebar_seam(300.0), MouseButton::Left, Default::default());
     // A squeezed sidebar lays its rows and menus out within its column.
-    cx.simulate_resize(gpui::size(px(1130.0), px(900.0)));
-    near(draw(&shell, cx, 0).widths[0], 250.0);
-    near(shell.read_with(cx, |s, _| s.sidebar_content_width()), 250.0);
+    let squeezed_sidebar = SIDEBAR_MIN + 8.0;
+    cx.simulate_resize(gpui::size(px(880.0 + squeezed_sidebar), px(900.0)));
+    near(draw(&shell, cx, 0).widths[0], squeezed_sidebar);
+    near(shell.read_with(cx, |s, _| s.sidebar_content_width()), squeezed_sidebar);
     cx.simulate_resize(gpui::size(px(1600.0), px(900.0)));
     expect(settled(&shell, cx), ordinary.widths);
 

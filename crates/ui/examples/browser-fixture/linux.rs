@@ -429,8 +429,12 @@ pub async fn exercise(
         cx,
     )?;
     let mut widths = Vec::new();
+    // The responsive layout can start at its minimum width. Travel far
+    // enough in either direction to exercise a >150px range even when one
+    // half of the drag is clamped by that minimum or the conversation floor.
     for delta in [
-        20., 60., 100., 140., 100., 60., 20., -20., -60., -100., -140., -100., -60., -20., 0.,
+        20., 60., 100., 140., 180., 220., 180., 140., 100., 60., 20.,
+        -20., -60., -100., -140., -180., -220., -180., -140., -100., -60., -20., 0.,
     ] {
         dispatch(
             window,
@@ -469,7 +473,7 @@ pub async fn exercise(
         widths.iter().copied().fold(f32::MIN, f32::max)
             - widths.iter().copied().fold(f32::MAX, f32::min)
             > 150.,
-        "resize did not change viewport"
+        "resize did not change viewport sufficiently: {widths:?}"
     );
     let width = eval(&page, "innerWidth", cx).await?.as_f64().unwrap();
     let layout = f32::from(page.read_with(cx, |b, _| b.fixture_linux_bounds().size.width));

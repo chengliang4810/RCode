@@ -3956,7 +3956,8 @@ mod tests {
     #[test]
     fn defaults_match_the_upstream_spec() {
         let d = UiSettings::default();
-        assert_eq!(d.sidebar_width, 256.0);
+        assert_eq!(d.sidebar_width, SIDEBAR_DEFAULT);
+        assert!(d.sidebar_width >= SIDEBAR_MIN);
         assert_eq!(d.right_pane_width, 520.0);
         assert_eq!(d.terminal_height, 280.0);
         assert!(!d.sidebar_collapsed && !d.right_pane_open && !d.terminal_open);
