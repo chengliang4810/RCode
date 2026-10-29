@@ -22,11 +22,17 @@ mod tests {
     struct Fixture {
         picker: Entity<Pickers>,
         left: bool,
+        management_opened: bool,
         _dir: tempfile::TempDir,
     }
     impl Render for Fixture {
-        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-            div().size_full().relative().child(
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            div().size_full().relative()
+            .on_action(cx.listener(|this, _: &crate::shell::OpenProviderSettings, _, cx| {
+                this.management_opened = true;
+                cx.notify();
+            }))
+            .child(
                 div()
                     .absolute()
                     .bottom(px(60.0))
@@ -77,7 +83,7 @@ mod tests {
                 picker.provider_menu.attempted = true;
                 picker
             });
-            Fixture { picker, left, _dir: dir }
+            Fixture { picker, left, management_opened: false, _dir: dir }
         });
         let picker = window
             .read_with(cx, |fixture, _| fixture.picker.clone())
@@ -90,6 +96,203 @@ mod tests {
             window.draw(cx).clear();
             window.draw(cx).clear();
         });
+    }
+
+    #[gpui::test]
+    fn model_management_is_pinned_and_opens_provider_settings(cx: &mut gpui::TestAppContext) {
+        for compact in [false, true] {
+            let (window, picker) = setup(cx, compact, false);
+            let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+            redraw(&mut visual);
+            let trigger = visual.debug_bounds("picker-model").unwrap().center();
+            visual.simulate_click(trigger, Default::default());
+            redraw(&mut visual);
+            let card = visual.debug_bounds("model-picker-card").unwrap();
+            let footer = visual
+                .debug_bounds("model-management")
+                .expect("pinned model management");
+            let list = visual.debug_bounds("conversation-provider-list").unwrap();
+            assert!(
+                footer.top() >= list.bottom(),
+                "list overlaps management: {list:?}, {footer:?}"
+            );
+            assert!(footer.bottom() <= card.bottom() && card.bottom() - footer.bottom() <= px(6.0));
+            // A provider's flyout must not cover the entry or clip its models.
+            let provider = visual
+                .debug_bounds("conversation-provider-0")
+                .unwrap()
+                .center();
+            visual.simulate_mouse_move(provider, None, Default::default());
+            redraw(&mut visual);
+            assert!(
+                visual
+                    .debug_bounds("conversation-provider-model-0")
+                    .is_some()
+            );
+            assert_eq!(visual.debug_bounds("model-management"), Some(footer));
+            visual.simulate_click(footer.center(), Default::default());
+            redraw(&mut visual);
+            assert!(
+                window
+                    .read_with(&visual, |fixture, _| fixture.management_opened)
+                    .unwrap()
+            );
+            picker.read_with(&visual, |picker, _| assert!(!picker.is_open()));
+        }
+    }
+
+    #[gpui::test]
+    fn empty_catalog_shows_only_model_management_and_waits_for_its_click(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        for compact in [false, true] {
+            for no_agents in [false, true] {
+                let (window, picker) = setup(cx, compact, false);
+                let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+                picker.update(&mut visual, |picker, cx| {
+                    picker.test_native_catalog(vec![], cx);
+                    picker
+                        .provider_menu
+                        .view
+                        .as_mut()
+                        .unwrap()
+                        .providers
+                        .clear();
+                    if no_agents {
+                        picker.harnesses = Loadable::Ready(vec![]);
+                        picker.config = DraftConfig::default();
+                    }
+                    cx.notify();
+                });
+                redraw(&mut visual);
+                let trigger = visual.debug_bounds("picker-model").unwrap().center();
+                visual.simulate_click(trigger, Default::default());
+                redraw(&mut visual);
+                assert!(
+                    !window
+                        .read_with(&visual, |fixture, _| fixture.management_opened)
+                        .unwrap()
+                );
+                let card = visual.debug_bounds("model-picker-card").unwrap();
+                let footer = visual
+                    .debug_bounds("model-management")
+                    .expect("only model management");
+                assert!(
+                    card.size.height <= px(super::super::management::FOOTER_HEIGHT + 2.0),
+                    "{card:?}"
+                );
+                assert!(footer.top() >= card.top() && footer.bottom() <= card.bottom());
+                assert!(visual.debug_bounds("conversation-provider-list").is_none());
+                assert!(visual.debug_bounds("model-list-scroll-host").is_none());
+                visual.simulate_click(footer.center(), Default::default());
+                redraw(&mut visual);
+                assert!(
+                    window
+                        .read_with(&visual, |fixture, _| fixture.management_opened)
+                        .unwrap()
+                );
+            }
+        }
+    }
+
+    #[gpui::test]
+    fn empty_model_management_can_be_activated_with_enter(cx: &mut gpui::TestAppContext) {
+        let (window, picker) = setup(cx, true, false);
+        let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+        picker.update(&mut visual, |picker, cx| {
+            picker.test_native_catalog(vec![], cx)
+        });
+        redraw(&mut visual);
+        let trigger = visual.debug_bounds("picker-model").unwrap().center();
+        visual.simulate_click(trigger, Default::default());
+        redraw(&mut visual);
+        visual.simulate_keystrokes("enter");
+        redraw(&mut visual);
+        assert!(
+            window
+                .read_with(&visual, |fixture, _| fixture.management_opened)
+                .unwrap()
+        );
+    }
+
+    #[gpui::test]
+    fn scrolling_many_providers_keeps_management_visible(cx: &mut gpui::TestAppContext) {
+        for compact in [false, true] {
+            let (window, picker) = setup(cx, compact, false);
+            let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+            picker.update(&mut visual, |picker, cx| {
+                picker.test_native_catalog(
+                    (0..20)
+                        .map(|i| Model {
+                            id: format!("m{i}"),
+                            label: format!("Supplier {i} · Model {i}"),
+                            description: None,
+                            reasoning_levels: vec![],
+                            options: vec![],
+                        })
+                        .collect(),
+                    cx,
+                );
+                picker.provider_menu.view = Some(
+                    serde_json::from_value(serde_json::json!({
+                        "revision":"many", "providers": (0..20).map(|i| serde_json::json!({
+                            "id": format!("p{i}"), "label": format!("Supplier {i}"),
+                            "protocol":"openai-chat", "credential":{"kind":"none"},
+                            "models":[{"id":format!("m{i}"), "model":format!("Model {i}")}]
+                        })).collect::<Vec<_>>()
+                    }))
+                    .unwrap(),
+                );
+                cx.notify();
+            });
+            redraw(&mut visual);
+            let trigger = visual.debug_bounds("picker-model").unwrap().center();
+            visual.simulate_click(trigger, Default::default());
+            redraw(&mut visual);
+            let footer = visual.debug_bounds("model-management").unwrap();
+            picker.update(&mut visual, |picker, cx| {
+                picker
+                    .provider_menu
+                    .scroll
+                    .set_offset(gpui::point(px(0.0), px(-400.0)));
+                cx.notify();
+            });
+            redraw(&mut visual);
+            assert_eq!(visual.debug_bounds("model-management"), Some(footer));
+            let list = visual.debug_bounds("conversation-provider-list").unwrap();
+            assert!(list.bottom() <= footer.top());
+            visual.simulate_click(footer.center(), Default::default());
+            redraw(&mut visual);
+            assert!(
+                window
+                    .read_with(&visual, |fixture, _| fixture.management_opened)
+                    .unwrap()
+            );
+        }
+    }
+
+    #[gpui::test]
+    fn adding_the_first_model_updates_the_open_management_only_menu(cx: &mut gpui::TestAppContext) {
+        let (window, picker) = setup(cx, true, false);
+        let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+        let models = picker.read_with(&visual, |picker, _| {
+            picker.models[&HarnessId::Native].ready().unwrap().clone()
+        });
+        picker.update(&mut visual, |picker, cx| {
+            picker.test_native_catalog(vec![], cx)
+        });
+        redraw(&mut visual);
+        let trigger = visual.debug_bounds("picker-model").unwrap().center();
+        visual.simulate_click(trigger, Default::default());
+        redraw(&mut visual);
+        assert!(visual.debug_bounds("conversation-provider-list").is_none());
+        picker.update(&mut visual, |picker, cx| {
+            picker.test_native_catalog(models, cx)
+        });
+        redraw(&mut visual);
+        assert!(visual.debug_bounds("conversation-provider-list").is_some());
+        assert!(visual.debug_bounds("model-management").is_some());
+        picker.read_with(&visual, |picker, _| assert!(picker.is_open()));
     }
     #[gpui::test]
     fn conversation_chip_opens_provider_children_and_selects_on_both_sides(

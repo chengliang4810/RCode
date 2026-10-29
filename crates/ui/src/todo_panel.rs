@@ -2,9 +2,9 @@
 //!
 //! Every harness that plans (Claude's TodoWrite, OpenCode, ACP and Codex
 //! plans) emits the *whole* list on each update, so the panel simply tracks the
-//! latest `Todo` tool part of the selected chat. It sits in the same tray stack
-//! as the message queue (`queue.rs`), one step narrower, so the two read as one
-//! object emerging from behind the composer.
+//! latest `Todo` tool part of the selected chat. It attaches to the goal header
+//! when present, otherwise directly to the input, using the same layered
+//! surface and overlap as the goal header.
 //!
 //! The first half of this file is pure — which list is current, what the header
 //! says, which rows a long list folds to — so it is unit-tested without a
@@ -13,6 +13,7 @@
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::ops::Range;
+use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 use gpui::{
@@ -20,10 +21,13 @@ use gpui::{
     StatefulInteractiveElement as _, Styled, Window, div, prelude::*, px,
 };
 
-use rcode_doc::{MessagePart, MessageRole, SessionMessageEntry};
+use rcode_doc::{MessagePart, MessageRole, SessionMessageEntry, TranscriptBaseline};
 use rcode_proto::{TodoItem, TodoStatus, ToolCall};
 
-use crate::composer::{Composer, QUEUE_COMPOSER_OVERLAP};
+use crate::composer::{
+    Composer, ATTACHED_PANEL_HEIGHT, ATTACHED_PANEL_INSET, ATTACHED_PANEL_OVERLAP,
+    attached_panel_surface, clipped_composer_panel,
+};
 use crate::icons::{self, icon};
 use crate::motion::{self, AnimationExt as _};
 use crate::theme::Theme;
@@ -32,26 +36,72 @@ use crate::theme::Theme;
 pub(crate) const FOLD_ABOVE: usize = 6;
 pub(crate) const FOCUS_WINDOW: usize = 3;
 
-/// The checklist the agent most recently wrote, or `None` when there is none
-/// (or the latest write cleared it with an empty list).
+/// Keep the write's identity even when its list is empty or completed: these
+/// are lifecycle boundaries, not permission to rediscover an older checklist.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct TodoWrite {
+    entry: String,
+    part: String,
+    created_at: i64,
+    items: Vec<TodoItem>,
+}
+
+impl TodoWrite {
+    /// Render memoization only; dismissal itself uses the write identity.
+    fn fingerprint(&self) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        self.entry.hash(&mut hasher);
+        self.part.hash(&mut hasher);
+        self.created_at.hash(&mut hasher);
+        for item in &self.items {
+            item.text.hash(&mut hasher);
+            item.status().hash(&mut hasher);
+        }
+        hasher.finish()
+    }
+
+    fn same_write(&self, other: &Self) -> bool {
+        self.entry == other.entry && self.part == other.part
+    }
+
+    fn historical(&self, baseline: &TranscriptBaseline) -> bool {
+        baseline
+            .entries
+            .get(&self.entry)
+            .is_some_and(|parts| parts.contains_key(&self.part))
+    }
+
+    fn present_in(&self, entries: &[SessionMessageEntry]) -> bool {
+        entries.iter().any(|entry| {
+            entry.id == self.entry && entry.parts.iter().any(|part| part.id() == self.part)
+        })
+    }
+}
+
+/// The checklist the agent most recently wrote, including an explicit clear.
 ///
 /// `entries` is the selected chat's own transcript; subagent traffic lives in
 /// separate docs and never reaches it. ACP plans reuse one tool id for every
 /// update, so "latest part" — not "first part with this id" — is the contract.
-pub(crate) fn latest_todo(entries: &[SessionMessageEntry]) -> Option<Vec<TodoItem>> {
-    let items = entries
+fn latest_todo_write(entries: &[SessionMessageEntry]) -> Option<TodoWrite> {
+    entries
         .iter()
         .rev()
         .filter(|entry| entry.role == MessageRole::Assistant)
-        .flat_map(|entry| entry.parts.iter().rev())
-        .find_map(|part| match part {
+        .flat_map(|entry| entry.parts.iter().rev().map(move |part| (entry, part)))
+        .find_map(|(entry, part)| match part {
             MessagePart::Tool {
+                id,
                 call: ToolCall::Todo { items },
                 ..
-            } => Some(items),
+            } => Some(TodoWrite {
+                entry: entry.id.clone(),
+                part: id.clone(),
+                created_at: entry.created_at,
+                items: items.clone(),
+            }),
             _ => None,
-        })?;
-    (!items.is_empty()).then(|| items.clone())
+        })
 }
 
 /// What the collapsed header reports.
@@ -163,53 +213,132 @@ pub(crate) fn rows(items: &[TodoItem], show_earlier: bool, show_later: bool) -> 
     out
 }
 
-/// Identity of a finished list, so a dismissal holds until the agent writes a
-/// different one.
-fn signature(items: &[TodoItem]) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    for item in items {
-        item.text.hash(&mut hasher);
-        item.status().hash(&mut hasher);
-    }
-    hasher.finish()
-}
-
 /// Per-chat presentation state. In memory only — like the right-pane flags in
 /// `shell::SessionPanels` it lasts for the app run, not across restarts.
 #[derive(Debug, Default, Clone)]
 pub(crate) struct TodoPanelState {
-    /// The user's explicit choice; `None` follows the automatic rule: open
-    /// while work remains, compact once everything is done.
-    expanded: Option<bool>,
+    /// New panels start compact; only a user action expands them.
+    expanded: bool,
     show_earlier: bool,
     show_later: bool,
-    /// Signature of the list the user dismissed.
-    dismissed: Option<u64>,
-    /// Whether the previous frame was settled, to detect the transition.
-    was_settled: bool,
+    dismissed: bool,
+    /// The last accepted write, independent of the currently loaded history.
+    current: Option<TodoWrite>,
+    initialized: bool,
+    last_observed: Option<(Option<u64>, bool)>,
+    /// A weak watermark detects history refreshes without retaining a chat's
+    /// potentially large replay baseline after navigation.
+    baseline: Option<Weak<TranscriptBaseline>>,
     /// Bumped on every toggle so the list's fade-in replays.
     epoch: u32,
 }
 
 impl TodoPanelState {
-    /// Feed the frame's facts in. `settled` is "everything done and the turn
-    /// idle": reaching it drops any explicit choice, so the panel tidies itself
-    /// to the compact state exactly once — a later manual expand is respected.
-    pub fn observe(&mut self, settled: bool) {
-        if settled && !self.was_settled {
-            self.expanded = None;
+    /// Backfill must not create a panel, rewind its lifecycle, or undo a
+    /// dismissal. A later write may advance the panel, even with identical text.
+    pub fn observe(
+        &mut self,
+        candidate: Option<&TodoWrite>,
+        entries: &[SessionMessageEntry],
+        baseline: Option<&Arc<TranscriptBaseline>>,
+        has_older: bool,
+    ) {
+        let replay_changed = match (&self.baseline, baseline) {
+            (Some(old), Some(new)) => old.as_ptr() != Arc::as_ptr(new),
+            (None, Some(_)) => true,
+            _ => false,
+        };
+        self.baseline = baseline.map(Arc::downgrade);
+        // Window completeness only affects an absent candidate. Changing it
+        // must not reapply a historical write that was already rejected.
+        let observation = (
+            candidate.map(TodoWrite::fingerprint),
+            candidate.is_none() && has_older,
+        );
+        if self.last_observed == Some(observation) && !replay_changed {
+            return;
         }
-        self.was_settled = settled;
+        self.last_observed = Some(observation);
+        let Some(candidate) = candidate else {
+            self.initialized = true;
+            if !has_older && let Some(current) = &mut self.current {
+                current.items.clear();
+                self.expanded = false;
+            }
+            return;
+        };
+        let historical = baseline.is_some_and(|baseline| candidate.historical(baseline));
+        let mut fresh_panel = self.dismissed
+            || self.current.as_ref().is_none_or(|current| {
+                current.items.is_empty() || TodoSummary::of(&current.items).finished()
+            });
+        if self.initialized {
+            match &self.current {
+                None if historical => return,
+                Some(current) => {
+                    let retired =
+                        current.items.is_empty() || TodoSummary::of(&current.items).finished();
+                    let same_write = current.same_write(candidate);
+                    if same_write {
+                        if retired
+                            && replay_changed
+                            && historical
+                            && !TodoSummary::of(&candidate.items).finished()
+                        {
+                            return;
+                        }
+                        fresh_panel = retired;
+                    } else {
+                        let previous_present = current.present_in(entries);
+                        if !previous_present
+                            && (candidate.created_at < current.created_at
+                                || (historical && candidate.created_at <= current.created_at))
+                        {
+                            return;
+                        }
+                    }
+                    // Replaying another version of this same tool call cannot
+                    // undo its close button. A new write starts a new panel.
+                    if same_write && !retired {
+                        fresh_panel = false;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let different_write = self
+            .current
+            .as_ref()
+            .is_none_or(|current| !current.same_write(candidate));
+        if different_write || fresh_panel {
+            self.dismissed = false;
+        }
+        if fresh_panel {
+            self.expanded = false;
+            self.show_earlier = false;
+            self.show_later = false;
+        }
+        if self.current.as_ref() != Some(candidate) {
+            self.current = Some(candidate.clone());
+        }
+        self.initialized = true;
+        if candidate.items.is_empty() || TodoSummary::of(&candidate.items).finished() {
+            self.expanded = false;
+        }
     }
 
-    /// A finished list is compact by default even while a new turn runs, so
-    /// last turn's checklist does not pop open again each time you send.
-    pub fn is_expanded(&self, finished: bool) -> bool {
-        self.expanded.unwrap_or(!finished)
+    pub fn visible_items(&self) -> Option<&[TodoItem]> {
+        let items = &self.current.as_ref()?.items;
+        (!self.dismissed && !items.is_empty() && !TodoSummary::of(items).finished())
+            .then_some(items.as_slice())
     }
 
-    pub fn toggle(&mut self, finished: bool) {
-        self.expanded = Some(!self.is_expanded(finished));
+    pub fn is_expanded(&self) -> bool {
+        self.expanded
+    }
+
+    pub fn toggle(&mut self) {
+        self.expanded = !self.expanded;
         self.epoch = self.epoch.wrapping_add(1);
     }
 
@@ -220,15 +349,9 @@ impl TodoPanelState {
         }
     }
 
-    pub fn dismiss(&mut self, items: &[TodoItem]) {
-        self.dismissed = Some(signature(items));
-    }
-
-    /// A dismissal holds until the agent writes a different list. It covers
-    /// unfinished lists too: one the agent abandoned (an interrupted turn, a
-    /// cancelled item that never completes) must not stay pinned forever.
-    pub fn is_dismissed(&self, items: &[TodoItem]) -> bool {
-        self.dismissed == Some(signature(items))
+    pub fn dismiss(&mut self) {
+        self.dismissed = true;
+        self.expanded = false;
     }
 }
 
@@ -238,7 +361,7 @@ impl TodoPanelState {
 #[derive(Debug, Default)]
 pub(crate) struct TodoCache {
     key: Option<(String, u64, usize)>,
-    items: Option<Vec<TodoItem>>,
+    items: Option<TodoWrite>,
 }
 
 impl TodoCache {
@@ -247,13 +370,13 @@ impl TodoCache {
         chat: &str,
         revision: u64,
         entries: &[SessionMessageEntry],
-    ) -> Option<&[TodoItem]> {
+    ) -> Option<&TodoWrite> {
         let key = (chat.to_owned(), revision, entries.len());
         if self.key.as_ref() != Some(&key) {
-            self.items = latest_todo(entries);
+            self.items = latest_todo_write(entries);
             self.key = Some(key);
         }
-        self.items.as_deref()
+        self.items.as_ref()
     }
 }
 
@@ -261,59 +384,63 @@ impl TodoCache {
 // Rendering
 // ---------------------------------------------------------------------------
 
-const HEADER_HEIGHT: f32 = Theme::CONTROL_HEIGHT;
+const HEADER_HEIGHT: f32 = ATTACHED_PANEL_HEIGHT - ATTACHED_PANEL_OVERLAP - 2.0;
 const ROW_PAD_X: f32 = Theme::SPACE_SM;
 /// Rows sit in the queue tray's surface, so they share its concentric radius.
 const ROW_RADIUS: f32 = crate::queue::ROW_RADIUS;
 const GLYPH_SLOT: f32 = 14.0;
 const ACTION_SIZE: f32 = 24.0;
-/// One step narrower than the queue tray, which is itself inset from the
-/// composer; stacked above a queue the todo tray steps in once more.
-const SIDE_INSET: f32 = Theme::SPACE_LG;
-
 impl Composer {
     /// The checklist tray, hidden when absent, fully completed or dismissed.
-    /// `below_queue`: a queue tray follows.
     pub(crate) fn render_todo_panel(
         &mut self,
-        below_queue: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let live = self.run_live(cx);
         let has_goal = self.state.read(cx).goal.is_some();
-        let (chat_id, items) = {
+        let (chat_id, items, expanded, show_earlier, show_later, epoch) = {
             let state = self.state.read(cx);
             let chat_id = state.selected_chat.clone()?;
-            let items = self
-                .todo_cache
-                .latest(&chat_id, state.transcript_revision, &state.transcript)?
-                .to_vec();
-            (chat_id, items)
+            if !state.transcript_replayed {
+                return None;
+            }
+            let candidate =
+                self.todo_cache
+                    .latest(&chat_id, state.transcript_revision, &state.transcript);
+            let panel = self.todo_panels.entry(chat_id.clone()).or_default();
+            panel.observe(
+                candidate,
+                &state.transcript,
+                state.transcript_baseline(&chat_id),
+                state
+                    .transcript_windows
+                    .get(&chat_id)
+                    .is_some_and(|window| window.has_older),
+            );
+            let items = panel.visible_items()?.to_vec();
+            (
+                chat_id,
+                items,
+                panel.is_expanded(),
+                panel.show_earlier,
+                panel.show_later,
+                panel.epoch,
+            )
         };
         let summary = TodoSummary::of(&items);
-        if summary.finished() {
-            return None;
-        }
-        let settled = summary.finished() && !live;
-
-        let panel = self.todo_panels.entry(chat_id.clone()).or_default();
-        panel.observe(settled);
-        if panel.is_dismissed(&items) {
-            return None;
-        }
-        let expanded = panel.is_expanded(summary.finished());
-        let (show_earlier, show_later, epoch) = (panel.show_earlier, panel.show_later, panel.epoch);
 
         let theme = Theme::of(cx).clone();
         let view = cx.entity_id();
         // Dismissable whenever the turn is idle, finished or not.
         let header = self.todo_header(&chat_id, &items, summary, expanded, !live, &theme, cx);
 
-        let surface = crate::queue::queue_panel_surface(
-            &theme, cx.has_active_drag(), self.wallpaper_surface,
-        )
-            .when(has_goal, |surface| surface.pb(px(4.0)).rounded_b(px(crate::queue::PANEL_RADIUS)))
+        let surface = attached_panel_surface(&theme)
+            .when(!cx.has_active_drag(), |surface| surface.occlude())
+            .px(px(2.0))
+            .pb(px(ATTACHED_PANEL_OVERLAP))
+            .flex()
+            .flex_col()
             .child(header);
         let surface = if expanded {
             let list = div().flex().flex_col().children(
@@ -358,26 +485,15 @@ impl Composer {
             surface
         };
 
-        let inset = if below_queue {
-            SIDE_INSET * 2.0
-        } else {
-            SIDE_INSET
-        };
+        let inset = ATTACHED_PANEL_INSET * if has_goal { 2.0 } else { 1.0 };
         Some(
-            div()
-                .debug_selector(|| "todo-panel".into())
-                .mx(px(inset))
-                // Cancel the column gap and tuck the tray behind what follows
-                // (the queue tray, or the composer itself).
-                .mb(px(if has_goal { 0.0 } else { -(Theme::SPACE_SM + QUEUE_COMPOSER_OVERLAP) }))
-                .child(
-                    crate::frost::frosted(
-                        crate::queue::PANEL_RADIUS,
-                        crate::frost::MENU_BLUR,
-                        surface,
-                    ).with_wallpaper(self.wallpaper_surface),
-                )
-                .into_any_element(),
+            motion::fade_quick(
+                "composer-todo",
+                clipped_composer_panel(surface, ATTACHED_PANEL_OVERLAP)
+                    .debug_selector(|| "todo-panel".into())
+                    .mx(px(inset)),
+            )
+            .into_any_element(),
         )
     }
 
@@ -414,16 +530,16 @@ impl Composer {
                 .map(|ix| (items[ix].text.clone().into(), theme.text_muted))
         };
 
-        let finished = summary.finished();
         let toggle_chat = chat_id.to_owned();
         let toggle =
             div()
                 .id("todo-panel-toggle")
+                .debug_selector(|| "todo-panel-toggle".into())
                 .role(gpui::Role::Button)
                 .aria_label(label.clone())
                 .flex_1()
                 .min_w_0()
-                .h(crate::typography::ui_rems(HEADER_HEIGHT))
+                .h(px(HEADER_HEIGHT))
                 .px(px(ROW_PAD_X))
                 .rounded(px(ROW_RADIUS))
                 .flex()
@@ -437,7 +553,7 @@ impl Composer {
                     this.todo_panels
                         .entry(toggle_chat.clone())
                         .or_default()
-                        .toggle(finished);
+                        .toggle();
                     cx.notify();
                 }))
                 .tooltip(crate::settings::widgets::text_tooltip(label))
@@ -504,7 +620,6 @@ impl Composer {
                 );
 
         let dismiss_chat = chat_id.to_owned();
-        let dismiss_items = items.to_vec();
         div()
             .flex()
             .items_center()
@@ -533,7 +648,7 @@ impl Composer {
                             this.todo_panels
                                 .entry(dismiss_chat.clone())
                                 .or_default()
-                                .dismiss(&dismiss_items);
+                                .dismiss();
                             cx.notify();
                         }))
                         .tooltip(crate::settings::widgets::text_tooltip(
@@ -782,6 +897,29 @@ mod tests {
         }
     }
 
+    fn latest_todo(entries: &[SessionMessageEntry]) -> Option<Vec<TodoItem>> {
+        latest_todo_write(entries)
+            .map(|write| write.items)
+            .filter(|items| !items.is_empty())
+    }
+
+    fn write(id: &str, spec: &str, created_at: i64) -> SessionMessageEntry {
+        let mut entry = entry(MessageRole::Assistant, vec![todo_part(id, items(spec))]);
+        entry.id = format!("message-{id}");
+        entry.created_at = created_at;
+        entry
+    }
+
+    fn observe(
+        state: &mut TodoPanelState,
+        entries: &[SessionMessageEntry],
+        baseline: Option<&Arc<TranscriptBaseline>>,
+        has_older: bool,
+    ) {
+        let candidate = latest_todo_write(entries);
+        state.observe(candidate.as_ref(), entries, baseline, has_older);
+    }
+
     #[test]
     fn latest_todo_is_the_last_write_across_entries() {
         let first = entry(MessageRole::Assistant, vec![todo_part("a", items("x.."))]);
@@ -933,40 +1071,28 @@ mod tests {
     }
 
     #[test]
-    fn panel_follows_the_work_then_tidies_itself_once() {
+    fn new_work_starts_collapsed_and_progress_keeps_the_manual_choice() {
         let mut state = TodoPanelState::default();
-        // Working: open by default.
-        state.observe(false);
-        assert!(state.is_expanded(false));
-        // A finished list stays compact when a new turn starts (not settled,
-        // since the turn is live) instead of popping open again.
-        assert!(!state.is_expanded(true));
-        // User collapses mid-run: respected.
-        state.toggle(false);
-        state.observe(false);
-        assert!(!state.is_expanded(false));
-        // Everything done and idle: compact, and the explicit choice resets.
-        state.toggle(false); // user had re-expanded
-        assert!(state.is_expanded(false));
-        state.observe(true);
-        assert!(!state.is_expanded(true));
-        // Opening the finished list by hand sticks (no re-collapse each frame).
-        state.toggle(true);
-        state.observe(true);
-        assert!(state.is_expanded(true));
-        // New work arrives: back to the automatic open state...
-        state.observe(false);
-        assert!(state.is_expanded(false));
-        // ...and finishing again tidies again.
-        state.observe(true);
-        assert!(!state.is_expanded(true));
+        observe(&mut state, &[write("a", "...", 1)], None, false);
+        assert!(state.visible_items().is_some());
+        assert!(!state.is_expanded());
+        state.toggle();
+        observe(&mut state, &[write("a", "x>.", 1)], None, false);
+        assert!(state.is_expanded());
+        observe(&mut state, &[write("b", "xx>", 2)], None, false);
+        assert!(state.is_expanded());
+        observe(&mut state, &[write("c", "xxx", 3)], None, false);
+        assert!(state.visible_items().is_none());
+        observe(&mut state, &[write("d", "...", 4)], None, false);
+        assert!(state.visible_items().is_some());
+        assert!(!state.is_expanded());
     }
 
     #[test]
     fn toggle_replays_the_fade_and_folds_toggle_independently() {
         let mut state = TodoPanelState::default();
         let before = state.epoch;
-        state.toggle(false);
+        state.toggle();
         assert_ne!(state.epoch, before);
         state.toggle_fold(FoldSide::Later);
         assert!(state.show_later && !state.show_earlier);
@@ -975,21 +1101,97 @@ mod tests {
     }
 
     #[test]
-    fn dismissal_holds_only_for_the_list_it_was_made_on() {
-        let done = items("xxx");
+    fn dismissal_survives_changes_to_the_same_write_but_allows_new_writes() {
         let mut state = TodoPanelState::default();
-        assert!(!state.is_dismissed(&done));
-        state.dismiss(&done);
-        assert!(state.is_dismissed(&done));
-        // A changed list (reopened, or a new one) is shown again.
-        assert!(!state.is_dismissed(&items("xx.")));
-        assert!(!state.is_dismissed(&items("xxxx")));
-        // An abandoned list that will never finish (interrupted turn, a
-        // cancelled item) can be dismissed too, until the agent rewrites it.
-        let stuck = items("x..");
-        state.dismiss(&stuck);
-        assert!(state.is_dismissed(&stuck));
-        assert!(!state.is_dismissed(&items("xx.")));
+        observe(&mut state, &[write("a", "x..", 2)], None, false);
+        state.dismiss();
+        let replay = vec![write("a", "...", 2)];
+        let baseline = Arc::new(TranscriptBaseline::capture(&replay));
+        for _ in 0..3 {
+            observe(&mut state, &replay, Some(&baseline), true);
+            assert!(state.visible_items().is_none());
+        }
+        // A later tool invocation is new work even when its text is identical.
+        observe(&mut state, &[write("b", "x..", 3)], Some(&baseline), false);
+        assert_eq!(state.visible_items(), Some(items("x..").as_slice()));
+        assert!(!state.is_expanded());
+    }
+
+    #[test]
+    fn finished_and_cleared_lists_never_rewind_during_history_replay() {
+        for final_spec in ["xxx", ""] {
+            let mut state = TodoPanelState::default();
+            observe(&mut state, &[write("b", final_spec, 2)], None, false);
+            assert!(state.visible_items().is_none());
+            // A refresh can replay an older version of the same tool call.
+            let replay = vec![write("b", "x..", 2)];
+            let baseline = Arc::new(TranscriptBaseline::capture(&replay));
+            for _ in 0..3 {
+                observe(&mut state, &replay, Some(&baseline), true);
+                assert!(state.visible_items().is_none(), "{final_spec}");
+            }
+            observe(&mut state, &replay, Some(&baseline), false);
+            assert!(state.visible_items().is_none(), "{final_spec}");
+            // Or backfill can expose a different, older tool invocation.
+            let older = vec![write("a", "...", 1)];
+            let baseline = Arc::new(TranscriptBaseline::capture(&older));
+            for _ in 0..3 {
+                observe(&mut state, &older, Some(&baseline), true);
+                assert!(state.visible_items().is_none(), "{final_spec}");
+            }
+            observe(&mut state, &[write("c", "...", 3)], Some(&baseline), false);
+            assert!(state.visible_items().is_some());
+            assert!(!state.is_expanded());
+        }
+    }
+
+    #[test]
+    fn backfill_does_not_create_a_panel_when_the_initial_tail_had_none() {
+        let mut state = TodoPanelState::default();
+        observe(&mut state, &[], None, true);
+        let older = vec![write("a", "...", 1)];
+        let baseline = Arc::new(TranscriptBaseline::capture(&older));
+        for _ in 0..3 {
+            observe(&mut state, &older, Some(&baseline), true);
+            assert!(state.visible_items().is_none());
+        }
+        observe(&mut state, &[write("b", "...", 2)], Some(&baseline), true);
+        assert!(state.visible_items().is_some());
+    }
+
+    #[test]
+    fn loading_older_messages_keeps_current_work_and_its_expansion() {
+        let mut state = TodoPanelState::default();
+        let current = write("b", "x..", 2);
+        observe(&mut state, &[current.clone()], None, true);
+        state.toggle();
+        let replay = vec![write("a", "...", 1), current];
+        let baseline = Arc::new(TranscriptBaseline::capture(&replay));
+        observe(&mut state, &replay, Some(&baseline), false);
+        assert_eq!(state.visible_items(), Some(items("x..").as_slice()));
+        assert!(state.is_expanded());
+        // A partial window with no todo does not erase current work.
+        observe(&mut state, &[], Some(&baseline), true);
+        assert!(state.visible_items().is_some());
+        // A complete, empty transcript really does clear it.
+        observe(&mut state, &[], Some(&baseline), false);
+        assert!(state.visible_items().is_none());
+    }
+
+    #[test]
+    fn live_plan_can_start_new_work_after_finishing_with_the_same_tool_id() {
+        let mut state = TodoPanelState::default();
+        let finished = vec![write("plan", "xxx", 1)];
+        let baseline = Arc::new(TranscriptBaseline::capture(&finished));
+        observe(&mut state, &finished, Some(&baseline), false);
+        observe(
+            &mut state,
+            &[write("plan", "x..", 1)],
+            Some(&baseline),
+            false,
+        );
+        assert!(state.visible_items().is_some());
+        assert!(!state.is_expanded());
     }
 
     #[test]
@@ -999,14 +1201,29 @@ mod tests {
             MessageRole::Assistant,
             vec![todo_part("a", items("x."))],
         )];
-        assert_eq!(cache.latest("chat", 1, &one), Some(items("x.").as_slice()));
+        assert_eq!(
+            cache
+                .latest("chat", 1, &one)
+                .map(|write| write.items.as_slice()),
+            Some(items("x.").as_slice())
+        );
         // Same chat, revision and length: served from cache, not rescanned.
-        assert_eq!(cache.latest("chat", 1, &one), Some(items("x.").as_slice()));
+        assert_eq!(
+            cache
+                .latest("chat", 1, &one)
+                .map(|write| write.items.as_slice()),
+            Some(items("x.").as_slice())
+        );
         let two = vec![
             one[0].clone(),
             entry(MessageRole::Assistant, vec![todo_part("b", items("xx"))]),
         ];
-        assert_eq!(cache.latest("chat", 2, &two), Some(items("xx").as_slice()));
+        assert_eq!(
+            cache
+                .latest("chat", 2, &two)
+                .map(|write| write.items.as_slice()),
+            Some(items("xx").as_slice())
+        );
         // Another chat never reuses the first chat's list.
         assert_eq!(cache.latest("other", 2, &[]), None);
     }
@@ -1098,8 +1315,7 @@ mod composer_tests {
     ) {
         state.update(cx, |state, _| {
             state.selected_chat = Some(chat.into());
-            state.transcript = entries;
-            state.transcript_revision += 1;
+            state.apply_transcript(entries);
         });
         handle
             .update(cx, |composer, _, _| composer.current_key = chat.into())
@@ -1110,9 +1326,95 @@ mod composer_tests {
     fn rendered(handle: &gpui::WindowHandle<Composer>, cx: &mut gpui::TestAppContext) -> bool {
         handle
             .update(cx, |composer, window, cx| {
-                composer.render_todo_panel(false, window, cx).is_some()
+                composer.render_todo_panel(window, cx).is_some()
             })
             .unwrap()
+    }
+
+    fn replay(
+        state: &gpui::Entity<AppState>,
+        entries: Vec<SessionMessageEntry>,
+        cx: &mut gpui::TestAppContext,
+    ) {
+        state.update(cx, |state, cx| {
+            state
+                .receive_transcript_update(
+                    rcode_doc::TranscriptUpdate {
+                        replay_baseline: Some(TranscriptBaseline::capture(&entries)),
+                        frame: rcode_doc::TranscriptFrame::Reset { reset: entries },
+                        context_usage: None,
+                        goal: None,
+                    },
+                    cx,
+                )
+                .unwrap();
+        });
+    }
+
+    #[gpui::test]
+    fn removed_and_completed_trays_stay_hidden_on_repeated_history_updates(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        for dismissed in [true, false] {
+            let (_dir, state, handle) = window(cx);
+            show_todo(
+                &state,
+                &handle,
+                "a",
+                vec![assistant_with_todo(items(1, 3))],
+                cx,
+            );
+            assert!(rendered(&handle, cx));
+            if dismissed {
+                handle
+                    .update(cx, |composer, _, _| {
+                        composer.todo_panels.get_mut("a").unwrap().dismiss()
+                    })
+                    .unwrap();
+            } else {
+                show_todo(
+                    &state,
+                    &handle,
+                    "a",
+                    vec![assistant_with_todo(items(3, 3))],
+                    cx,
+                );
+            }
+            assert!(!rendered(&handle, cx));
+            replay(&state, vec![assistant_with_todo(items(0, 3))], cx);
+            for _ in 0..3 {
+                assert!(!rendered(&handle, cx));
+            }
+            // Navigation and another historical reset also preserve retirement.
+            show_todo(&state, &handle, "b", vec![], cx);
+            assert!(!rendered(&handle, cx));
+            state.update(cx, |state, _| state.selected_chat = Some("a".into()));
+            replay(&state, vec![assistant_with_todo(items(1, 3))], cx);
+            for _ in 0..3 {
+                assert!(!rendered(&handle, cx));
+            }
+            let mut new_work = assistant_with_todo(items(1, 3));
+            new_work.id = "new-message".into();
+            new_work.created_at = 1;
+            show_todo(&state, &handle, "a", vec![new_work], cx);
+            assert!(rendered(&handle, cx));
+            handle
+                .read_with(cx, |composer, _| {
+                    assert!(!composer.todo_panels["a"].is_expanded())
+                })
+                .unwrap();
+        }
+    }
+
+    #[gpui::test]
+    fn backfilled_checklist_does_not_mount_a_new_tray(cx: &mut gpui::TestAppContext) {
+        let (_dir, state, handle) = window(cx);
+        show_todo(&state, &handle, "a", vec![], cx);
+        assert!(!rendered(&handle, cx));
+        replay(&state, vec![assistant_with_todo(items(0, 3))], cx);
+        for _ in 0..3 {
+            assert!(!rendered(&handle, cx));
+        }
     }
 
     #[gpui::test]
@@ -1140,6 +1442,53 @@ mod composer_tests {
     }
 
     #[gpui::test]
+    fn new_tray_is_one_line_and_header_click_expands_it(cx: &mut gpui::TestAppContext) {
+        let (_dir, state, handle) = window(cx);
+        show_todo(
+            &state,
+            &handle,
+            "a",
+            vec![assistant_with_todo(items(0, 5))],
+            cx,
+        );
+        let mut visual = gpui::VisualTestContext::from_window(handle.into(), cx);
+        handle
+            .update(&mut visual, |composer, window, cx| {
+                window.resize(gpui::size(px(900.0), px(700.0)));
+                composer.set_available_width(900.0, cx);
+                cx.notify();
+            })
+            .unwrap();
+        visual.run_until_parked();
+        visual.executor().advance_clock(Duration::from_millis(500));
+        visual.run_until_parked();
+        let compact = visual
+            .debug_bounds("todo-panel")
+            .expect("collapsed todo header");
+        // The tray also reserves the strip hidden behind the input surface.
+        assert!(
+            compact.size.height <= px(ATTACHED_PANEL_HEIGHT),
+            "{compact:?}"
+        );
+        visual.simulate_click(compact.center(), Default::default());
+        visual.run_until_parked();
+        visual.executor().advance_clock(Duration::from_millis(500));
+        visual.run_until_parked();
+        let expanded = visual
+            .debug_bounds("todo-panel")
+            .expect("expanded todo tray");
+        assert!(
+            expanded.size.height > compact.size.height + px(40.0),
+            "{compact:?} -> {expanded:?}"
+        );
+        handle
+            .read_with(&visual, |composer, _| {
+                assert!(composer.todo_panels["a"].is_expanded())
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
     fn open_state_is_remembered_per_chat(cx: &mut gpui::TestAppContext) {
         let (_dir, state, handle) = window(cx);
         let entries = || vec![assistant_with_todo(items(1, 3))];
@@ -1147,7 +1496,8 @@ mod composer_tests {
         assert!(rendered(&handle, cx));
         handle
             .update(cx, |composer, _, _| {
-                composer.todo_panels.get_mut("a").unwrap().toggle(false);
+                assert!(!composer.todo_panels["a"].is_expanded());
+                composer.todo_panels.get_mut("a").unwrap().toggle();
             })
             .unwrap();
         // Another chat starts from the automatic state, and A keeps its choice.
@@ -1157,8 +1507,8 @@ mod composer_tests {
         assert!(rendered(&handle, cx));
         handle
             .read_with(cx, |composer, _| {
-                assert!(!composer.todo_panels["a"].is_expanded(false));
-                assert!(composer.todo_panels["b"].is_expanded(false));
+                assert!(composer.todo_panels["a"].is_expanded());
+                assert!(!composer.todo_panels["b"].is_expanded());
             })
             .unwrap();
     }

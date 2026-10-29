@@ -66,6 +66,7 @@ pickers-no-refs = No refs found.
 pickers-no-agents = No agents available
 pickers-no-agents-hint = Enable an agent in Settings → Providers.
 pickers-add-model = Add model
+pickers-manage-models = Manage models
 pickers-default = Default
 pickers-fast-mode = Fast mode
 pickers-reasoning-effort = Reasoning effort

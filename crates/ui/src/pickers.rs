@@ -14,6 +14,7 @@
 mod compact;
 mod effort;
 mod labels;
+mod management;
 mod providers;
 
 #[cfg(test)]
@@ -1665,11 +1666,6 @@ impl Pickers {
         if kind == PickerKind::Effort && self.compact_effort(cx).is_none() {
             return;
         }
-        if kind == PickerKind::HarnessModel && self.needs_model_setup(cx) {
-            self.dismiss(cx);
-            window.dispatch_action(Box::new(crate::shell::OpenProviderSettings), cx);
-            return;
-        }
         // A press that found this picker open closes it — the card's
         // `on_mouse_down_out` already began the close on that same press,
         // so by click time the popup reads as closed and a plain toggle
@@ -3071,11 +3067,20 @@ impl Pickers {
         }
     }
 
-    fn on_key_down(&mut self, event: &KeyDownEvent, _window: &Window, cx: &mut Context<Self>) {
+    fn on_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         self.cancel_setting_hover();
         // The frame stays mounted (and possibly focused) through the exit
         // animation — keys must not drive a dying popover.
         if !self.open.is_open() {
+            return;
+        }
+        if self.open_kind() == Some(PickerKind::HarnessModel) && self.model_management_only(cx) {
+            match event.keystroke.key.as_str() {
+                "enter" | "space" => self.open_model_management(window, cx),
+                "escape" => self.animate_close(cx),
+                _ => return,
+            }
+            cx.stop_propagation();
             return;
         }
         if self.open_kind() == Some(PickerKind::HarnessModel) && self.compact_model_picker(cx) {
@@ -3967,13 +3972,27 @@ impl Pickers {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = Theme::of(cx).for_popup();
+        let management = self.mounted_kind() == Some(PickerKind::HarnessModel);
+        let management_only = management && self.model_management_only(cx);
+        let footer_height = if management {
+            management::FOOTER_HEIGHT
+        } else {
+            0.0
+        };
+        let body_height = if self.provider_mode(cx) {
+            self.provider_menu_height(cx)
+        } else {
+            self.open_model_height
+        };
+        let height = if management_only {
+            footer_height + 2.0
+        } else {
+            body_height + footer_height
+        };
         popover::popover_card_flush(&theme)
+            .debug_selector(|| "model-picker-card".into())
             .w(px(width))
-            .h(px(self.menu_geometry().height.min(if self.provider_mode(cx) {
-                self.provider_menu_height(cx)
-            } else {
-                self.open_model_height
-            })))
+            .h(px(self.menu_geometry().height.min(height)))
             .when(self.compact_model_picker(cx) || self.mounted_kind() == Some(PickerKind::Effort), |el| {
                 el.h(px(self.compact_motion.frame_height))
             })
@@ -4013,7 +4032,12 @@ impl Pickers {
             )
             .flex()
             .flex_col()
-            .child(content)
+            .when(!management_only, |el| {
+                el.child(div().flex_1().min_h_0().child(content))
+            })
+            .when(management, |el| {
+                el.child(self.render_model_management(!management_only, cx))
+            })
             .into_any_element()
     }
 
@@ -4307,11 +4331,16 @@ impl Pickers {
     /// Model picker with harness tabs above a scoped search.
     /// Existing chats show only their own harness tab and models.
     fn render_harness_model_popover(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        if self.model_management_only(cx) {
+            return div().into_any_element();
+        }
         if self.provider_mode(cx) {
             return self.render_provider_popover(cx);
         }
         let compact = self.compact_model_picker(cx);
-        let height = self.menu_geometry().height.min(self.open_model_height);
+        let height = (self.menu_geometry().height - management::FOOTER_HEIGHT)
+            .max(0.0)
+            .min(self.open_model_height);
         let (list_height, tray_height) = model_menu_budgets(height, self.setting_groups(cx).len());
         let list_height = if compact {
             compact::compact_list_height(self.model_rows_len(cx))
@@ -4360,40 +4389,8 @@ impl Pickers {
         let query = self.search.read(cx).text().trim().to_string();
         let searching = !query.is_empty();
         let descriptors = self.rail_descriptors(cx);
-        // No-agents empty state: the catalog loaded but offers nothing
-        // runnable and there's no committed chat harness to force-include —
-        // guidance instead of an empty tab row. The shipped registry registers
-        // the built-in agent alone and that agent is always installed, so only
-        // a foreign or degraded catalog reaches this (the engine re-enables the
-        // lone runnable agent when a prefs file disables everything).
         if descriptors.is_empty() {
-            return div()
-                .p(px(16.0))
-                .flex()
-                .flex_col()
-                .items_center()
-                .gap(px(8.0))
-                .child(
-                    crate::icons::icon(crate::icons::TERMINAL)
-                        .size(px(20.0))
-                        .text_color(theme.text_muted),
-                )
-                .child(
-                    div()
-                        .text_size(crate::typography::ui_rems(13.0))
-                        .text_color(theme.text)
-                        .child(crate::l10n::localizer().text(TextKey::PickersNoAgents)),
-                )
-                .child(
-                    div()
-                        .text_size(crate::typography::ui_rems(12.0))
-                        .text_color(theme.text_muted)
-                        .text_center()
-                        .child(
-                            crate::l10n::localizer().text(TextKey::PickersNoAgentsHint),
-                        ),
-                )
-                .into_any_element();
+            return div().into_any_element();
         }
         let rows = self.model_rows(cx);
 
@@ -6209,10 +6206,10 @@ impl Render for Pickers {
             match &model_name {
                 ModelName::Named(label) => label.clone(),
                 ModelName::None { no_agents: true } => crate::l10n::localizer()
-                    .text(TextKey::PickersNoAgents)
+                    .text(TextKey::PickersManageModels)
                     .into(),
                 ModelName::None { .. } if self.needs_model_setup(cx) => crate::l10n::localizer()
-                    .text(TextKey::PickersAddModel)
+                    .text(TextKey::PickersManageModels)
                     .into(),
                 ModelName::Loading | ModelName::None { .. } => SharedString::default(),
             }
@@ -7111,7 +7108,8 @@ mod tests {
                 cx.update_window(handle.into(), |_, window, cx| window.draw(cx).clear())
                     .unwrap();
                 assert!(
-                    (f32::from(bounds.get().size.height) - available.min(model_menu_height(2)))
+                    (f32::from(bounds.get().size.height)
+                        - available.min(model_menu_height(2) + management::FOOTER_HEIGHT))
                         .abs()
                         < 0.1,
                     "settings={settings}, available={available}, bounds={:?}",
@@ -8096,10 +8094,10 @@ mod tests {
             cx.update_window(handle.into(), |_, window, cx| window.draw(cx).clear())
                 .unwrap();
             let parent = measured.get();
-            // The tray's first row, counted from the bottom: the footer
-            // sits at the tail, so "first" is one row above the lowest.
+            // The tray sits above the pinned management entry; its first
+            // setting is counted back from the last setting in that tray.
             let tray_rows = pickers.read_with(cx, |pickers, cx| pickers.setting_groups(cx).len());
-            let row_offset = popover::CARD_INSET
+            let row_offset = management::FOOTER_HEIGHT + popover::CARD_INSET
                 + 30.0 * (tray_rows.saturating_sub(1)) as f32
                 + popover::MENU_GAP
                 + 15.0;

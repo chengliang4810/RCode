@@ -44,10 +44,12 @@ use crate::state::{AppState, Indicator};
 use crate::theme::Theme;
 
 mod chip;
+mod attached;
 mod goal;
 mod staged_motion;
 pub use chip::ChipKind;
 use chip::*;
+pub(crate) use attached::clipped_composer_panel;
 pub(crate) use chip::{
     CHIP_PAD_FAMILY, ChipIcon, chip_icon, chip_pad_ranges, chip_text, paint_chip,
     text_chip_label_offset,
@@ -96,6 +98,20 @@ const QUEUE_SIDE_INSET: f32 = 16.0;
 /// The composer covers the tray's lower padding so the queue reads as emerging
 /// from behind it instead of as a separate rounded pill.
 pub(crate) const QUEUE_COMPOSER_OVERLAP: f32 = 18.0;
+/// Attached headers step inward by one inset; their lower strip is clipped.
+pub(crate) const ATTACHED_PANEL_INSET: f32 = 12.0;
+pub(crate) const ATTACHED_PANEL_OVERLAP: f32 = 12.0;
+pub(crate) const ATTACHED_PANEL_HEIGHT: f32 = 38.0;
+pub(crate) const ATTACHED_PANEL_RADIUS: f32 = 16.0;
+
+pub(crate) fn attached_panel_surface(theme: &Theme) -> gpui::Div {
+    div()
+        .rounded_t(px(ATTACHED_PANEL_RADIUS))
+        .border_1()
+        .border_color(theme.border)
+        .bg(theme.input_glass_bg())
+}
+
 /// The original floating selector rows use the same 20px chip height as the
 /// established-thread footer. Their surrounding rows own no plate or border.
 const NEW_THREAD_SELECTOR_ROW_HEIGHT: f32 = 20.0;
@@ -10238,25 +10254,19 @@ impl Render for Composer {
                 self.staged().len() + self.staged_appshots().len(),
                 self.staged_comments(cx).len(),
             );
-        // The checklist tray stacks above the queue (or directly above the
-        // composer), one step narrower than what follows it.
-        let has_queue = !self.state.read(cx).queue.is_empty();
+        // Todo, goal and input share one attached stack below the queue.
         let has_goal = self.state.read(cx).goal.is_some();
-        let container = container.when_some(
-            self.render_todo_panel(has_queue, window, cx),
-            |el, panel| el.child(motion::fade_quick("composer-todo", div().child(panel))),
-        );
+        let todo_panel = self.render_todo_panel(window, cx);
         let container = container.when_some(
             self.render_queue_panel(show_queue_latest_shortcut, window, cx),
             |el, panel| {
                 el.child(motion::fade_quick(
                     "composer-queue",
-                    div()
+                    clipped_composer_panel(panel, QUEUE_COMPOSER_OVERLAP)
                         .mx(px(QUEUE_SIDE_INSET))
-                        // Cancel the column gap, then tuck the tray one pixel
-                        // behind the composer painted after it.
-                        .mb(px(if has_goal { 0.0 } else { -(Theme::SPACE_SM + QUEUE_COMPOSER_OVERLAP) }))
-                        .child(panel),
+                        // Cancel the column gap; the hidden strip is clipped
+                        // rather than painted through the next glass surface.
+                        .mb(px(-(Theme::SPACE_SM + QUEUE_COMPOSER_OVERLAP))),
                 ))
             },
         );
@@ -10805,9 +10815,17 @@ impl Render for Composer {
                 .flex_none()
                 .flex()
                 .flex_col()
-                .when(has_goal, |stack| stack.pt(px(26.0)))
-                .children(self.render_goal_banner(&theme, cx))
-                .child(pill_surface),
+                .children(todo_panel)
+                .child(
+                    div()
+                        .relative()
+                        .flex_none()
+                        .flex()
+                        .flex_col()
+                        .when(has_goal, |stack| stack.pt(px(ATTACHED_PANEL_HEIGHT - ATTACHED_PANEL_OVERLAP)))
+                        .children(self.render_goal_banner(&theme, cx))
+                        .child(pill_surface),
+                ),
         );
 
         // The lower slot keeps a stable footprint for Git projects while its
@@ -11828,42 +11846,201 @@ mod tests {
     }
 
     #[gpui::test]
-    fn todo_and_goal_do_not_overlap_and_goal_is_attached_to_the_input(cx: &mut gpui::TestAppContext) {
+    fn attached_panel_clips_hidden_paint_and_pointer_hits(cx: &mut gpui::TestAppContext) {
+        use std::{cell::Cell, rc::Rc};
+        struct ClipFixture {
+            mask: Rc<Cell<Option<gpui::Bounds<gpui::Pixels>>>>,
+            clicks: usize,
+        }
+        impl Render for ClipFixture {
+            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                let mask = self.mask.clone();
+                div().size_full().child(
+                    clipped_composer_panel(
+                        div()
+                            .id("clip-source")
+                            .relative()
+                            .h(px(ATTACHED_PANEL_HEIGHT))
+                            .bg(gpui::white().opacity(0.35))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.clicks += 1;
+                                cx.notify();
+                            }))
+                            .child(
+                                gpui::canvas(|_, _, _| (), move |_, _, window, _| {
+                                    mask.set(Some(window.content_mask().bounds));
+                                })
+                                .absolute()
+                                .inset_0(),
+                            ),
+                        ATTACHED_PANEL_OVERLAP,
+                    )
+                    .w(px(180.0))
+                    .debug_selector(|| "clipped-panel".into()),
+                )
+            }
+        }
+        let mask = Rc::new(Cell::new(None));
+        let recorded = mask.clone();
+        let handle = cx.add_window(move |_, _| ClipFixture { mask: recorded, clicks: 0 });
+        let mut visual = gpui::VisualTestContext::from_window(handle.into(), cx);
+        visual.simulate_resize(gpui::size(px(220.0), px(120.0)));
+        visual.update(|window, cx| {
+            window.draw(cx).clear();
+            window.draw(cx).clear();
+        });
+        visual.run_until_parked();
+        let source = visual.debug_bounds("clipped-panel").unwrap();
+        assert_eq!(source.size.height, px(ATTACHED_PANEL_HEIGHT));
+        let visible = gpui::Bounds::new(source.origin, gpui::size(source.size.width,
+            source.size.height - px(ATTACHED_PANEL_OVERLAP)));
+        let painted = mask.get().expect("child paint mask");
+        assert_eq!(painted.bottom(), visible.bottom());
+        assert!(painted.top() <= visible.top());
+        assert!(painted.left() <= visible.left() && painted.right() >= visible.right());
+        let hidden = gpui::point(visible.center().x, visible.bottom() + px(6.0));
+        visual.simulate_click(hidden, Default::default());
+        visual.run_until_parked();
+        assert_eq!(handle.read_with(&visual, |fixture, _| fixture.clicks).unwrap(), 0);
+        visual.simulate_click(visible.center(), Default::default());
+        visual.run_until_parked();
+        assert_eq!(handle.read_with(&visual, |fixture, _| fixture.clicks).unwrap(), 1);
+    }
+
+    #[gpui::test]
+    fn todo_attaches_to_goal_or_input_with_and_without_a_queue(cx: &mut gpui::TestAppContext) {
         let (_dir, handle) = composer_focus_window(cx);
         let mut visual = gpui::VisualTestContext::from_window(handle.into(), cx);
         for width in [820.0, 390.0] {
-            handle.update(&mut visual, |composer, window, cx| {
-                window.resize(gpui::size(px(width), px(800.0)));
-                composer.set_available_width(width, cx);
-                composer.state.update(cx, |state, cx| {
-                    state.selected_chat = Some("layout-test".into());
-                    state.goal = Some(rcode_proto::goal::SessionGoal::new("goal".into(), "完成代码检查和异常测试".into(), 0).unwrap());
-                    let items: Vec<_> = (0..7).map(|ix| rcode_proto::TodoItem::new(format!("第 {} 项：检查代码路径和异常处理是否正确", ix + 1), match ix { 0 => rcode_proto::TodoStatus::Completed, 1 => rcode_proto::TodoStatus::InProgress, _ => rcode_proto::TodoStatus::Pending })).collect();
-                    let entry: SessionMessageEntry = serde_json::from_value(serde_json::json!({"id":"todo-entry","role":"assistant","deviceId":"test","createdAt":0,"parts":[{"kind":"tool","id":"todo","call":{"kind":"todo","items":items}}]})).unwrap();
-                    state.receive_transcript_frame(rcode_doc::TranscriptFrame::Reset { reset: vec![entry] }, cx).unwrap();
-                    cx.notify();
-                });
-            }).unwrap();
-            visual.run_until_parked();
-            visual.executor().advance_clock(std::time::Duration::from_millis(500));
-            visual.run_until_parked();
-            let todo = visual.debug_bounds("todo-panel").expect("todo panel");
-            let goal = visual.debug_bounds("composer-goal").expect("goal header");
-            let input = visual.debug_bounds("composer-surface").expect("input surface");
-            let toggle = visual.debug_bounds("goal-toggle").expect("toggle button");
-            let clear = visual.debug_bounds("goal-clear").expect("clear button");
-            let edit = visual.debug_bounds("goal-edit").expect("edit button");
-            let duration = visual.debug_bounds("goal-duration").expect("running time");
-            assert!(edit.left() >= toggle.right() && edit.right() <= goal.right());
-            assert!(edit.bottom() <= input.top());
-            assert!(duration.left() >= goal.left() && duration.right() <= clear.left());
-            assert!(toggle.left() >= goal.left() && clear.right() <= goal.right(), "goal actions outside header at {width}: {goal:?}, {toggle:?}, {clear:?}");
-            assert!(toggle.bottom() <= input.top(), "goal toggle clipped by input at {width}: {toggle:?}, {input:?}");
-            assert!(clear.bottom() <= input.top(), "goal clear clipped by input at {width}: {clear:?}, {input:?}");
-            assert!(todo.bottom() <= goal.top(), "todo overlaps goal at {width}: {todo:?}, {goal:?}");
-            assert!(goal.top() < input.top() && goal.bottom() > input.top(), "goal must meet the input border at {width}");
-            assert!((goal.bottom() - input.top() - px(12.0)).abs() <= px(1.0));
-            assert!(goal.left() > input.left() && goal.right() < input.right());
+            for has_goal in [true, false] {
+                for queued in [false, true] {
+                    handle.update(&mut visual, |composer, window, cx| {
+                        window.resize(gpui::size(px(width), px(800.0)));
+                        composer.set_available_width(width, cx);
+                        composer.state.update(cx, |state, cx| {
+                            state.selected_chat = Some("layout-test".into());
+                            state.goal = has_goal.then(|| {
+                                rcode_proto::goal::SessionGoal::new(
+                                    "goal".into(), "完成代码检查和异常测试".into(), 0,
+                                ).unwrap()
+                            });
+                            state.queue = if queued {
+                                vec![rcode_doc::QueuedMessage::new(
+                                    "queued", "继续检查排队的需求", "test",
+                                )]
+                            } else {
+                                vec![]
+                            };
+                            let items: Vec<_> = (0..7).map(|ix| {
+                                rcode_proto::TodoItem::new(
+                                    format!("第 {} 项：检查代码路径和异常处理是否正确", ix + 1),
+                                    match ix {
+                                        0 => rcode_proto::TodoStatus::Completed,
+                                        1 => rcode_proto::TodoStatus::InProgress,
+                                        _ => rcode_proto::TodoStatus::Pending,
+                                    },
+                                )
+                            }).collect();
+                            let entry: SessionMessageEntry = serde_json::from_value(serde_json::json!({
+                                "id":"todo-entry", "role":"assistant", "deviceId":"test", "createdAt":0,
+                                "parts":[{"kind":"tool","id":"todo","call":{"kind":"todo","items":items}}]
+                            })).unwrap();
+                            state.receive_transcript_frame(
+                                rcode_doc::TranscriptFrame::Reset { reset: vec![entry] }, cx,
+                            ).unwrap();
+                            cx.notify();
+                        });
+                    }).unwrap();
+                    visual.run_until_parked();
+                    visual
+                        .executor()
+                        .advance_clock(std::time::Duration::from_millis(500));
+                    visual.run_until_parked();
+                    for expanded in [false, true] {
+                        let open = handle
+                            .read_with(&visual, |composer, _| {
+                                composer.todo_panels["layout-test"].is_expanded()
+                            })
+                            .unwrap();
+                        if open != expanded {
+                            let header = visual.debug_bounds("todo-panel-toggle").unwrap();
+                            visual.simulate_click(header.center(), Default::default());
+                        }
+                        visual.run_until_parked();
+                        visual
+                            .executor()
+                            .advance_clock(std::time::Duration::from_millis(500));
+                        visual.run_until_parked();
+                        let todo = visual.debug_bounds("todo-panel").expect("todo panel");
+                        let input = visual
+                            .debug_bounds("composer-surface")
+                            .expect("input surface");
+                        let header = visual
+                            .debug_bounds("todo-panel-toggle")
+                            .expect("todo header");
+                        let target = if has_goal {
+                            visual.debug_bounds("composer-goal").expect("goal header")
+                        } else {
+                            input
+                        };
+                        assert!(todo.top() < target.top());
+                        assert!(
+                            (todo.bottom() - target.top() - px(ATTACHED_PANEL_OVERLAP)).abs()
+                                <= px(1.0),
+                            "todo must attach at width={width}, goal={has_goal}, queue={queued}, expanded={expanded}: {todo:?}, {target:?}"
+                        );
+                        assert!(
+                            (todo.left() - target.left() - px(ATTACHED_PANEL_INSET)).abs()
+                                <= px(1.0)
+                        );
+                        assert!(
+                            (target.right() - todo.right() - px(ATTACHED_PANEL_INSET)).abs()
+                                <= px(1.0)
+                        );
+                        assert!(
+                            header.bottom() <= target.top(),
+                            "target covered the todo controls"
+                        );
+                        assert!(header.left() >= todo.left() && header.right() <= todo.right());
+                        if has_goal {
+                            let goal = target;
+                            let toggle = visual.debug_bounds("goal-toggle").expect("toggle button");
+                            let clear = visual.debug_bounds("goal-clear").expect("clear button");
+                            let edit = visual.debug_bounds("goal-edit").expect("edit button");
+                            let duration =
+                                visual.debug_bounds("goal-duration").expect("running time");
+                            assert!(edit.left() >= toggle.right() && edit.right() <= goal.right());
+                            assert!(edit.bottom() <= input.top());
+                            assert!(
+                                duration.left() >= goal.left() && duration.right() <= clear.left()
+                            );
+                            assert!(
+                                toggle.left() >= goal.left() && clear.right() <= goal.right(),
+                                "goal actions outside header at {width}: {goal:?}, {toggle:?}, {clear:?}"
+                            );
+                            assert!(
+                                toggle.bottom() <= input.top(),
+                                "goal toggle clipped by input at {width}: {toggle:?}, {input:?}"
+                            );
+                            assert!(
+                                clear.bottom() <= input.top(),
+                                "goal clear clipped by input at {width}: {clear:?}, {input:?}"
+                            );
+                            assert!(
+                                goal.top() < input.top() && goal.bottom() > input.top(),
+                                "goal must meet the input border at {width}"
+                            );
+                            assert!(
+                                (goal.bottom() - input.top() - px(ATTACHED_PANEL_OVERLAP)).abs()
+                                    <= px(1.0)
+                            );
+                            assert!(goal.left() > input.left() && goal.right() < input.right());
+                        } else {
+                            assert!(visual.debug_bounds("composer-goal").is_none());
+                        }
+                    }
+                }
+            }
         }
     }
 

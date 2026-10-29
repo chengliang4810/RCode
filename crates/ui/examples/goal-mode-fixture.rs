@@ -75,10 +75,24 @@ fn main() -> anyhow::Result<()> {
     let temp = tempfile::tempdir()?;
     let runtime = tokio::runtime::Runtime::new()?;
     let _runtime_guard = runtime.enter();
+    let engine_data = temp.path().join("engine");
+    std::fs::create_dir_all(&engine_data)?;
+    // Use the shipped native registry and an isolated, synthetic model catalog.
+    // The mock-only registry is filtered out of the normal model picker, which
+    // would otherwise put an impossible "no agents" state in these screenshots.
+    // No run is submitted; this endpoint never contacts an external provider.
+    std::fs::write(engine_data.join("providers.json"), serde_json::json!({
+        "providers": [{
+            "id": "visual-qa", "label": "本地测试", "protocol": "open_ai_chat",
+            "baseUrl": "http://127.0.0.1:9/v1", "apiKey": "fixture-only",
+            "models": [{"id": "visual-qa-model", "model": "visual-qa-model", "label": "QA 模型", "contextWindow": 200000}]
+        }],
+        "defaultModel": "visual-qa-model"
+    }).to_string())?;
     let core = runtime.block_on(async {
         rcode_engine::EngineCore::assemble(
-            &temp.path().join("engine"),
-            Arc::new(rcode_engine::default_registry()),
+            &engine_data,
+            Arc::new(rcode_engine::registry_with_native(&engine_data)),
             rcode_proto::HarnessId::Native,
             None,
         )

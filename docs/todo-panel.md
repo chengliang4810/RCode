@@ -9,8 +9,9 @@ shows what is being worked on without scrolling.
 ## Data
 
 Native Agent's `TodoWrite` tool supplies the full checklist on each update.
-The event adapter emits `ToolCall::Todo`; the transcript fold and `latest_todo`
-projection select the most recent list. An empty list clears the panel.
+The event adapter emits `ToolCall::Todo`; the transcript fold and `latest_todo_write`
+projection select the most recent list and retain its message/tool identity.
+Empty and completed writes remain lifecycle boundaries even while the tray is hidden.
 
 `TodoItem` is `{ text, done, status? }` (`crates/proto/src/agent.rs`). Completion
 uses `done`; `status` carries the in-progress state when present. Missing or
@@ -19,13 +20,18 @@ consistent, and `item.status()` returns the effective state.
 
 ## Behaviour
 
-`crates/ui/src/todo_panel.rs`, mounted by the composer above the queue tray (one
-step narrower than it, which is itself narrower than the composer).
+`crates/ui/src/todo_panel.rs`, mounted in the composer's attached surface stack.
+When a goal exists, the todo tray attaches to its top edge; otherwise it attaches
+directly to the input. Each layer steps inward by 12px and clips its lower 12px,
+sharing the goal header's rounded top, border and background. Hidden strips do
+not paint through the next translucent surface. The queue remains above this
+stack, so it cannot separate a todo tray from its goal.
 
 - **Scope.** Todo parts of the chat's own transcript only. Subagent traffic lives
   in separate docs and never reaches it. Hidden when the chat has no todo.
-- **Collapsed.** `Todo · 2/5` plus the in-progress item (else the first unfinished
-  one); a finished list reads `Todo · 5/5 · All done`.
+- **Collapsed by default.** A new checklist starts with the single-line header:
+  `Todo · 2/5` plus the in-progress item (else the first unfinished one). Click
+  the header to expand it.
 - **Expanded.** Every item, in the agent's order, with a status glyph: check
   (success), spinner (in progress and the turn is live; a still ring when idle, so a
   stopped run does not look busy), empty ring (pending). Completed items recede,
@@ -35,13 +41,17 @@ step narrower than it, which is itself narrower than the composer).
   last three). `N earlier` / `N later` rows at the edges reveal the hidden items in
   place and hide them again. Items are never reordered (`todo_panel::rows`).
 - **Open state.** Per chat, in memory for the app run (like the right-pane flags in
-  `shell::SessionPanels`; the repo keeps no per-chat UI state on disk). Default:
-  open while work remains, compact once everything is done, including when a new
-  turn starts on an old finished list. When the last item completes and the turn
-  is idle, an explicit choice is reset once so the panel tidies itself to the
-  compact done state; opening it by hand afterwards sticks.
-- **Done state.** Offers a dismiss button; a dismissal holds until the agent writes
-  a different list.
+  `shell::SessionPanels`; the repo keeps no per-chat UI state on disk). A manual
+  expansion survives progress updates and chat navigation. A checklist created
+  after dismissal, completion or clearing starts collapsed again.
+- **Removal.** An idle checklist offers a dismiss button. Completing every item
+  or writing an empty list hides it automatically. The panel retains the last
+  accepted write and its dismissal/completion state, independently of the loaded
+  history window. Historical replay cannot undo that state or expose an older
+  checklist in its place. If the initial transcript tail has no checklist,
+  loading older history does not create one. A genuinely later tool invocation
+  can show new work, even when its text matches a dismissed checklist. Live plan
+  updates that reuse a tool ID can start new work after completion as well.
 - **No focus stealing.** Nothing here takes focus; updates only re-render.
 - **Accessibility.** The header, dismiss and fold rows are buttons with
   `aria_label`, tab stops and a focus ring, activated by Enter/Space. The icon-only
@@ -59,7 +69,10 @@ the current item `[~]` (`[x]` done, `[ ]` pending).
 The composer re-renders far more often than the transcript changes, so
 `TodoCache` rescans only when the selected chat, `transcript_revision` or the
 transcript length changes. The scan walks back from the newest entry and stops at
-the first todo.
+the first todo. Per-chat presentation state retains only the current checklist;
+a weak reference to the existing transcript replay baseline distinguishes a
+historical refresh from an ordinary live update without retaining the full
+history. Repeated renders of the same candidate do not reapply a rejected replay.
 
 ## Testing
 

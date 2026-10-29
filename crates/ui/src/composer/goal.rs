@@ -102,135 +102,134 @@ impl Composer {
                         .text_color(theme.text_muted),
                 )
         };
-        Some(
-            div()
-                .id("composer-goal")
-                .debug_selector(|| "composer-goal".into())
-                .absolute()
-                .top_0()
-                .left(px(12.0))
-                .right(px(12.0))
-                .h(px(38.0))
-                .flex()
-                .items_center()
-                .gap(px(6.0))
-                .px(px(10.0))
-                .pb(px(10.0))
-                .rounded_t(px(16.0))
-                .border_1()
-                .border_color(theme.border)
-                .bg(theme.input_glass_bg())
-                .text_size(crate::typography::ui_rems(12.0))
-                .text_color(theme.text)
-                .child(
-                    crate::icons::icon(crate::icons::GOAL)
-                        .size(px(13.0))
-                        .text_color(theme.text_muted),
+        let banner = attached_panel_surface(theme)
+            .id("composer-goal-surface")
+            .h(px(ATTACHED_PANEL_HEIGHT))
+            .flex()
+            .items_center()
+            .gap(px(6.0))
+            .px(px(10.0))
+            .pb(px(ATTACHED_PANEL_OVERLAP))
+            .text_size(crate::typography::ui_rems(12.0))
+            .text_color(theme.text)
+            .child(
+                crate::icons::icon(crate::icons::GOAL)
+                    .size(px(13.0))
+                    .text_color(theme.text_muted),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .child(status),
+            )
+            .child(
+                div()
+                    .id("goal-objective")
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .child(goal.objective.clone())
+                    .tooltip(crate::settings::widgets::text_tooltip(format!(
+                        "{} · {iteration}",
+                        goal.objective
+                    ))),
+            )
+            .child(
+                div()
+                    .id("goal-duration")
+                    .debug_selector(|| "goal-duration".into())
+                    .flex_none()
+                    .text_color(theme.text_muted)
+                    .child(format!("· {duration}")),
+            )
+            .child(
+                button(
+                    "goal-clear",
+                    localizer.text(TextKey::ConversationGoalClear),
+                    crate::icons::TRASH_BIN_MINIMALISTIC,
                 )
-                .child(
-                    div()
-                        .flex_none()
-                        .font_weight(gpui::FontWeight::MEDIUM)
-                        .child(status),
-                )
-                .child(
-                    div()
-                        .id("goal-objective")
-                        .flex_1()
-                        .min_w_0()
-                        .truncate()
-                        .child(goal.objective.clone())
-                        .tooltip(crate::settings::widgets::text_tooltip(format!(
-                            "{} · {iteration}",
-                            goal.objective
-                        ))),
-                )
-                .child(
-                    div()
-                        .id("goal-duration")
-                        .debug_selector(|| "goal-duration".into())
-                        .flex_none()
-                        .text_color(theme.text_muted)
-                        .child(format!("· {duration}")),
-                )
-                .child(
+                .on_click(cx.listener(|this, _, _, cx| this.update_goal("clear", cx)))
+                .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                    if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                        cx.stop_propagation();
+                        this.update_goal("clear", cx);
+                    }
+                }))
+                .on_a11y_action(
+                    gpui::AccessibleAction::Click,
+                    move |_, _, cx| {
+                        clear_view
+                            .update(cx, |this, cx| this.update_goal("clear", cx))
+                            .ok();
+                    },
+                ),
+            )
+            .when(goal.status != GoalStatus::Complete, |row| {
+                row.child(
                     button(
-                        "goal-clear",
-                        localizer.text(TextKey::ConversationGoalClear),
-                        crate::icons::TRASH_BIN_MINIMALISTIC,
+                        "goal-toggle",
+                        label,
+                        if action == "pause" {
+                            crate::icons::STOP
+                        } else {
+                            crate::icons::ACTION_PLAY
+                        },
                     )
-                    .on_click(cx.listener(|this, _, _, cx| this.update_goal("clear", cx)))
-                    .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                    .on_click(cx.listener(move |this, _, _, cx| this.update_goal(action, cx)))
+                    .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
                         if matches!(event.keystroke.key.as_str(), "enter" | "space") {
                             cx.stop_propagation();
-                            this.update_goal("clear", cx);
+                            this.update_goal(action, cx);
                         }
                     }))
                     .on_a11y_action(
                         gpui::AccessibleAction::Click,
                         move |_, _, cx| {
-                            clear_view
-                                .update(cx, |this, cx| this.update_goal("clear", cx))
+                            toggle_view
+                                .update(cx, |this, cx| this.update_goal(action, cx))
                                 .ok();
                         },
                     ),
                 )
-                .when(goal.status != GoalStatus::Complete, |row| {
-                    row.child(
-                        button(
-                            "goal-toggle",
-                            label,
-                            if action == "pause" {
-                                crate::icons::STOP
-                            } else {
-                                crate::icons::ACTION_PLAY
-                            },
-                        )
-                        .on_click(cx.listener(move |this, _, _, cx| this.update_goal(action, cx)))
-                        .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
-                            if matches!(event.keystroke.key.as_str(), "enter" | "space") {
-                                cx.stop_propagation();
-                                this.update_goal(action, cx);
-                            }
-                        }))
-                        .on_a11y_action(
-                            gpui::AccessibleAction::Click,
-                            move |_, _, cx| {
-                                toggle_view
-                                    .update(cx, |this, cx| this.update_goal(action, cx))
-                                    .ok();
-                            },
-                        ),
-                    )
-                })
-                .child(
-                    button(
-                        "goal-edit",
-                        localizer.text(TextKey::ConversationGoalEdit),
-                        crate::icons::EXPAND_ARROWS,
-                    )
-                    .on_click(cx.listener(|_, _, _, cx| cx.emit(ComposerEvent::OpenGoal)))
-                    .on_key_down(cx.listener(|_, event: &KeyDownEvent, _, cx| {
-                        if matches!(event.keystroke.key.as_str(), "enter" | "space") {
-                            cx.stop_propagation();
-                            cx.emit(ComposerEvent::OpenGoal);
-                        }
-                    }))
-                    .on_a11y_action(gpui::AccessibleAction::Click, {
-                        let view = cx.entity().downgrade();
-                        move |_, _, cx| {
-                            view.update(cx, |_, cx| cx.emit(ComposerEvent::OpenGoal))
-                                .ok();
-                        }
-                    }),
+            })
+            .child(
+                button(
+                    "goal-edit",
+                    localizer.text(TextKey::ConversationGoalEdit),
+                    crate::icons::EXPAND_ARROWS,
                 )
-                .when(goal.status == GoalStatus::Paused, |row| {
-                    if let Some(reason) = goal.reason.filter(|reason| !reason.is_empty()) {
-                        row.tooltip(crate::settings::widgets::text_tooltip(reason))
-                    } else {
-                        row
+                .on_click(cx.listener(|_, _, _, cx| cx.emit(ComposerEvent::OpenGoal)))
+                .on_key_down(cx.listener(|_, event: &KeyDownEvent, _, cx| {
+                    if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                        cx.stop_propagation();
+                        cx.emit(ComposerEvent::OpenGoal);
                     }
-                })
+                }))
+                .on_a11y_action(gpui::AccessibleAction::Click, {
+                    let view = cx.entity().downgrade();
+                    move |_, _, cx| {
+                        view.update(cx, |_, cx| cx.emit(ComposerEvent::OpenGoal))
+                            .ok();
+                    }
+                }),
+            )
+            .when(goal.status == GoalStatus::Paused, |row| {
+                if let Some(reason) = goal.reason.filter(|reason| !reason.is_empty()) {
+                    row.tooltip(crate::settings::widgets::text_tooltip(reason))
+                } else {
+                    row
+                }
+            });
+        Some(
+            clipped_composer_panel(banner, ATTACHED_PANEL_OVERLAP)
+                .id("composer-goal")
+                .debug_selector(|| "composer-goal".into())
+                .absolute()
+                .top_0()
+                .left(px(ATTACHED_PANEL_INSET))
+                .right(px(ATTACHED_PANEL_INSET))
+                .h(px(ATTACHED_PANEL_HEIGHT))
                 .into_any_element(),
         )
     }
@@ -245,7 +244,16 @@ impl Composer {
         self.update_goal(action, cx);
     }
     pub fn fixture_todo_visible(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        self.render_todo_panel(false, window, cx).is_some()
+        self.render_todo_panel(window, cx).is_some()
+    }
+    pub fn fixture_todo_expanded(&mut self, expanded: bool, cx: &mut Context<Self>) {
+        if let Some(panel) = self.state.read(cx).selected_chat.as_ref()
+            .and_then(|chat| self.todo_panels.get_mut(chat))
+            && panel.is_expanded() != expanded
+        {
+            panel.toggle();
+            cx.notify();
+        }
     }
 }
 

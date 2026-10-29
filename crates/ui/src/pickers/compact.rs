@@ -528,7 +528,7 @@ impl Pickers {
                 .text(TextKey::AuditModelsLoading)
                 .into(),
             ModelName::None { no_agents: true } => crate::l10n::localizer()
-                .text(TextKey::AuditModelsNoAgents)
+                .text(TextKey::PickersManageModels)
                 .into(),
             ModelName::None { .. } => crate::l10n::localizer()
                 .text(TextKey::AuditModelsSelect)
@@ -689,7 +689,12 @@ impl Pickers {
         } else {
             CompactPage::Panel
         };
-        let target = self.menu_geometry().height.min(match page {
+        let footer_height = if self.mounted_kind() == Some(PickerKind::HarnessModel) {
+            management::FOOTER_HEIGHT
+        } else {
+            0.0
+        };
+        let content_height = match page {
             CompactPage::Models => {
                 if self.provider_mode(cx) {
                     self.provider_menu_height(cx)
@@ -698,6 +703,11 @@ impl Pickers {
                 }
             }
             CompactPage::Panel => panel_height,
+        };
+        let target = self.menu_geometry().height.min(if self.model_management_only(cx) {
+            footer_height + CARD_BORDERS
+        } else {
+            content_height + footer_height
         });
         let (height, moving) = ScalarTransition::sample(
             &mut self.compact_motion.height,
@@ -734,7 +744,7 @@ impl Pickers {
         // The new page fades in while the card resizes to it: the swap
         // never shows at full strength and nothing slides sideways against
         // the vertical resize. Initial opening uses the popover entrance.
-        let content = div().opacity(reveal).child(content).into_any_element();
+        let content = div().size_full().opacity(reveal).child(content).into_any_element();
         self.popover_frame_flush(COMPACT_WIDTH, content, cx)
     }
 
@@ -818,7 +828,7 @@ impl Pickers {
         let name = self.model_name(cx);
         let label = if self.needs_model_setup(cx) && self.effective_model_id(cx).is_none() {
             crate::l10n::localizer()
-                .text(TextKey::PickersAddModel)
+                .text(TextKey::PickersManageModels)
                 .into()
         } else {
             Self::compact_title_text(&name)
