@@ -43,7 +43,7 @@ runs:
         $cargoHome = if ($env:CARGO_HOME) { $env:CARGO_HOME } else { Join-Path $env:USERPROFILE '.cargo' }
         Add-Content -LiteralPath (Join-Path $cargoHome 'config.toml') -Value $config
         Write-Host "opt-level 0 for $($members.Count) workspace crates: $($members -join ', ')"
-    - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+    - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       with:
         # Only main writes the cache; PRs restore it.
         save-if: ${{ github.ref == 'refs/heads/main' }}
